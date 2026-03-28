@@ -198,6 +198,21 @@ class Scanner:
 
         signals = filtered_long + filtered_short
 
+        # ── Deduplicate signals by (signal_type, entry_price) ─
+        # Keeps only the first signal per unique type+entry combo
+        # prevents duplicate emails when same setup fires from
+        # slightly different SL levels
+        seen_combos = {}
+        deduped = []
+        for sig in signals:
+            key = (sig["signal_type"], round(sig["entry_price"], 2))
+            if key not in seen_combos:
+                seen_combos[key] = True
+                deduped.append(sig)
+            else:
+                log.info(f"DUPLICATE SIGNAL filtered: {sig['signal_type']} @ ${sig['entry_price']:.2f} — already queued.")
+        signals = deduped
+
         # ── Process signals ──────────────────────────────
         for signal in signals:
             setup_id = signal["setup_id"]
