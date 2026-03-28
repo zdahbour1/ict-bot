@@ -1,0 +1,123 @@
+// ============================================================
+// ICT Scalping Strategy — QQQ
+// Based on ICT Scalping PDF (Long + Short)
+// ============================================================
+//@version=5
+strategy("ICT Scalping Strategy - QQQ",
+     overlay=true,
+     default_qty_type=strategy.fixed,
+     default_qty_value=1,
+     initial_capital=10000,
+     commission_type=strategy.commission.cash_per_order,
+     commission_value=1.30)
+
+// ── Inputs ───────────────────────────────────────────────
+tpPct       = input.float(0.45, "TP % on QQQ", minval=0.1, step=0.05) / 100
+slPct       = input.float(0.27, "SL % on QQQ", minval=0.1, step=0.05) / 100
+tradeStartH = input.int(10, "Trade Start Hour (ET)", minval=6, maxval=20)
+tradeEndH   = input.int(15, "Trade End Hour (ET)",   minval=6, maxval=20)
+bodyMult    = input.float(1.2, "Displacement Body Multiplier", minval=0.5, step=0.1)
+lookbackBar = input.int(20,   "Lookback Bars", minval=5, maxval=50)
+raidThresh  = input.float(0.05, "Raid Threshold $", minval=0.01, step=0.01)
+fvgMin      = input.float(0.10, "Min FVG Size $",   minval=0.01, step=0.01)
+showLevels  = input.bool(true, "Show Key Levels")
+
+// ── Time Filter ──────────────────────────────────────────
+isTradeHour = hour >= tradeStartH and hour < tradeEndH
+isWeekday   = dayofweek != dayofweek.saturday and dayofweek != dayofweek.sunday
+inWindow    = isTradeHour and isWeekday
+
+// ── Key Levels ───────────────────────────────────────────
+pdh    = request.security(syminfo.tickerid, "D",   high[1], lookahead=barmerge.lookahead_on)
+pdl    = request.security(syminfo.tickerid, "D",   low[1],  lookahead=barmerge.lookahead_on)
+h1High = request.security(syminfo.tickerid, "60",  high[1], lookahead=barmerge.lookahead_on)
+h1Low  = request.security(syminfo.tickerid, "60",  low[1],  lookahead=barmerge.lookahead_on)
+h4High = request.security(syminfo.tickerid, "240", high[1], lookahead=barmerge.lookahead_on)
+h4Low  = request.security(syminfo.tickerid, "240", low[1],  lookahead=barmerge.lookahead_on)
+
+// ── Median Body ──────────────────────────────────────────
+medBody() =>
+    sum = 0.0
+    for i = 1 to lookbackBar
+        sum += math.abs(close[i] - open[i])
+    sum / lookbackBar
+
+// ── Displacement Candles ─────────────────────────────────
+bullDisplace() =>
+    body = close - open
+    med  = medBody()
+    rng  = high - low
+    cond1 = body > 0
+    cond2 = med > 0
+    cond3 = body >= bodyMult * med
+    cond4 = rng > 0
+    cond5 = (close - low) / rng >= 0.5
+    cond1 and cond2 and cond3 and cond4 and cond5
+
+bearDisplace() =>
+    body = open - close
+    med  = medBody()
+    rng  = high - low
+    cond1 = body > 0
+    cond2 = med > 0
+    cond3 = body >= bodyMult * med
+    cond4 = rng > 0
+    cond5 = (high - close) / rng >= 0.5
+    cond1 and cond2 and cond3 and cond4 and cond5
+
+// ── Raid Detection ───────────────────────────────────────
+longRaid(lvl) =>
+    low[1] <= lvl - raidThresh or low[2] <= lvl - raidThresh
+
+shortRaid(lvl) =>
+    high[1] >= lvl + raidThresh or high[2] >= lvl + raidThresh
+
+raidedLow =
+     longRaid(pdl)   ? pdl   :
+     longRaid(h1Low)  ? h1Low  :
+     longRaid(h4Low)  ? h4Low  : na
+
+raidedHigh =
+     shortRaid(pdh)   ? pdh   :
+     shortRaid(h1High) ? h1High :
+     shortRaid(h4High) ? h4High : na
+
+// ── Signals ──────────────────────────────────────────────
+longSignal  = not na(raidedLow)  and bullDisplace() and close > raidedLow
+shortSignal = not na(raidedHigh) and bearDisplace() and close < raidedHigh
+
+// ── FVG Zones ────────────────────────────────────────────
+bullFVG = low > high[2] and (low - high[2]) >= fvgMin
+bearFVG = high < low[2] and (low[2] - high) >= fvgMin
+
+// ── Entries & Exits ──────────────────────────────────────
+if longSignal and inWindow and strategy.position_size == 0
+    tp = close * (1 + tpPct)
+    sl = close * (1 - slPct)
+    strategy.entry("LONG", strategy.long, comment="ICT LONG")
+    strategy.exit("LONG_X", "LONG", limit=tp, stop=sl)
+
+if shortSignal and inWindow and strategy.position_size == 0
+    tp = close * (1 - tpPct)
+    sl = close * (1 + slPct)
+    strategy.entry("SHORT", strategy.short, comment="ICT SHORT")
+    strategy.exit("SHORT_X", "SHORT", limit=tp, stop=sl)
+
+// ── Plot Levels ───────────────────────────────────────────
+plot(showLevels ? pdh    : na, "PDH",    color=color.new(color.red,    20), linewidth=1)
+plot(showLevels ? pdl    : na, "PDL",    color=color.new(color.green,  20), linewidth=1)
+plot(showLevels ? h1High : na, "1H High",color=color.new(color.orange, 40), linewidth=1)
+plot(showLevels ? h1Low  : na, "1H Low", color=color.new(color.blue,   40), linewidth=1)
+plot(showLevels ? h4High : na, "4H High",color=color.new(color.purple, 40), linewidth=1)
+plot(showLevels ? h4Low  : na, "4H Low", color=color.new(color.teal,   40), linewidth=1)
+
+// FVG background
+bgcolor(bullFVG ? color.new(color.green, 90) : na, title="Bull FVG")
+bgcolor(bearFVG ? color.new(color.red,   90) : na, title="Bear FVG")
+
+// Signal arrows
+plotshape(longSignal  and inWindow, "LONG",  shape.triangleup,   location.belowbar, color.green, size=size.normal)
+plotshape(shortSignal and inWindow, "SHORT", shape.triangledown, location.abovebar, color.red,   size=size.normal)
+
+// Trade window highlight
+bgcolor(inWindow ? color.new(color.yellow, 95) : na, title="Trade Window")

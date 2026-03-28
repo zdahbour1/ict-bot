@@ -1,0 +1,79 @@
+====================================================
+ ICT Scalping Bot v1 — Quick Start Guide
+====================================================
+
+STEP 1: One-time setup (already done for you)
+----------------------------------------------
+Open Command Prompt (cmd), go to this folder:
+  cd C:\Users\tarek\ict-bot
+Install dependencies:
+  pip install -r requirements.txt
+
+
+STEP 2: Run a demo backtest (no internet needed)
+------------------------------------------------
+  python -m bot.main --synthetic
+
+This runs 10 days of simulated QQQ data through the
+strategy and prints results + saves a CSV to:
+  backtest_results\trades_YYYYMMDD_HHMMSS.csv
+  backtest_results\metrics_YYYYMMDD_HHMMSS.json
+
+
+STEP 3: Run with YOUR real QQQ data (recommended)
+-------------------------------------------------
+Get 1-minute QQQ data from ANY of these sources:
+  - ThinkOrSwim (TOS): export 1m chart data as CSV
+  - TradeStation: export 1m bars
+  - Interactive Brokers: export historical data
+  - Tradovate / Rithmic: export 1m data
+
+Your CSV needs these columns:
+  timestamp, open, high, low, close, volume
+
+Then run:
+  python -m bot.main --csv "C:\path\to\your\data.csv"
+
+
+STEP 4: Understand the results
+-------------------------------
+Open the backtest_results\ folder:
+  trades_*.csv     - every signal: entry, SL, TP, win/loss, P&L
+  metrics_*.json   - summary: win rate, avg R, drawdown, etc.
+
+Key metrics to look for:
+  win_rate_pct     - % of trades that hit TP before SL
+  avg_r_multiple   - average profit in units of risk (>1.0 is good)
+  max_drawdown     - worst losing streak in $
+  trades_per_day   - how often the setup appears
+
+
+STEP 5: Adjust strategy parameters
+------------------------------------
+Copy .env.example to .env:
+  copy .env.example .env
+
+Edit .env in Notepad and change:
+  RAID_THRESHOLD=0.05       (how far price must break the level)
+  DISPLACEMENT_BODY_MULT=1.2 (how big the bounce candle must be)
+  N_CONFIRM_BARS=2          (how many bars to wait for confirmation)
+  FVG_MIN_SIZE=0.10         (minimum FVG size in $)
+  MAX_ALERTS_PER_DAY=6      (max signals per day)
+
+Then re-run the backtest to see how changes affect results.
+
+
+STEP 6: Run all tests (verify nothing is broken)
+-------------------------------------------------
+  python -m pytest bot/tests/ -v
+
+
+NOTES:
+------
+- This is v1: alerts only, no live execution
+- Strategy is long-only, 07:00-09:00 PT window
+- SL is placed below the raid low
+- TP targets nearest swing high (fractal 2-left-2-right)
+- All results are logged to backtest_results\run.log
+
+====================================================

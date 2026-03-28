@@ -1,0 +1,27 @@
+{
+  "metrics": {
+    "total_signals": 43,
+    "closed_trades": 43,
+    "open_trades": 0,
+    "wins": 43,
+    "losses": 0,
+    "win_rate_pct": 100.0,
+    "avg_r_multiple": 0.5935,
+    "total_pnl": 396.0382,
+    "max_drawdown": 5.5062,
+    "trades_per_day_avg": 5.38,
+    "by_signal_type": {
+      "LONG_OB": 1,
+      "LONG_iFVG": 42
+    },
+    "trading_days": 8
+  },
+  "config": {
+    "SYMBOL": "QQQ",
+    "RAID_THRESHOLD": 0.05,
+    "DISPLACEMENT_BODY_MULT": 1.2,
+    "N_CONFIRM_BARS": 2,
+    "FVG_MIN_SIZE": 0.1,
+    "TRADE_WINDOW": "07:00-09:00 PT"
+  }
+}

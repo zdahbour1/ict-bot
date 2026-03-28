@@ -1,0 +1,8 @@
+tastytrade==9.13
+flask
+python-dotenv
+pytz
+requests
+yfinance
+pandas
+numpy

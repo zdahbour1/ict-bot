@@ -1,0 +1,40 @@
+# Environment variables (NEVER upload these — contains passwords/API keys)
+.env
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# Logs
+*.log
+logs/
+
+# Trade data (local only)
+trades.csv
+
+# Excel/CSV backtest outputs
+backtest/*.xlsx
+backtest/*.csv
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.user
+
+# OS
+.DS_Store
+Thumbs.db

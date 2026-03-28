@@ -1,0 +1,62 @@
+"""
+ICT QQQ Options Bot — Configuration
+All settings live here. Edit this file or use the .env file.
+"""
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ── Broker (Tastytrade) ──────────────────────────────────
+TASTYTRADE_USERNAME = os.getenv("TASTYTRADE_USERNAME")
+TASTYTRADE_PASSWORD = os.getenv("TASTYTRADE_PASSWORD")
+TASTYTRADE_ACCOUNT  = os.getenv("TASTYTRADE_ACCOUNT")
+PAPER_TRADING       = os.getenv("PAPER_TRADING", "false").lower() == "true"
+
+# ── Dry Run (Paper Trading Simulation) ───────────────────
+# True  = logs all trades but never places real orders (safe to test)
+# False = places REAL trades on Tastytrade
+DRY_RUN             = os.getenv("DRY_RUN", "true").lower() == "true"
+
+# ── Instrument ───────────────────────────────────────────
+TICKER              = "QQQ"
+CONTRACTS           = 2          # number of option contracts per trade
+
+# ── Option Exit Rules ────────────────────────────────────
+PROFIT_TARGET       = 1.00       # exit when option premium is up 100%
+STOP_LOSS           = 0.60       # exit when option premium is down 60%
+
+# ── Trade Window ──────────────────────────────────────────
+TRADE_WINDOW_START_PT  = 6       # 6:00 AM PT
+TRADE_WINDOW_START_MIN = 30      # 6:30 AM PT start
+TRADE_WINDOW_END_PT    = 12      # 12:00 PM PT
+
+# ── ICT Strategy Parameters (from PDF) ───────────────────
+RAID_THRESHOLD        = 0.05     # min $ penetration below level to qualify as raid
+BODY_MULT             = 1.2      # displacement candle body multiplier
+DISPLACEMENT_LOOKBACK = 20       # bars back for median body calculation
+N_CONFIRM_BARS        = 2        # bars after raid to confirm displacement
+FVG_MIN_SIZE          = 0.10     # min FVG size in dollars
+OB_MAX_CANDLES        = 3        # max bearish candles for OB
+SL_BUFFER             = 0.05     # buffer below raid low for stop loss
+TP_LOOKBACK           = 40       # bars back to find swing high TP
+MAX_ALERTS_PER_DAY    = 10       # max alert emails per day
+MAX_TRADES_PER_DAY    = 4        # max actual trades placed per day
+
+# ── EMA Filter ────────────────────────────────────────────
+EMA_PERIOD_1H         = 20       # 1H 20 EMA for trend direction filter
+
+# ── News Filter ───────────────────────────────────────────
+NEWS_BUFFER_MIN       = 30       # minutes around major events to block trades
+
+# ── Email Alerts ─────────────────────────────────────────
+EMAIL_TO           = os.getenv("EMAIL_TO",           "omardahbour52@gmail.com")
+EMAIL_FROM         = os.getenv("EMAIL_FROM",         "omardahbour52@gmail.com")
+EMAIL_APP_PASSWORD = os.getenv("EMAIL_APP_PASSWORD", "")
+
+# ── Webhook Server ───────────────────────────────────────
+PORT                  = 5000
+WEBHOOK_SECRET        = os.getenv("WEBHOOK_SECRET", "ict-secret-token")
+
+# ── Exit Monitor ─────────────────────────────────────────
+MONITOR_INTERVAL      = 30       # check P&L every 30 seconds

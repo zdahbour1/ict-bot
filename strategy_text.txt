@@ -1,0 +1,336 @@
+=== PAGE 1 ===
+Requirements Document: ICT-Style
+Scalping Bot (v1) — Alerts First (QQQ),
+Futures Later (MNQ)
+1. Purpose and Scope
+1.1 Goal
+Build an automated system that scans intraday price action for an ICT-style pattern and
+produces actionable trade alerts (v1) and optional auto-execution (v2+). The system should be
+robust, testable, and modular (data provider and broker execution are replaceable).
+1.2 Initial Instrument
+● v1 instrument: QQQ (NYSE/Nasdaq equity ETF)
+● v2 instrument: MNQ futures (Micro Nasdaq), contract-aware (e.g., MNQZ25) with
+futures-capable data feed/broker
+1.3 Trading Style
+● Scalping
+● Primary direction for v1: Long-only (per user preference)
+● Session: “NY session” with a trade window of 07:00–09:00 Pacific Time (PT)
+1.4 Deliverables
+● v1: Alert bot + logging + backtest harness (no live execution)
+● v2: Paper trading / simulated execution
+● v3: Live execution (optional)
+=== PAGE 2 ===
+2. Definitions (Formal / Codified)
+2.1 Time Zones
+● Internal timestamps: UTC
+● Session logic: America/Los_Angeles (“PT”)
+2.2 Tick / Price Units
+● v1 QQQ: price increments per market; treat as decimal.
+● v2 MNQ: tick size = 0.25, tick value depends on micro contract; risk logic in dollars per
+micro.
+2.3 Key Concepts
+These must be implemented using deterministic rules.
+2.3.1 “Significant High/Low” (Liquidity Pools)
+Significant levels used for “raids” include:
+● Prior Day High/Low (PDH/PDL)
+● Rolling 1H High/Low
+● Rolling 4H High/Low
+● Asia session High/Low
+● London session High/Low
+Default for v1 (if not otherwise configured):
+● Rolling 1H/4H highs/lows computed from bar data, not swing fractals.
+● Asia/London windows use standard defaults unless specified:
+=== PAGE 3 ===
+○ Asia (PT): 14:00–21:00
+○ London (PT): 00:00–05:00
+2.3.2 Raid
+User definition: “A raid is a significant previous high or low that price has pushed past creating a
+new high or low.”
+Bot formalization (long-only):
+● A raid-low event occurs if the current price trades below a configured “significant low
+level” by at least RAID_THRESHOLD.
+● RAID_THRESHOLD default:
+○ For MNQ: 5 ticks (= 1.25 points)
+○ For QQQ: default $0.05 (configurable) or ATR-based threshold
+2.3.3 “Successful Raid” Confirmation (User chose B)
+User choice: B = “wick below + reclaim on displacement candle”
+Formal rule (long-only):
+A raid-low becomes confirmed only if:
+1. Price trades below the reference low by ≥ RAID_THRESHOLD (sweep)
+2. Within N_CONFIRM_BARS bars (default 2 on execution timeframe), a bullish
+displacement candle closes back above the raided level.
+2.3.4 Displacement Candle (Heuristic)
+Displacement is required for confirmation.
+Default displacement definition:
+● Candle is bullish (close > open)
+● Candle body size ≥ BODY_MULT × median body of prior LOOKBACK bars
+=== PAGE 4 ===
+○ BODY_MULT default 1.2
+○ LOOKBACK default 20
+● Close is in top TOP_FRAC of range
+○ TOP_FRAC default 0.5 (close in upper half)
+2.3.5 Fair Value Gap (FVG)
+Use classic 3-candle definition:
+Bullish FVG at bar i:
+● low[i] > high[i-2]
+● Gap zone = [high[i-2], low[i]]
+FVG detection timeframes (important zones):
+● 15m, 1h, 4h (v1)
+Execution timeframe for iFVG entry:
+● 5m (default)
+Minimum FVG size:
+● Configurable threshold; default:
+○ QQQ: $0.10
+○ MNQ: 2 ticks (0.5 points)
+2.3.6 Inverse FVG (iFVG) Confirmation (User chose “mid”)
+User choice: mid
+Formal iFVG confirmation for long:
+● Price trades into FVG zone (touch or enter)
+=== PAGE 5 ===
+● A confirmation candle closes above the midpoint of the FVG zone
+○ midpoint = (lower + upper) / 2
+2.3.7 Order Block (OB)
+User definition: “1–3 candles that are the last opposite candles before displacement.”
+Formal OB for long:
+● Identify bullish displacement candle D
+● Look backward for up to MAX_OB_CANDLES consecutive bearish candles immediately
+prior to D (default 3)
+● OB zone options (configurable):
+○ Default: [lowest low of cluster, highest open of cluster] (wick-to-open)
+● “Important OBs”:
+○ Derived on 15m and 1h (important), with 5m used for execution refinement
+2.3.8 OB Entry Trigger (User chose “touch”)
+User choice: touch
+Formal:
+● OB tap signal occurs when price range overlaps OB zone:
+○ high >= ob_low AND low <= ob_high
+No “close” requirement.
+3. Strategy Logic (Long-Only v1)
+3.1 Timeframes
+=== PAGE 6 ===
+● Data ingestion: 1-minute bars
+● Execution signals: 5-minute
+● “Important” context zones: 15m, 1h, 4h
+● Targets reference: 5–10 minute highs/lows (use 5m swings by default)
+3.2 Session Filters
+Signal generation only allowed if the execution timeframe bar timestamp is within:
+● 07:00–09:00 PT
+System must handle weekends/holidays:
+● If no data exists for requested window (weekend), system must:
+○ Roll to last trading day OR widen lookback until data found.
+3.3 Signal Types (v1)
+The bot can generate either of these as valid long entries, but both require a successful raid +
+displacement reclaim first.
+Signal Type A: Raid → Displacement Reclaim → iFVG Mid Close
+1. Detect raid-low of significant level
+2. Confirm with displacement reclaim (close above raided level)
+3. Find a bullish FVG on 5m formed after displacement (or use HTF FVG zone for context)
+4. Price trades back into the FVG zone
+5. Candle closes above FVG midpoint → Signal LONG_iFVG
+Signal Type B: Raid → Displacement Reclaim → OB Touch
+1. Detect raid-low
+=== PAGE 7 ===
+2. Confirm with displacement reclaim
+3. Identify OB zone immediately before displacement
+4. Price touches OB zone → Signal LONG_OB
+3.4 De-duplication & Alert Hygiene
+● Do not send repeated alerts for the same setup.
+● A setup ID should include:
+○ signal type + timestamp + raided level ID + entry zone ID
+● Cooldown: none (user requested), but still:
+○ Only 1 alert per bar per signal type
+○ Optional max alerts/day (default 6) to prevent spamming
+4. Risk Management (Alerts v1)
+4.1 Stop Loss (User target)
+User preference (MNQ): $50–$75 per micro depending on range.
+For v1 on QQQ (proxy), implement a configurable stop method:
+● Option 1 (default): fixed risk dollars converted to price via position size (paper)
+● Option 2: technical stop below raid low minus buffer
+For alerts v1:
+● Provide SL as:
+○ min( fixedRiskStop, raidLow - buffer )
+=== PAGE 8 ===
+● Buffer default:
+○ QQQ: $0.05
+○ MNQ: 2 ticks
+4.2 Take Profit (Full TP)
+User choice: full TP
+TP target:
+● Nearest recent high (liquidity) on 5m (or 10m) timeframe:
+○ default: highest high in last TP_LOOKBACK bars (e.g., 40 bars) if swing algorithm
+isn’t used
+○ preferred: nearest swing high using fractal algorithm (2-left-2-right)
+4.3 Max Daily Loss
+User: $200
+● v1 alert bot must track “paper” P&L if paper execution is implemented.
+● If not executing, still provide a configurable guardrail:
+○ Stop emitting alerts after MAX_DAILY_LOSS would have been hit under
+simulated fills, OR simply limit alerts/day.
+5. Data Requirements
+5.1 Data Provider Requirements (v1 QQQ)
+Must supply:
+● 1-minute OHLCV bars for QQQ
+=== PAGE 9 ===
+● Intraday lookback of at least 5 days
+5.2 Data Provider Requirements (v2 MNQ)
+Must supply:
+● Futures bars for MNQ (continuous or contract symbol mapping)
+● Contract rollover logic, or configurable active contract symbol
+5.3 Data Quality Rules
+● Timestamps must be unique per bar. If duplicates occur:
+○ Aggregate duplicates into one bar:
+■ open=first, high=max, low=min, close=last, volume=sum
+● Sort bars by time ascending
+● Handle missing bars (gaps) without crashing
+6. System Architecture
+6.1 Components
+1. Config Manager
+○ .env or config.yaml support
+○ No secrets hardcoded
+2. Market Data Adapter
+○ Provider-specific module (Tradier/Polygon/IB/Tradovate)
+3. Bar Aggregator
+=== PAGE 10 ===
+○ Robust aggregation from 1m → 5m/15m/1h/4h using floor+groupby (avoid fragile
+resample)
+4. Strategy Engine
+○ Implements raid, displacement, FVG, iFVG, OB
+○ Produces signals with entry/SL/TP + reasoning payload
+5. Alerting
+○ Email alerts (SMTP)
+○ Optional Discord/Telegram later
+6. Logger
+○ CSV + structured JSON logs
+7. Backtest Harness
+○ Replays historical data and reports stats
+6.2 Non-Functional Requirements
+● Must run on Windows reliably
+● Clear error messages + full tracebacks
+● No silent failures
+● Rate-limit API calls
+● Modular to swap data providers
+7. Configuration (Must Be External)
+7.1 Required Config Keys
+=== PAGE 11 ===
+● SYMBOL (default QQQ)
+● TIMEZONE (America/Los_Angeles)
+● TRADE_WINDOW_START_PT (07:00)
+● TRADE_WINDOW_END_PT (09:00)
+● PROVIDER (e.g., tradier)
+● PROVIDER_ENV (live/sandbox)
+● PROVIDER_TOKEN (secret)
+● EMAIL_TO
+● EMAIL_FROM
+● EMAIL_SMTP_HOST / PORT
+● EMAIL_APP_PASSWORD (secret)
+7.2 Strategy Parameters
+● RAID_THRESHOLD (QQQ default $0.05)
+● DISPLACEMENT_BODY_MULT (1.2)
+● DISPLACEMENT_LOOKBACK (20)
+● N_CONFIRM_BARS (2)
+● FVG_MIN_SIZE (QQQ $0.10)
+● OB_MAX_CANDLES (3)
+● IFVG_CONFIRM_MODE (mid)
+● OB_TRIGGER_MODE (touch)
+● MAX_ALERTS_PER_DAY (6)
+=== PAGE 12 ===
+● LOOKBACK_HOURS (120)
+8. Output / Alert Format
+8.1 Email Subject
+[ICT ALERT] {SYMBOL} {SIGNAL_TYPE} Entry={entry} SL={sl} TP={tp}
+8.2 Email Body (must include)
+● Timestamp (UTC and PT)
+● Signal type (LONG_iFVG or LONG_OB)
+● Raided level (e.g., PDL, Asia Low)
+● Displacement details (candle time, body size ratio)
+● Entry trigger details:
+○ For iFVG: FVG bounds + midpoint + confirm close price
+○ For OB: OB bounds + touch evidence
+● Suggested SL/TP and rationale
+● Config snapshot (non-secret) + signal ID
+9. Backtesting Requirements (v1)
+9.1 Mode
+● “Replay” historical 1m bars and simulate signals on 5m.
+● Record signal occurrences, hypothetical fills, SL/TP outcomes.
+=== PAGE 13 ===
+9.2 Metrics
+● Win rate
+● Avg R multiple
+● Max drawdown (paper)
+● Trades/day distribution
+● Signal frequency within 07:00–09:00 PT
+9.3 Acceptance Criteria
+● Deterministic results for a given dataset
+● No crashes on missing/duplicate data
+● Logs contain enough information to debug false signals
+10. Acceptance Tests (Must Pass)
+10.1 Data Handling Tests
+1. Duplicate timestamps in 1m feed → aggregated correctly → no exceptions
+2. Weekend run → bot rolls back / uses last trading day → no “no data” infinite crash
+3. Missing bars → strategy continues
+10.2 Strategy Logic Tests (Unit)
+Provide small synthetic sequences where:
+● A raid-low occurs, displacement reclaims, FVG forms, returns, closes above midpoint →
+signal
+● A raid-low occurs, displacement reclaims, OB forms, price touches → signal
+=== PAGE 14 ===
+● Raid occurs but no reclaim displacement → no signal
+10.3 Alert Tests
+● Email sends successfully (with mock SMTP option)
+● Dedup prevents repeated alerts on same bar
+11. Known Constraints / Reality Notes
+● ICT concepts are partly discretionary; v1 encodes only the specified parts.
+● “Important” highs/lows and “significance” are approximated with:
+○ PDH/PDL + rolling H1/H4 + session highs/lows
+● Futures execution on Webull is not recommended (API limitations). Use a broker with an
+official API for v3.
+12. Implementation Recommendations (So Another Tool
+Can Build It Cleanly)
+12.1 Language
+● Python 3.11+
+12.2 Libraries
+● pandas
+● requests
+● python-dotenv
+=== PAGE 15 ===
+● pytz (or zoneinfo)
+● email/smtplib
+● optional: loguru for logging
+12.3 Project Structure
+bot/
+main.py
+config.py
+data/
+provider_tradier.py
+aggregator.py
+strategy/
+ict_long.py
+levels.py
+alerts/
+emailer.py
+backtest/
+runner.py
+tests/
+test_strategy.py
+test_aggregator.py
+requirements.txt
+.env.example
+13. Open Items (Optional Enhancements)
+● Holiday calendar support (NYSE)
+● ATR-based raid thresholds
+● HTF bias filters (only take longs in discount)
+● SMT / divergence filters
+● Multiple entries / partials
+=== PAGE 16 ===
+● Multi-timeframe confluence scoring
+Summary (What You Hand to Another
+Coding Tool)
+Build a modular Python bot that:
+● Pulls 1m QQQ bars
+● Aggregates robustly
+● Scans 07:00–09:00 PT
+● Detects raid-low + reclaim displacement
+● Enters by iFVG midpoint close OR OB touch
+● Sends email alerts with SL/TP and full reasoning
+● Logs everything
+● Includes a backtest harness and tests

@@ -1,0 +1,259 @@
+"""
+Live Scanner — runs every minute during market hours (6:30 AM - 1:00 PM PT).
+- Inside 07:00–09:00 PT  → signal email + trade entry
+- Outside that window    → signal email only (alert, no trade placed)
+"""
+import logging
+import threading
+import time
+from datetime import datetime, date
+import pytz
+import pandas as pd
+import numpy as np
+
+from data.provider import get_bars_1m
+from data.aggregator import aggregate
+from strategy.levels import get_all_levels
+from strategy.ict_long import run_strategy
+from strategy.ict_short import run_strategy_short
+from strategy.option_selector import select_and_enter, select_and_enter_put
+from alerts.emailer import send_signal_email
+import config
+
+log = logging.getLogger(__name__)
+
+PT = pytz.timezone("America/Los_Angeles")
+
+# Full market hours window (PT) — scanner runs during this entire time
+MARKET_OPEN_PT      = 6    # 6:30 AM PT
+MARKET_OPEN_MIN_PT  = 30
+MARKET_CLOSE_PT     = 13   # 1:00 PM PT
+
+# ── Major news events (PT times) ─────────────────────────
+import datetime as _dt
+NEWS_EVENTS = [
+    (_dt.date(2026, 1, 29), 11,  0,  "FOMC Decision"),
+    (_dt.date(2026, 1, 29), 11, 30,  "FOMC Press Conference"),
+    (_dt.date(2026, 2,  7),  5, 30,  "NFP Jobs Report"),
+    (_dt.date(2026, 2, 12),  5, 30,  "CPI"),
+    (_dt.date(2026, 2, 13),  5, 30,  "PPI"),
+    (_dt.date(2026, 2, 14),  5, 30,  "Retail Sales"),
+    (_dt.date(2026, 2, 26),  5, 30,  "GDP"),
+    (_dt.date(2026, 3,  7),  5, 30,  "NFP Jobs Report"),
+    (_dt.date(2026, 3, 12),  5, 30,  "CPI"),
+    (_dt.date(2026, 3, 13),  5, 30,  "PPI"),
+    (_dt.date(2026, 3, 14),  5, 30,  "Retail Sales"),
+    (_dt.date(2026, 3, 19), 11,  0,  "FOMC Decision"),
+    (_dt.date(2026, 3, 19), 11, 30,  "FOMC Press Conference"),
+    (_dt.date(2026, 3, 26),  5, 30,  "GDP"),
+    # Add future events here monthly
+]
+
+
+def _is_near_news(now_pt: datetime) -> tuple:
+    """Returns (True, label) if now_pt is within NEWS_BUFFER_MIN of a major event."""
+    for (ev_date, ev_h, ev_m, label) in NEWS_EVENTS:
+        ev_dt = PT.localize(_dt.datetime(ev_date.year, ev_date.month, ev_date.day, ev_h, ev_m))
+        diff  = abs((now_pt - ev_dt).total_seconds() / 60)
+        if diff <= config.NEWS_BUFFER_MIN:
+            return True, label
+    return False, ""
+
+
+def _get_ema_bias(bars_1h: pd.DataFrame, now_pt: datetime) -> str:
+    """Returns BULLISH, BEARISH, or NEUTRAL based on 1H 20 EMA."""
+    if bars_1h.empty or len(bars_1h) < config.EMA_PERIOD_1H:
+        return "NEUTRAL"
+    ema    = bars_1h["close"].ewm(span=config.EMA_PERIOD_1H, adjust=False).mean()
+    last_close = bars_1h["close"].iloc[-1]
+    last_ema   = ema.iloc[-1]
+    if last_close > last_ema:
+        return "BULLISH"
+    elif last_close < last_ema:
+        return "BEARISH"
+    return "NEUTRAL"
+
+
+class Scanner:
+    def __init__(self, client, exit_manager):
+        self.client        = client
+        self.exit_manager  = exit_manager
+        self._stop         = threading.Event()
+        self._alerts_today = 0
+        self._trades_today = 0
+        self._last_date    = None
+        self._seen_setups  = set()
+
+    def start(self):
+        thread = threading.Thread(target=self._loop, daemon=True)
+        thread.start()
+        log.info("Scanner started — active 6:30 AM–1:00 PM PT (trades only 07:00–09:00 PT).")
+
+    def stop(self):
+        self._stop.set()
+
+    def _loop(self):
+        while not self._stop.is_set():
+            try:
+                self._scan()
+            except Exception as e:
+                log.error(f"Scanner error: {e}", exc_info=True)
+            time.sleep(60)
+
+    def _check_windows(self):
+        """
+        Returns (in_market, in_trade_window).
+        in_market      = True if within 6:30 AM – 1:00 PM PT
+        in_trade_window = True if within 07:00 – 09:00 PT
+        """
+        now_pt = datetime.now(PT)
+
+        # Reset daily counters at midnight
+        today = now_pt.date()
+        if self._last_date != today:
+            self._last_date    = today
+            self._alerts_today = 0
+            self._trades_today = 0
+            self._seen_setups  = set()
+            log.info(f"New trading day: {today}. Alert counter reset.")
+
+        hour = now_pt.hour
+        minute = now_pt.minute
+
+        in_market = (
+            (hour > MARKET_OPEN_PT or (hour == MARKET_OPEN_PT and minute >= MARKET_OPEN_MIN_PT))
+            and hour < MARKET_CLOSE_PT
+        )
+
+        in_trade_window = (
+            (hour > config.TRADE_WINDOW_START_PT or
+             (hour == config.TRADE_WINDOW_START_PT and minute >= config.TRADE_WINDOW_START_MIN))
+            and hour < config.TRADE_WINDOW_END_PT
+        )
+
+        return in_market, in_trade_window
+
+    def _scan(self):
+        in_market, in_trade_window = self._check_windows()
+
+        if not in_market:
+            log.debug(f"Market closed ({datetime.now(PT).strftime('%H:%M')} PT). Waiting...")
+            return
+
+        now_pt  = datetime.now(PT)
+        now_str = now_pt.strftime('%H:%M')
+        mode    = "TRADE MODE" if in_trade_window else "ALERT-ONLY MODE"
+        log.info(f"Running ICT scan at {now_str} PT [{mode}]...")
+
+        # ── News filter ───────────────────────────────────
+        near_news, news_label = _is_near_news(now_pt)
+        if near_news:
+            log.info(f"NEWS FILTER: Skipping scan — {news_label} within {config.NEWS_BUFFER_MIN} min.")
+            return
+
+        # ── Fetch and aggregate bars ─────────────────────
+        bars_1m = get_bars_1m(config.TICKER, days_back=5)
+        if bars_1m.empty:
+            log.warning("No data returned. Skipping scan.")
+            return
+
+        bars_1h = aggregate(bars_1m, "1h")
+        bars_4h = aggregate(bars_1m, "4h")
+
+        if bars_1m.empty or len(bars_1m) < 30:
+            log.warning("Not enough bars after aggregation.")
+            return
+
+        # Use 1m bars directly for higher precision signal detection
+        bars_scan = bars_1m.iloc[-400:]
+
+        # ── Compute significant levels ───────────────────
+        levels = get_all_levels(bars_1m, bars_1h, bars_4h)
+        if not levels:
+            log.warning("No levels computed. Skipping.")
+            return
+
+        # ── EMA trend bias ────────────────────────────────
+        ema_bias = _get_ema_bias(bars_1h, datetime.now(PT))
+        log.info(f"1H EMA bias: {ema_bias}")
+
+        # ── Run ICT long + short strategies ─────────────
+        signals_long  = run_strategy(
+            bars_scan, bars_1h, bars_4h, levels,
+            alerts_today=self._alerts_today
+        )
+        signals_short = run_strategy_short(
+            bars_scan, bars_1h, bars_4h, levels,
+            alerts_today=self._alerts_today,
+            max_alerts=config.MAX_ALERTS_PER_DAY
+        )
+
+        # ── Apply EMA filter ──────────────────────────────
+        filtered_long  = signals_long  if ema_bias == "BULLISH" else []
+        filtered_short = signals_short if ema_bias == "BEARISH" else []
+        if ema_bias == "NEUTRAL":
+            log.info("EMA FILTER: Neutral bias — skipping all signals.")
+        else:
+            log.info(f"EMA FILTER: {ema_bias} — keeping {'long' if ema_bias == 'BULLISH' else 'short'} signals only.")
+
+        signals = filtered_long + filtered_short
+
+        # ── Process signals ──────────────────────────────
+        for signal in signals:
+            setup_id = signal["setup_id"]
+            if setup_id in self._seen_setups:
+                continue  # already alerted on this setup
+
+            self._seen_setups.add(setup_id)
+            self._alerts_today += 1
+
+            log.info(
+                f"{'='*55}\n"
+                f"ICT SIGNAL: {signal['signal_type']} [{mode}]\n"
+                f"Entry:  ${signal['entry_price']:.2f}\n"
+                f"SL:     ${signal['sl']:.2f}\n"
+                f"TP:     ${signal['tp']:.2f}\n"
+                f"Raided: {signal['raid']['raided_level']} "
+                f"@ ${signal['raid']['raided_price']:.2f}\n"
+                f"{'='*55}"
+            )
+
+            trade = None
+
+            if in_trade_window:
+                # ── Check: already in a trade? ────────────────
+                if len(self.exit_manager.open_trades) > 0:
+                    log.info("Already in an open trade — skipping entry, sending alert-only email.")
+                    signal["alert_only"] = True
+
+                # ── Check: max trades per day reached? ────────
+                elif self._trades_today >= config.MAX_TRADES_PER_DAY:
+                    log.info(f"Max trades per day ({config.MAX_TRADES_PER_DAY}) reached — alert only.")
+                    signal["alert_only"] = True
+
+                else:
+                    # ── Enter the trade ───────────────────────
+                    try:
+                        direction = signal.get("direction", "LONG")
+                        if direction == "SHORT":
+                            trade = select_and_enter_put(self.client)
+                        else:
+                            trade = select_and_enter(self.client)
+
+                        if trade:
+                            trade["signal"]    = signal["signal_type"]
+                            trade["ict_entry"] = signal["entry_price"]
+                            trade["ict_sl"]    = signal["sl"]
+                            trade["ict_tp"]    = signal["tp"]
+                            self.exit_manager.add_trade(trade)
+                            self._trades_today += 1
+                            log.info(f"Trade #{self._trades_today} of {config.MAX_TRADES_PER_DAY} today opened.")
+                    except Exception as e:
+                        log.error(f"Trade entry failed: {e}", exc_info=True)
+            else:
+                # ── Outside trade window: alert only ─────────
+                log.info("Signal outside trade window — sending alert-only email, no trade placed.")
+                signal["alert_only"] = True  # flag for emailer to note in subject
+
+            # ── Send email (always) ───────────────────────
+            send_signal_email(signal, trade)
