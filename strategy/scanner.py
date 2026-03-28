@@ -102,9 +102,11 @@ class Scanner:
 
     def _check_windows(self):
         """
-        Returns (in_market, in_trade_window).
-        in_market      = True if within 6:30 AM – 1:00 PM PT
-        in_trade_window = True if within 07:00 – 09:00 PT
+        Returns (in_market, in_trade_window, is_weekend).
+        in_market       = True if within 6:30 AM – 1:00 PM PT (Mon–Fri)
+        in_trade_window = True if within trade window (Mon–Fri)
+        is_weekend      = True if Saturday or Sunday
+        Scanner runs 24/7 — emails only sent when in_market is True.
         """
         now_pt = datetime.now(PT)
 
@@ -117,32 +119,40 @@ class Scanner:
             self._seen_setups  = set()
             log.info(f"New trading day: {today}. Alert counter reset.")
 
-        hour = now_pt.hour
-        minute = now_pt.minute
+        hour      = now_pt.hour
+        minute    = now_pt.minute
+        is_weekend = now_pt.weekday() >= 5  # 5=Saturday, 6=Sunday
 
         in_market = (
+            not is_weekend and
             (hour > MARKET_OPEN_PT or (hour == MARKET_OPEN_PT and minute >= MARKET_OPEN_MIN_PT))
             and hour < MARKET_CLOSE_PT
         )
 
         in_trade_window = (
+            not is_weekend and
             (hour > config.TRADE_WINDOW_START_PT or
              (hour == config.TRADE_WINDOW_START_PT and minute >= config.TRADE_WINDOW_START_MIN))
             and hour < config.TRADE_WINDOW_END_PT
         )
 
-        return in_market, in_trade_window
+        return in_market, in_trade_window, is_weekend
 
     def _scan(self):
-        in_market, in_trade_window = self._check_windows()
-
-        if not in_market:
-            log.debug(f"Market closed ({datetime.now(PT).strftime('%H:%M')} PT). Waiting...")
-            return
+        in_market, in_trade_window, is_weekend = self._check_windows()
 
         now_pt  = datetime.now(PT)
         now_str = now_pt.strftime('%H:%M')
-        mode    = "TRADE MODE" if in_trade_window else "ALERT-ONLY MODE"
+
+        if is_weekend:
+            mode = "WEEKEND ANALYSIS (no emails)"
+        elif not in_market:
+            mode = "AFTER HOURS ANALYSIS (no emails)"
+        elif in_trade_window:
+            mode = "TRADE MODE"
+        else:
+            mode = "ALERT-ONLY MODE"
+
         log.info(f"Running ICT scan at {now_str} PT [{mode}]...")
 
         # ── News filter ───────────────────────────────────
@@ -270,5 +280,8 @@ class Scanner:
                 log.info("Signal outside trade window — sending alert-only email, no trade placed.")
                 signal["alert_only"] = True  # flag for emailer to note in subject
 
-            # ── Send email (always) ───────────────────────
-            send_signal_email(signal, trade)
+            # ── Send email (market hours only) ───────────
+            if in_market:
+                send_signal_email(signal, trade)
+            else:
+                log.info(f"Signal logged (no email — outside market hours): {signal['signal_type']} @ ${signal['entry_price']:.2f}")
