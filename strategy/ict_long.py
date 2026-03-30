@@ -238,7 +238,11 @@ def compute_tp(bars_5m: pd.DataFrame, entry_bar: int) -> float:
 
     # Fallback: highest high in lookback window
     lookback_bars = bars_5m.iloc[max(0, entry_bar - TP_LOOKBACK):entry_bar]
-    return float(lookback_bars["high"].max())
+    fallback = lookback_bars["high"].max()
+    if pd.isna(fallback):
+        fallback = bars_5m.iloc[entry_bar]["close"] * 1.02  # 2% above entry
+        log.warning(f"compute_tp: no swing high found, using 2% above entry: {fallback:.2f}")
+    return float(fallback)
 
 
 # ── Main strategy runner ─────────────────────────────────

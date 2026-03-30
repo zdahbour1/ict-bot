@@ -226,7 +226,11 @@ def compute_tp_short(bars_5m: pd.DataFrame, entry_bar: int) -> float:
         return float(max(swing_lows))  # nearest (highest) swing low below entry
 
     lookback_bars = bars_5m.iloc[max(0, entry_bar - TP_LOOKBACK):entry_bar]
-    return float(lookback_bars["low"].min())
+    fallback = lookback_bars["low"].min()
+    if pd.isna(fallback):
+        fallback = bars_5m.iloc[entry_bar]["close"] * 0.98  # 2% below entry
+        log.warning(f"compute_tp_short: no swing low found, using 2% below entry: {fallback:.2f}")
+    return float(fallback)
 
 
 # ── Main short strategy runner ───────────────────────────

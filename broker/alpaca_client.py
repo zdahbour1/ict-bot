@@ -97,8 +97,8 @@ class AlpacaClient:
             log.info(f"[ALPACA] {symbol}: bid={bid:.2f} ask={ask:.2f} mid={mid:.2f}")
             return mid
         except Exception as e:
-            log.warning(f"Alpaca option price failed ({e}) — returning 1.00")
-            return 1.00
+            log.warning(f"Alpaca option price failed ({e}) — skipping this cycle.")
+            raise
 
     # ── Order Placement ────────────────────────────────────
     def buy_call(self, option_symbol: str, contracts: int) -> dict:
