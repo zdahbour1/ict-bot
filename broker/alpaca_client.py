@@ -108,10 +108,10 @@ class AlpacaClient:
         return self._place_order(option_symbol, contracts, "buy")
 
     def sell_call(self, option_symbol: str, contracts: int) -> dict:
-        return self._place_order(option_symbol, contracts, "sell")
+        return self._close_position(option_symbol, contracts)
 
     def sell_put(self, option_symbol: str, contracts: int) -> dict:
-        return self._place_order(option_symbol, contracts, "sell")
+        return self._close_position(option_symbol, contracts)
 
     def _place_order(self, symbol: str, contracts: int, side: str) -> dict:
         if config.DRY_RUN:
@@ -119,7 +119,7 @@ class AlpacaClient:
             return {"dry_run": True, "symbol": symbol}
         try:
             from alpaca.trading.requests import MarketOrderRequest
-            from alpaca.trading.enums import OrderSide, TimeInForce, AssetClass
+            from alpaca.trading.enums import OrderSide, TimeInForce
 
             order_side = OrderSide.BUY if side == "buy" else OrderSide.SELL
             req = MarketOrderRequest(
@@ -133,6 +133,21 @@ class AlpacaClient:
             return {"symbol": symbol, "contracts": contracts, "order_id": str(order.id)}
         except Exception as e:
             log.error(f"Alpaca order failed: {e}")
+            raise
+
+    def _close_position(self, symbol: str, contracts: int) -> dict:
+        """Close an existing position using Alpaca's close_position endpoint."""
+        if config.DRY_RUN:
+            log.info(f"[DRY RUN] ALPACA CLOSE POSITION: {contracts}x {symbol}")
+            return {"dry_run": True, "symbol": symbol}
+        try:
+            from alpaca.trading.requests import ClosePositionRequest
+            req   = ClosePositionRequest(qty=str(contracts))
+            order = self.trading_client.close_position(symbol, close_options=req)
+            log.info(f"[ALPACA] CLOSE POSITION: {contracts}x {symbol} — ID: {order.id}")
+            return {"symbol": symbol, "contracts": contracts, "order_id": str(order.id)}
+        except Exception as e:
+            log.error(f"Alpaca close position failed: {e}")
             raise
 
     # ── Positions ──────────────────────────────────────────

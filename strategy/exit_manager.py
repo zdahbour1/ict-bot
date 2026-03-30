@@ -41,12 +41,13 @@ def _deserialize_trade(t: dict) -> dict:
     """Restore trade dict from JSON format."""
     if isinstance(t.get("entry_time"), str):
         try:
-            dt = datetime.fromisoformat(t["entry_time"])
+            from dateutil import parser as dateparser
+            dt = dateparser.parse(t["entry_time"])
             if dt.tzinfo is None:
                 dt = PT.localize(dt)
             t["entry_time"] = dt
         except Exception:
-            t["entry_time"] = None
+            t["entry_time"] = datetime.now(PT)
     return t
 
 
