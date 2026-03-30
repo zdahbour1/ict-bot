@@ -48,7 +48,7 @@ def select_and_enter(client: TastytradeClient) -> dict | None:
         "entry_price":  entry_price,
         "profit_target": entry_price * (1 + config.PROFIT_TARGET),   # +25%
         "stop_loss":     entry_price * (1 - config.STOP_LOSS),        # -15%
-        "entry_time":   now_pt.isoformat(),
+        "entry_time":   now_pt,
     }
     log.info(
         f"Trade opened: {option_symbol} | "
@@ -89,7 +89,7 @@ def select_and_enter_put(client: TastytradeClient) -> dict | None:
         "entry_price":   entry_price,
         "profit_target": entry_price * (1 + config.PROFIT_TARGET),
         "stop_loss":     entry_price * (1 - config.STOP_LOSS),
-        "entry_time":    now_pt.isoformat(),
+        "entry_time":    now_pt,
         "direction":     "SHORT",
     }
     log.info(

@@ -31,20 +31,27 @@ TRADES_FILE = os.path.join(os.path.dirname(__file__), "..", "open_trades.json")
 
 def _serialize_trade(trade: dict) -> dict:
     """Convert trade dict to JSON-serializable format."""
-    t = trade.copy()
-    if isinstance(t.get("entry_time"), datetime):
-        t["entry_time"] = t["entry_time"].isoformat()
+    t = {}
+    for k, v in trade.items():
+        if isinstance(v, datetime):
+            t[k] = v.isoformat()
+        elif isinstance(v, float) and (v != v):  # NaN check
+            t[k] = 0.0
+        else:
+            t[k] = v
     return t
 
 
 def _deserialize_trade(t: dict) -> dict:
     """Restore trade dict from JSON format."""
-    if isinstance(t.get("entry_time"), str):
+    entry = t.get("entry_time")
+    if isinstance(entry, str):
         try:
-            from dateutil import parser as dateparser
-            dt = dateparser.parse(t["entry_time"])
+            dt = datetime.fromisoformat(entry)
             if dt.tzinfo is None:
                 dt = PT.localize(dt)
+            else:
+                dt = dt.astimezone(PT)
             t["entry_time"] = dt
         except Exception:
             t["entry_time"] = datetime.now(PT)
