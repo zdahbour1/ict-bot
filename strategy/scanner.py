@@ -251,11 +251,6 @@ class Scanner:
                     log.info("Already in an open trade — skipping entry, sending alert-only email.")
                     signal["alert_only"] = True
 
-                # ── Check: max trades per day reached? ────────
-                elif self._trades_today >= config.MAX_TRADES_PER_DAY:
-                    log.info(f"Max trades per day ({config.MAX_TRADES_PER_DAY}) reached — alert only.")
-                    signal["alert_only"] = True
-
                 else:
                     # ── Enter the trade ───────────────────────
                     try:

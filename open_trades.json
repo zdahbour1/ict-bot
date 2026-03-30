@@ -1,0 +1,17 @@
+[
+  {
+    "symbol": "QQQ260330P00561000",
+    "contracts": 2,
+    "entry_price": 1.38,
+    "profit_target": 2.76,
+    "stop_loss": 0.5519999999999999,
+    "entry_time": "2026-03-30T10:45:06.069748-07:00",
+    "direction": "SHORT",
+    "signal": "SHORT_OB",
+    "ict_entry": 563.7955932617188,
+    "ict_sl": 564.6099975585937,
+    "ict_tp": 563.52001953125,
+    "peak_pnl_pct": 0.02898550724637684,
+    "dynamic_sl_pct": -0.6
+  }
+]

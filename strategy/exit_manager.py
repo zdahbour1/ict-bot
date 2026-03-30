@@ -8,34 +8,96 @@ Exits when:
                                   up 20% trails at peak - 10%
   - 90 minutes elapsed          → Time Exit (avoids theta decay)
   - 1:00 PM PT                  → EOD Exit
+
+Persistent storage: open trades saved to open_trades.json on every update.
+On restart, any saved trades are reloaded and monitoring resumes automatically.
 """
 import logging
 import threading
 import time
+import json
+import os
 from datetime import datetime
 import pytz
 
-from broker.tastytrade_client import TastytradeClient
 from alerts.emailer import send_trade_result_email
 import config
 
 log = logging.getLogger(__name__)
 PT  = pytz.timezone("America/Los_Angeles")
 
+TRADES_FILE = os.path.join(os.path.dirname(__file__), "..", "open_trades.json")
+
+
+def _serialize_trade(trade: dict) -> dict:
+    """Convert trade dict to JSON-serializable format."""
+    t = trade.copy()
+    if isinstance(t.get("entry_time"), datetime):
+        t["entry_time"] = t["entry_time"].isoformat()
+    return t
+
+
+def _deserialize_trade(t: dict) -> dict:
+    """Restore trade dict from JSON format."""
+    if isinstance(t.get("entry_time"), str):
+        try:
+            dt = datetime.fromisoformat(t["entry_time"])
+            if dt.tzinfo is None:
+                dt = PT.localize(dt)
+            t["entry_time"] = dt
+        except Exception:
+            t["entry_time"] = None
+    return t
+
 
 class ExitManager:
-    def __init__(self, client: TastytradeClient):
+    def __init__(self, client):
         self.client       = client
         self.open_trades  = []
         self._lock        = threading.Lock()
         self._stop_event  = threading.Event()
+        self._load_trades()
 
+    # ── Persistent storage ────────────────────────────────
+    def _load_trades(self):
+        """Load open trades from disk on startup."""
+        if not os.path.exists(TRADES_FILE):
+            return
+        try:
+            with open(TRADES_FILE, "r") as f:
+                saved = json.load(f)
+            self.open_trades = [_deserialize_trade(t) for t in saved]
+            if self.open_trades:
+                log.info(f"Resumed {len(self.open_trades)} open trade(s) from previous session:")
+                for t in self.open_trades:
+                    log.info(f"  {t['symbol']} | Entry: ${t['entry_price']:.2f} | Peak: {t.get('peak_pnl_pct', 0):+.1%}")
+        except Exception as e:
+            log.warning(f"Could not load open trades: {e}")
+            self.open_trades = []
+
+    def _save_trades(self):
+        """Save current open trades to disk."""
+        try:
+            with open(TRADES_FILE, "w") as f:
+                json.dump([_serialize_trade(t) for t in self.open_trades], f, indent=2)
+        except Exception as e:
+            log.warning(f"Could not save open trades: {e}")
+
+    def _clear_trades(self):
+        """Clear the trades file when all trades are closed."""
+        try:
+            if os.path.exists(TRADES_FILE):
+                os.remove(TRADES_FILE)
+        except Exception:
+            pass
+
+    # ── Trade management ──────────────────────────────────
     def add_trade(self, trade: dict):
-        # Initialise trailing stop state when trade is added
-        trade["peak_pnl_pct"] = 0.0
+        trade["peak_pnl_pct"]  = 0.0
         trade["dynamic_sl_pct"] = -config.STOP_LOSS
         with self._lock:
             self.open_trades.append(trade)
+            self._save_trades()
         log.info(f"Exit manager now tracking: {trade['symbol']}")
 
     def start(self):
@@ -70,7 +132,7 @@ class ExitManager:
                     if trade["peak_pnl_pct"] >= 0.20:
                         trade["dynamic_sl_pct"] = trade["peak_pnl_pct"] - 0.10
                     elif trade["peak_pnl_pct"] >= 0.10:
-                        trade["dynamic_sl_pct"] = 0.00   # breakeven
+                        trade["dynamic_sl_pct"] = 0.00
 
                     # ── Time exit (90 minutes) ────────────────
                     entry_time = trade.get("entry_time")
@@ -96,7 +158,6 @@ class ExitManager:
                     )
 
                     if hit_tp or hit_sl or time_exit or eod_exit:
-                        # Determine exit reason + result
                         if hit_tp:
                             result = "WIN"
                             reason = "TAKE PROFIT"
@@ -116,7 +177,6 @@ class ExitManager:
                             result = "WIN" if pnl_pct > 0 else "LOSS"
                             reason = "EOD EXIT"
 
-                        # Close the position
                         direction = trade.get("direction", "LONG")
                         if direction == "SHORT":
                             self.client.sell_put(trade["symbol"], trade["contracts"])
@@ -125,6 +185,7 @@ class ExitManager:
 
                         self._log_result(trade, current_price, result, reason)
                         send_trade_result_email(trade, result, current_price)
+                        # Don't add to still_open — trade is closed
                     else:
                         still_open.append(trade)
 
@@ -133,6 +194,12 @@ class ExitManager:
                     still_open.append(trade)
 
             self.open_trades = still_open
+
+            # Save after every check
+            if self.open_trades:
+                self._save_trades()
+            else:
+                self._clear_trades()
 
     def _log_result(self, trade: dict, exit_price: float, result: str, reason: str):
         pnl_pct = (exit_price - trade["entry_price"]) / trade["entry_price"] * 100
@@ -146,8 +213,8 @@ class ExitManager:
             f"P&L:     {pnl_pct:+.1f}%  (${pnl_usd:+.2f})\n"
             f"{'='*50}"
         )
-        import csv, os
-        log_path   = "trades.csv"
+        import csv
+        log_path     = "trades.csv"
         write_header = not os.path.exists(log_path)
         with open(log_path, "a", newline="") as f:
             writer = csv.writer(f)
