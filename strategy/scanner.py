@@ -251,6 +251,11 @@ class Scanner:
                     log.info("Already in an open trade — skipping entry, sending alert-only email.")
                     signal["alert_only"] = True
 
+                # ── Check: max trades per day reached? ────────
+                elif self._trades_today >= config.MAX_TRADES_PER_DAY:
+                    log.info(f"Max trades per day ({config.MAX_TRADES_PER_DAY}) reached — alert only.")
+                    signal["alert_only"] = True
+
                 else:
                     # ── Enter the trade ───────────────────────
                     try:
@@ -267,7 +272,7 @@ class Scanner:
                             trade["ict_tp"]    = signal["tp"]
                             self.exit_manager.add_trade(trade)
                             self._trades_today += 1
-                            log.info(f"Trade #{self._trades_today} today opened.")
+                            log.info(f"Trade #{self._trades_today} of {config.MAX_TRADES_PER_DAY} today opened.")
                     except Exception as e:
                         log.error(f"Trade entry failed: {e}", exc_info=True)
             else:
