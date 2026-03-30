@@ -13,6 +13,18 @@ TASTYTRADE_PASSWORD = os.getenv("TASTYTRADE_PASSWORD")
 TASTYTRADE_ACCOUNT  = os.getenv("TASTYTRADE_ACCOUNT")
 PAPER_TRADING       = os.getenv("PAPER_TRADING", "false").lower() == "true"
 
+# ── Broker (Schwab paperMoney) ───────────────────────────
+SCHWAB_APP_KEY        = os.getenv("SCHWAB_APP_KEY")
+SCHWAB_APP_SECRET     = os.getenv("SCHWAB_APP_SECRET")
+SCHWAB_CALLBACK_URL   = os.getenv("SCHWAB_CALLBACK_URL", "https://127.0.0.1")
+SCHWAB_PAPER_ACCOUNT  = os.getenv("SCHWAB_PAPER_ACCOUNT", "")
+USE_SCHWAB            = os.getenv("USE_SCHWAB", "false").lower() == "true"
+
+# ── Broker (Alpaca Paper Trading) ────────────────────────
+ALPACA_API_KEY        = os.getenv("ALPACA_API_KEY")
+ALPACA_SECRET_KEY     = os.getenv("ALPACA_SECRET_KEY")
+USE_ALPACA            = os.getenv("USE_ALPACA", "false").lower() == "true"
+
 # ── Dry Run (Paper Trading Simulation) ───────────────────
 # True  = logs all trades but never places real orders (safe to test)
 # False = places REAL trades on Tastytrade

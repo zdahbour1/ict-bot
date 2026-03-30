@@ -5,6 +5,8 @@ Run this file to start the bot:  python main.py
 import logging
 import config
 from broker.tastytrade_client import TastytradeClient
+from broker.schwab_client import SchwabClient
+from broker.alpaca_client import AlpacaClient
 from strategy.exit_manager import ExitManager
 from strategy.scanner import Scanner
 from webhook.server import create_app
@@ -32,10 +34,17 @@ def main():
     log.info(f"Window:    {config.TRADE_WINDOW_START_PT}:00-{config.TRADE_WINDOW_END_PT}:00 PT")
     log.info(f"Strategy:  Raid + Displacement + iFVG/OB (full ICT)")
     log.info(f"Max alerts/day: {config.MAX_ALERTS_PER_DAY}")
+    broker_name = "Schwab paperMoney" if config.USE_SCHWAB else ("Alpaca Paper Trading" if config.USE_ALPACA else "Tastytrade")
+    log.info(f"Broker:    {broker_name}")
     log.info("=" * 60)
 
     # ── Connect to broker ─────────────────────────────────
-    client = TastytradeClient()
+    if config.USE_SCHWAB:
+        client = SchwabClient()
+    elif config.USE_ALPACA:
+        client = AlpacaClient()
+    else:
+        client = TastytradeClient()
     client.connect()
 
     # ── Start exit monitor (background thread) ────────────
