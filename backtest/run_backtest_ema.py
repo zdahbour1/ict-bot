@@ -46,9 +46,9 @@ CONTRACTS               = 2
 PROFIT_TARGET           = 1.00
 STOP_LOSS               = 0.60
 MAX_TRADES_DAY          = 4
-TRADE_START_H           = 6
-TRADE_START_MIN         = 30   # 6:30 AM PT
-TRADE_END_H             = 12
+TRADE_START_H           = 7
+TRADE_START_MIN         = 0    # 7:00 AM PT
+TRADE_END_H             = 9
 VIX_THRESHOLD           = 35.0
 
 # ── EMA Settings ───────────────────────────────────────────
