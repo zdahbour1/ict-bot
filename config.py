@@ -53,7 +53,6 @@ OB_MAX_CANDLES        = 3        # max bearish candles for OB
 SL_BUFFER             = 0.05     # buffer below raid low for stop loss
 TP_LOOKBACK           = 40       # bars back to find swing high TP
 MAX_ALERTS_PER_DAY    = 10       # max alert emails per day
-MAX_TRADES_PER_DAY    = 2        # max actual trades placed per day
 
 # ── EMA Filter ────────────────────────────────────────────
 EMA_PERIOD_1H         = 20       # 1H 20 EMA for trend direction filter

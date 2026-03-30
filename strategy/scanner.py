@@ -267,7 +267,7 @@ class Scanner:
                             trade["ict_tp"]    = signal["tp"]
                             self.exit_manager.add_trade(trade)
                             self._trades_today += 1
-                            log.info(f"Trade #{self._trades_today} of {config.MAX_TRADES_PER_DAY} today opened.")
+                            log.info(f"Trade #{self._trades_today} today opened.")
                     except Exception as e:
                         log.error(f"Trade entry failed: {e}", exc_info=True)
             else:
