@@ -26,7 +26,7 @@ FVG_MIN_SIZE        = 0.10    # minimum FVG size in dollars
 OB_MAX_CANDLES      = 3       # max bearish candles before displacement = OB
 SL_BUFFER           = 0.05    # buffer below raid low for stop loss
 TP_LOOKBACK         = 40      # bars back to find swing high for TP
-MAX_ALERTS_PER_DAY  = 6       # hard cap on signals per day
+MAX_ALERTS_PER_DAY  = 999     # no practical limit
 
 
 # ── Displacement candle detection ────────────────────────

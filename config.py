@@ -52,7 +52,7 @@ FVG_MIN_SIZE          = 0.10     # min FVG size in dollars
 OB_MAX_CANDLES        = 3        # max bearish candles for OB
 SL_BUFFER             = 0.05     # buffer below raid low for stop loss
 TP_LOOKBACK           = 40       # bars back to find swing high TP
-MAX_ALERTS_PER_DAY    = 10       # max alert emails per day
+MAX_ALERTS_PER_DAY    = 999      # no practical limit
 
 # ── EMA Filter ────────────────────────────────────────────
 EMA_PERIOD_1H         = 20       # 1H 20 EMA for trend direction filter
@@ -70,4 +70,4 @@ PORT                  = 5000
 WEBHOOK_SECRET        = os.getenv("WEBHOOK_SECRET", "ict-secret-token")
 
 # ── Exit Monitor ─────────────────────────────────────────
-MONITOR_INTERVAL      = 30       # check P&L every 30 seconds
+MONITOR_INTERVAL      = 5        # check P&L every 5 seconds

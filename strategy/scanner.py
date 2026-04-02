@@ -74,15 +74,19 @@ def _get_ema_bias(bars_1h: pd.DataFrame, now_pt: datetime) -> str:
     return "NEUTRAL"
 
 
+MAX_TRADES_PER_DAY  = 8    # max trades per day
+MIN_MINUTES_BETWEEN = 15   # minimum minutes between trades
+
 class Scanner:
     def __init__(self, client, exit_manager):
-        self.client        = client
-        self.exit_manager  = exit_manager
-        self._stop         = threading.Event()
-        self._alerts_today = 0
-        self._trades_today = 0
-        self._last_date    = None
-        self._seen_setups  = set()
+        self.client          = client
+        self.exit_manager    = exit_manager
+        self._stop           = threading.Event()
+        self._alerts_today   = 0
+        self._trades_today   = 0
+        self._last_date      = None
+        self._seen_setups    = set()
+        self._last_trade_time = None  # PT datetime of last trade entry
 
     def start(self):
         thread = threading.Thread(target=self._loop, daemon=True)
@@ -113,11 +117,12 @@ class Scanner:
         # Reset daily counters at midnight
         today = now_pt.date()
         if self._last_date != today:
-            self._last_date    = today
-            self._alerts_today = 0
-            self._trades_today = 0
-            self._seen_setups  = set()
-            log.info(f"New trading day: {today}. Alert counter reset.")
+            self._last_date       = today
+            self._alerts_today    = 0
+            self._trades_today    = 0
+            self._seen_setups     = set()
+            self._last_trade_time = None
+            log.info(f"New trading day: {today}. Counters reset.")
 
         hour      = now_pt.hour
         minute    = now_pt.minute
@@ -139,6 +144,13 @@ class Scanner:
         return in_market, in_trade_window, is_weekend
 
     def _scan(self):
+        # Reset seen setups when a trade just closed (transition from in-trade to no-trade)
+        now_in_trade = len(self.exit_manager.open_trades) > 0
+        if getattr(self, '_was_in_trade', False) and not now_in_trade:
+            log.info("Trade closed — resetting seen setups for fresh signals.")
+            self._seen_setups = set()
+        self._was_in_trade = now_in_trade
+
         in_market, in_trade_window, is_weekend = self._check_windows()
 
         now_pt  = datetime.now(PT)
@@ -174,8 +186,8 @@ class Scanner:
             log.warning("Not enough bars after aggregation.")
             return
 
-        # Use 1m bars directly for higher precision signal detection
-        bars_scan = bars_1m.iloc[-400:]
+        # Scan last 120 bars (2 hours) for setups
+        bars_scan = bars_1m.iloc[-120:]
 
         # ── Compute significant levels ───────────────────
         levels = get_all_levels(bars_1m, bars_1h, bars_4h)
@@ -198,15 +210,9 @@ class Scanner:
             max_alerts=config.MAX_ALERTS_PER_DAY
         )
 
-        # ── Apply EMA filter ──────────────────────────────
-        filtered_long  = signals_long  if ema_bias == "BULLISH" else []
-        filtered_short = signals_short if ema_bias == "BEARISH" else []
-        if ema_bias == "NEUTRAL":
-            log.info("EMA FILTER: Neutral bias — skipping all signals.")
-        else:
-            log.info(f"EMA FILTER: {ema_bias} — keeping {'long' if ema_bias == 'BULLISH' else 'short'} signals only.")
-
-        signals = filtered_long + filtered_short
+        # EMA filter removed — all signals allowed in both directions
+        log.info(f"EMA bias: {ema_bias} (informational only — not filtering signals)")
+        signals = signals_long + signals_short
 
         # ── Deduplicate signals by (signal_type, entry_price) ─
         # Keeps only the first signal per unique type+entry combo
@@ -227,10 +233,7 @@ class Scanner:
         for signal in signals:
             setup_id = signal["setup_id"]
             if setup_id in self._seen_setups:
-                continue  # already alerted on this setup
-
-            self._seen_setups.add(setup_id)
-            self._alerts_today += 1
+                continue  # already traded this setup
 
             log.info(
                 f"{'='*55}\n"
@@ -252,6 +255,18 @@ class Scanner:
                     signal["alert_only"] = True
 
                 else:
+                    # ── Check: daily trade limit ──────────────
+                    if self._trades_today >= MAX_TRADES_PER_DAY:
+                        log.info(f"Max trades per day ({MAX_TRADES_PER_DAY}) reached — skipping entry.")
+                        continue
+
+                    # ── Check: 15 min gap between trades ─────
+                    if self._last_trade_time is not None:
+                        mins_since = (datetime.now(PT) - self._last_trade_time).total_seconds() / 60
+                        if mins_since < MIN_MINUTES_BETWEEN:
+                            log.info(f"Too soon since last trade ({mins_since:.1f} min) — waiting {MIN_MINUTES_BETWEEN} min gap.")
+                            continue
+
                     # ── Enter the trade ───────────────────────
                     try:
                         direction = signal.get("direction", "LONG")
@@ -266,8 +281,10 @@ class Scanner:
                             trade["ict_sl"]    = signal["sl"]
                             trade["ict_tp"]    = signal["tp"]
                             self.exit_manager.add_trade(trade)
+                            self._seen_setups.add(setup_id)  # only block after actual entry
                             self._trades_today += 1
-                            log.info(f"Trade #{self._trades_today} today opened.")
+                            self._last_trade_time = datetime.now(PT)
+                            log.info(f"Trade #{self._trades_today}/{MAX_TRADES_PER_DAY} today opened.")
                     except Exception as e:
                         log.error(f"Trade entry failed: {e}", exc_info=True)
             else:
@@ -275,8 +292,8 @@ class Scanner:
                 log.info("Signal outside trade window — sending alert-only email, no trade placed.")
                 signal["alert_only"] = True  # flag for emailer to note in subject
 
-            # ── Send email (market hours only) ───────────
-            if in_market:
+            # ── Send email only if a trade was actually opened ───────────
+            if trade and in_market:
                 send_signal_email(signal, trade)
             else:
-                log.info(f"Signal logged (no email — outside market hours): {signal['signal_type']} @ ${signal['entry_price']:.2f}")
+                log.info(f"Signal detected (no email — no trade placed): {signal['signal_type']} @ ${signal['entry_price']:.2f}")

@@ -29,10 +29,15 @@ from strategy.levels    import get_all_levels
 # ── Config ─────────────────────────────────────────────────
 TICKER          = "QQQ"
 CONTRACTS       = 2
-PROFIT_TARGET   = 0.25      # 25% TP
-STOP_LOSS       = 0.15      # 15% SL
-MAX_TRADES_DAY  = 6
-TRADE_START_H   = 7         # 7 AM PT
+PROFIT_TARGET   = 1.00      # 100% TP
+STOP_LOSS       = 0.60      # 60% SL
+TRAIL_BE        = 0.10      # +10% → move stop to breakeven
+TRAIL_START     = 0.20      # +20% → start trailing
+TRAIL_DIST      = 0.10      # trail 10% below peak
+TIME_EXIT_MIN   = 90        # 90 min time exit
+MAX_TRADES_DAY  = 999       # no daily limit
+TRADE_START_H   = 6         # 6:30 AM PT
+TRADE_START_MIN = 30
 TRADE_END_H     = 12        # 12 PM PT
 PT              = pytz.timezone("America/Los_Angeles")
 OUTPUT_FILE     = os.path.join(os.path.dirname(__file__), "ICT_Backtest_Report.xlsx")
@@ -72,16 +77,19 @@ def simulate_exit(bars_5m: pd.DataFrame, entry_bar: int,
     """
     Walk forward bar-by-bar after entry.
     Option P&L estimated using delta≈0.5 for ATM.
-    Exits at +25% TP, -15% SL, or end-of-day (1 PM PT).
+    Trailing stop: +10% → breakeven, +20% → trail at peak - 10%
+    TP: +100%, SL: -60%, Time exit: 90 min, EOD: 1 PM PT
     """
-    tp_px = entry_opt_px * (1 + PROFIT_TARGET)
-    sl_px = entry_opt_px * (1 - STOP_LOSS)
-    entry_close = bars_5m.iloc[entry_bar]["close"]
+    entry_close  = bars_5m.iloc[entry_bar]["close"]
+    peak_pnl_pct = 0.0
+    dynamic_sl   = -STOP_LOSS
+    MAX_BARS     = TIME_EXIT_MIN // 5  # 90min / 5min bars = 18 bars
 
     for i in range(entry_bar + 1, min(entry_bar + 300, len(bars_5m))):
         bar      = bars_5m.iloc[i]
         bar_time = bars_5m.index[i]
         bar_pt   = bar_to_pt(bar_time)
+        bars_in  = i - entry_bar
 
         # Underlying move → option P&L (delta ~0.5 ATM)
         underlying_chg = bar["close"] - entry_close
@@ -89,32 +97,36 @@ def simulate_exit(bars_5m: pd.DataFrame, entry_bar: int,
         cur_opt = max(round(entry_opt_px + opt_chg, 2), 0.01)
         pnl_pct = (cur_opt - entry_opt_px) / entry_opt_px
 
+        # No trailing stop — fixed TP and SL only
         hit_tp = pnl_pct >= PROFIT_TARGET
         hit_sl = pnl_pct <= -STOP_LOSS
-        eod    = bar_pt.hour >= 13   # 1 PM PT ≈ options expire
+        time_exit = bars_in >= MAX_BARS
+        eod       = bar_pt.hour >= 13
 
-        if hit_tp or hit_sl or eod:
+        if hit_tp or hit_sl or time_exit or eod:
             if hit_tp:
-                exit_px  = round(tp_px, 2)
-                pnl_pct  = PROFIT_TARGET
-                result   = "WIN"
+                result = "WIN"
+                reason = "TAKE PROFIT"
+                cur_opt = round(entry_opt_px * (1 + PROFIT_TARGET), 2)
             elif hit_sl:
-                exit_px  = round(sl_px, 2)
-                pnl_pct  = -STOP_LOSS
-                result   = "LOSS"
+                result = "LOSS"
+                reason = "STOP LOSS"
+            elif time_exit:
+                result = "WIN" if pnl_pct > 0 else "LOSS"
+                reason = "TIME EXIT"
             else:
-                exit_px = cur_opt
-                result  = "WIN" if pnl_pct > 0 else "LOSS"
+                result = "WIN" if pnl_pct > 0 else "LOSS"
+                reason = "EOD EXIT"
 
-            pnl_pct_fmt = round(pnl_pct * 100, 1)
-            pnl_usd     = round((exit_px - entry_opt_px) * 100 * CONTRACTS, 2)
+            pnl_usd = round((cur_opt - entry_opt_px) * 100 * CONTRACTS, 2)
             return {
                 "exit_time":       bar_time,
-                "exit_option_px":  exit_px,
-                "pnl_pct":         pnl_pct_fmt,
+                "exit_option_px":  cur_opt,
+                "pnl_pct":         round(pnl_pct * 100, 1),
                 "pnl_usd":         pnl_usd,
                 "result":          result,
-                "bars_held":       i - entry_bar,
+                "reason":          reason,
+                "bars_held":       bars_in,
             }
 
     # Fallback: last bar
@@ -146,7 +158,7 @@ def main():
     print("=" * 60)
     print("  ICT Strategy Backtest — QQQ 0DTE Options")
     print("  Period: Last 60 trading days (max free data)")
-    print("  Strategy: LONG + SHORT  |  25% TP / 15% SL")
+    print("  Strategy: LONG + SHORT  |  100% TP / 60% SL / Trail +10% BE / +20% trail")
     print("=" * 60)
     print()
 
@@ -254,9 +266,14 @@ def main():
             if entry_time is None:
                 continue
 
-            # Only within trade window
+            # Only within trade window (6:30 AM - 12:00 PM PT)
             et_pt = bar_to_pt(entry_time)
-            if not (TRADE_START_H <= et_pt.hour < TRADE_END_H):
+            in_window = (
+                (et_pt.hour > TRADE_START_H or
+                 (et_pt.hour == TRADE_START_H and et_pt.minute >= TRADE_START_MIN))
+                and et_pt.hour < TRADE_END_H
+            )
+            if not in_window:
                 continue
 
             entry_bar = sig.get("entry_bar", 0)
@@ -302,6 +319,7 @@ def main():
                 "P&L %":            f"{exit_info['pnl_pct']:+.1f}%",
                 "P&L $":            f"${exit_info['pnl_usd']:+.2f}",
                 "Result":           exit_info["result"],
+                "Exit Reason":      exit_info.get("reason", ""),
                 "_pnl_usd_raw":     exit_info["pnl_usd"],
                 "_result_raw":      exit_info["result"],
             })
