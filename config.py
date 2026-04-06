@@ -38,16 +38,21 @@ USE_IB                = os.getenv("USE_IB", "false").lower() == "true"
 DRY_RUN             = os.getenv("DRY_RUN", "true").lower() == "true"
 
 # ── Instruments ──────────────────────────────────────────
-TICKERS             = ["QQQ", "SPY", "AAPL", "NVDA", "TSLA"]
+# Load tickers from tickers.txt (one per line, blank lines and # comments ignored)
+_TICKERS_FILE = os.path.join(os.path.dirname(__file__), "tickers.txt")
+def _load_tickers():
+    if os.path.exists(_TICKERS_FILE):
+        with open(_TICKERS_FILE, "r") as f:
+            tickers = [line.strip().upper() for line in f
+                       if line.strip() and not line.strip().startswith("#")]
+        if tickers:
+            return tickers
+    return ["QQQ"]  # fallback default
+
+TICKERS             = _load_tickers()
 TICKER              = TICKERS[0]  # backward compat for backtests
 CONTRACTS           = 2          # default number of option contracts per trade
-CONTRACTS_PER_TICKER = {         # override per ticker (defaults to CONTRACTS)
-    "QQQ":  2,
-    "SPY":  2,
-    "AAPL": 2,
-    "NVDA": 2,
-    "TSLA": 2,
-}
+CONTRACTS_PER_TICKER = {t: 2 for t in TICKERS}  # default 2 contracts each
 
 # ── Option Exit Rules ────────────────────────────────────
 PROFIT_TARGET       = 1.00       # exit when option premium is up 100%
