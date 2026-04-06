@@ -27,7 +27,12 @@ from strategy.ict_short import run_strategy_short as run_short
 from strategy.levels    import get_all_levels
 
 # ── Config ─────────────────────────────────────────────────
-TICKER          = "QQQ"
+# Usage: python run_backtest.py [TICKER]   (default: all tickers)
+#        python run_backtest.py QQQ
+#        python run_backtest.py ALL
+import importlib
+_config = importlib.import_module("config")
+ALL_TICKERS     = getattr(_config, "TICKERS", ["QQQ"])
 CONTRACTS       = 2
 PROFIT_TARGET   = 1.00      # 100% TP
 STOP_LOSS       = 0.60      # 60% SL
@@ -40,7 +45,7 @@ TRADE_START_H   = 6         # 6:30 AM PT
 TRADE_START_MIN = 30
 TRADE_END_H     = 12        # 12 PM PT
 PT              = pytz.timezone("America/Los_Angeles")
-OUTPUT_FILE     = os.path.join(os.path.dirname(__file__), "ICT_Backtest_Report.xlsx")
+BACKTEST_DIR    = os.path.dirname(__file__)
 
 
 # ── Helpers ────────────────────────────────────────────────
@@ -154,16 +159,19 @@ def occ_symbol(ticker: str, exp_date: date, direction: str, strike: float) -> st
 
 # ── Main backtest ──────────────────────────────────────────
 
-def main():
-    print("=" * 60)
-    print("  ICT Strategy Backtest — QQQ 0DTE Options")
-    print("  Period: Last 60 trading days (max free data)")
-    print("  Strategy: LONG + SHORT  |  100% TP / 60% SL / Trail +10% BE / +20% trail")
-    print("=" * 60)
+def run_backtest_for_ticker(TICKER):
+    """Run backtest for a single ticker. Returns (ticker, summary_dict, trades_df) or None."""
+    OUTPUT_FILE = os.path.join(BACKTEST_DIR, f"ICT_Backtest_Report_{TICKER}.xlsx")
+
+    print(f"\n{'='*60}")
+    print(f"  ICT Strategy Backtest — {TICKER} 0DTE Options")
+    print(f"  Period: Last 60 trading days (max free data)")
+    print(f"  Strategy: LONG + SHORT  |  100% TP / 60% SL / Trail +10% BE / +20% trail")
+    print(f"{'='*60}")
     print()
 
     # ── Fetch data ───────────────────────────────────────
-    print("Downloading QQQ data from yfinance...")
+    print(f"Downloading {TICKER} data from yfinance...")
     raw_5m = yf.download(TICKER, period="60d", interval="5m",
                          auto_adjust=True, progress=False)
     raw_1h = yf.download(TICKER, period="60d", interval="1h",
@@ -172,8 +180,8 @@ def main():
                          auto_adjust=True, progress=False)   # resample to 4h
 
     if raw_5m.empty:
-        print("ERROR: Could not download data. Check internet connection.")
-        return
+        print(f"ERROR: Could not download data for {TICKER}. Skipping.")
+        return None
 
     # Flatten MultiIndex columns if present
     for df_ref in [raw_5m, raw_1h, raw_4h]:
@@ -306,7 +314,7 @@ def main():
                 "Signal Type":      sig.get("signal_type", ""),
                 "Raided Level":     sig.get("raid", {}).get("raided_level", ""),
                 "Entry Time (PT)":  et_pt.strftime("%I:%M %p"),
-                "QQQ Entry Price":  f"${entry_price:.2f}",
+                "Entry Price":      f"${entry_price:.2f}",
                 "Option Symbol":    symbol,
                 "Strike":           f"${strike}",
                 "Option Entry $":   f"${opt_px:.2f}",
@@ -440,8 +448,57 @@ def main():
         ws2.column_dimensions["A"].width = 22
         ws2.column_dimensions["B"].width = 70
 
-    print(f"Excel report saved to:\n  {OUTPUT_FILE}\n")
-    print("Open ICT_Backtest_Report.xlsx in your ict-bot\\backtest\\ folder.")
+    print(f"[{TICKER}] Excel report saved to:\n  {OUTPUT_FILE}\n")
+
+    return {
+        "ticker": TICKER,
+        "total_trades": total,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": win_rate,
+        "total_pnl": total_pnl,
+        "avg_win": avg_win if not math.isnan(avg_win) else 0,
+        "avg_loss": avg_loss if not math.isnan(avg_loss) else 0,
+    }
+
+
+def main():
+    """Run backtest for one or all tickers. Usage: python run_backtest.py [TICKER|ALL]"""
+    arg = sys.argv[1].upper() if len(sys.argv) > 1 else "ALL"
+
+    if arg == "ALL":
+        tickers = ALL_TICKERS
+    else:
+        tickers = [arg]
+
+    results = []
+    for ticker in tickers:
+        result = run_backtest_for_ticker(ticker)
+        if result:
+            results.append(result)
+
+    if len(results) > 1:
+        # Print comparison summary
+        print(f"\n{'='*70}")
+        print(f"  MULTI-TICKER COMPARISON SUMMARY")
+        print(f"{'='*70}")
+        print(f"  {'Ticker':<8} {'Trades':>8} {'Wins':>6} {'Losses':>8} {'Win %':>8} {'Total P&L':>12} {'Avg Win':>10} {'Avg Loss':>10}")
+        print(f"  {'-'*62}")
+
+        for r in sorted(results, key=lambda x: x["total_pnl"], reverse=True):
+            print(f"  {r['ticker']:<8} {r['total_trades']:>8} {r['wins']:>6} {r['losses']:>8} "
+                  f"{r['win_rate']:>7.1f}% ${r['total_pnl']:>+10.2f} ${r['avg_win']:>+8.2f} ${r['avg_loss']:>+8.2f}")
+
+        best = max(results, key=lambda x: x["total_pnl"])
+        print(f"\n  Most profitable ticker: {best['ticker']} (${best['total_pnl']:+.2f})")
+        print(f"{'='*70}\n")
+
+        # Save comparison CSV
+        comp_path = os.path.join(BACKTEST_DIR, "backtest_comparison.csv")
+        comp_df = pd.DataFrame(results)
+        comp_df = comp_df.sort_values("total_pnl", ascending=False)
+        comp_df.to_csv(comp_path, index=False)
+        print(f"  Comparison saved to: {comp_path}")
 
 
 if __name__ == "__main__":

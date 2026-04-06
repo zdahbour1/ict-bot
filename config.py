@@ -25,14 +25,29 @@ ALPACA_API_KEY        = os.getenv("ALPACA_API_KEY")
 ALPACA_SECRET_KEY     = os.getenv("ALPACA_SECRET_KEY")
 USE_ALPACA            = os.getenv("USE_ALPACA", "false").lower() == "true"
 
+# ── Broker (Interactive Brokers) ─────────────────────────
+IB_HOST               = os.getenv("IB_HOST", "127.0.0.1")
+IB_PORT               = int(os.getenv("IB_PORT", "4002"))       # 7497=TWS paper, 4002=Gateway paper
+IB_CLIENT_ID          = int(os.getenv("IB_CLIENT_ID", "1"))
+IB_ACCOUNT            = os.getenv("IB_ACCOUNT", "")
+USE_IB                = os.getenv("USE_IB", "false").lower() == "true"
+
 # ── Dry Run (Paper Trading Simulation) ───────────────────
 # True  = logs all trades but never places real orders (safe to test)
 # False = places REAL trades on Tastytrade
 DRY_RUN             = os.getenv("DRY_RUN", "true").lower() == "true"
 
-# ── Instrument ───────────────────────────────────────────
-TICKER              = "QQQ"
-CONTRACTS           = 2          # number of option contracts per trade
+# ── Instruments ──────────────────────────────────────────
+TICKERS             = ["QQQ", "SPY", "AAPL", "NVDA", "TSLA"]
+TICKER              = TICKERS[0]  # backward compat for backtests
+CONTRACTS           = 2          # default number of option contracts per trade
+CONTRACTS_PER_TICKER = {         # override per ticker (defaults to CONTRACTS)
+    "QQQ":  2,
+    "SPY":  2,
+    "AAPL": 2,
+    "NVDA": 2,
+    "TSLA": 2,
+}
 
 # ── Option Exit Rules ────────────────────────────────────
 PROFIT_TARGET       = 1.00       # exit when option premium is up 100%
@@ -41,7 +56,7 @@ STOP_LOSS           = 0.60       # exit when option premium is down 60%
 # ── Trade Window ──────────────────────────────────────────
 TRADE_WINDOW_START_PT  = 6       # 6:00 AM PT
 TRADE_WINDOW_START_MIN = 30      # 6:30 AM PT start
-TRADE_WINDOW_END_PT    = 12      # 12:00 PM PT
+TRADE_WINDOW_END_PT    = 13      # 1:00 PM PT (temp: extended for testing today)
 
 # ── ICT Strategy Parameters (from PDF) ───────────────────
 RAID_THRESHOLD        = 0.05     # min $ penetration below level to qualify as raid

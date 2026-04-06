@@ -6,3 +6,4 @@ requests
 yfinance
 pandas
 numpy
+ib_async

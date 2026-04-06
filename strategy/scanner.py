@@ -78,9 +78,11 @@ MAX_TRADES_PER_DAY  = 8    # max trades per day
 MIN_MINUTES_BETWEEN = 15   # minimum minutes between trades
 
 class Scanner:
-    def __init__(self, client, exit_manager):
+    def __init__(self, client, exit_manager, ticker=None, scan_offset=0):
         self.client          = client
         self.exit_manager    = exit_manager
+        self.ticker          = ticker or config.TICKER
+        self._scan_offset    = scan_offset  # stagger scans across tickers
         self._stop           = threading.Event()
         self._alerts_today   = 0
         self._trades_today   = 0
@@ -89,19 +91,22 @@ class Scanner:
         self._last_trade_time = None  # PT datetime of last trade entry
 
     def start(self):
-        thread = threading.Thread(target=self._loop, daemon=True)
+        thread = threading.Thread(target=self._loop, daemon=True, name=f"scanner-{self.ticker}")
         thread.start()
-        log.info("Scanner started — active 6:30 AM–1:00 PM PT (trades only 07:00–09:00 PT).")
+        log.info(f"[{self.ticker}] Scanner started — active 6:30 AM–1:00 PM PT.")
 
     def stop(self):
         self._stop.set()
 
     def _loop(self):
+        # Stagger start to avoid all tickers hitting yfinance at once
+        if self._scan_offset > 0:
+            time.sleep(self._scan_offset)
         while not self._stop.is_set():
             try:
                 self._scan()
             except Exception as e:
-                log.error(f"Scanner error: {e}", exc_info=True)
+                log.error(f"[{self.ticker}] Scanner error: {e}", exc_info=True)
             time.sleep(60)
 
     def _check_windows(self):
@@ -165,7 +170,7 @@ class Scanner:
         else:
             mode = "ALERT-ONLY MODE"
 
-        log.info(f"Running ICT scan at {now_str} PT [{mode}]...")
+        log.info(f"[{self.ticker}] Running ICT scan at {now_str} PT [{mode}]...")
 
         # ── News filter ───────────────────────────────────
         near_news, news_label = _is_near_news(now_pt)
@@ -174,7 +179,7 @@ class Scanner:
             return
 
         # ── Fetch and aggregate bars ─────────────────────
-        bars_1m = get_bars_1m(config.TICKER, days_back=5)
+        bars_1m = get_bars_1m(self.ticker, days_back=5)
         if bars_1m.empty:
             log.warning("No data returned. Skipping scan.")
             return
@@ -235,9 +240,11 @@ class Scanner:
             if setup_id in self._seen_setups:
                 continue  # already traded this setup
 
+            signal["ticker"] = self.ticker
+
             log.info(
                 f"{'='*55}\n"
-                f"ICT SIGNAL: {signal['signal_type']} [{mode}]\n"
+                f"[{self.ticker}] ICT SIGNAL: {signal['signal_type']} [{mode}]\n"
                 f"Entry:  ${signal['entry_price']:.2f}\n"
                 f"SL:     ${signal['sl']:.2f}\n"
                 f"TP:     ${signal['tp']:.2f}\n"
@@ -271,9 +278,9 @@ class Scanner:
                     try:
                         direction = signal.get("direction", "LONG")
                         if direction == "SHORT":
-                            trade = select_and_enter_put(self.client)
+                            trade = select_and_enter_put(self.client, self.ticker)
                         else:
-                            trade = select_and_enter(self.client)
+                            trade = select_and_enter(self.client, self.ticker)
 
                         if trade:
                             trade["signal"]    = signal["signal_type"]
@@ -284,7 +291,7 @@ class Scanner:
                             self._seen_setups.add(setup_id)  # only block after actual entry
                             self._trades_today += 1
                             self._last_trade_time = datetime.now(PT)
-                            log.info(f"Trade #{self._trades_today}/{MAX_TRADES_PER_DAY} today opened.")
+                            log.info(f"[{self.ticker}] Trade #{self._trades_today}/{MAX_TRADES_PER_DAY} today opened.")
                     except Exception as e:
                         log.error(f"Trade entry failed: {e}", exc_info=True)
             else:

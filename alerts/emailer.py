@@ -49,7 +49,7 @@ def send_signal_email(signal: dict, trade: dict = None):
         # ── Subject ───────────────────────────────────────
         alert_tag = "[ICT ALERT ONLY]" if signal.get("alert_only") else "[ICT TRADE]"
         subject = (
-            f"{alert_tag} {config.TICKER} {signal_type} "
+            f"{alert_tag} {signal.get("ticker", "QQQ")} {signal_type} "
             f"Entry={entry:.2f} SL={sl:.2f} TP={tp:.2f}"
         )
 
@@ -62,7 +62,7 @@ def send_signal_email(signal: dict, trade: dict = None):
         alert_only = signal.get("alert_only", False)
         body_lines = [
             "=" * 50,
-            f"ICT SIGNAL ALERT — {config.TICKER}",
+            f"ICT SIGNAL ALERT — {signal.get("ticker", "QQQ")}",
             "=" * 50,
             f"⚠️  ALERT ONLY — No trade placed (outside trade window)" if alert_only else "✅  TRADE OPENED",
             "",
@@ -72,16 +72,16 @@ def send_signal_email(signal: dict, trade: dict = None):
             f"Time (UTC):   {now_utc.strftime('%Y-%m-%d %H:%M:%S')}",
             "",
             "── Entry ───────────────────────────────",
-            f"Entry Price:  ${entry:.2f}  (QQQ level)",
+            f"Entry Price:  ${entry:.2f}  ({signal.get('ticker', 'QQQ')} level)",
             f"Stop Loss:    ${sl:.2f}",
             f"Take Profit:  ${tp:.2f}",
             f"Risk/Reward:  {((tp - entry) / (entry - sl)):.1f}R" if entry > sl else "",
             "",
             "── Option Details ──────────────────────",
-            f"Option:       QQQ {option_type} (0DTE ATM)",
+            f"Option:       {signal.get('ticker', 'QQQ')} {option_type} (0DTE ATM)",
             f"Strike:       {parse_strike_from_symbol(trade.get('symbol', '')) if trade else 'Pending'}",
             f"Premium Paid: ${trade.get('entry_price', 0):.2f} per contract" if trade else "Premium: Pending",
-            f"Contracts:    {config.CONTRACTS}",
+            f"Contracts:    {trade.get('contracts', config.CONTRACTS) if trade else config.CONTRACTS}",
             f"Total Cost:   ${trade.get('entry_price', 0) * 100 * config.CONTRACTS:.2f}" if trade else "",
             "",
             "── Raid Details ────────────────────────",
@@ -118,7 +118,7 @@ def send_signal_email(signal: dict, trade: dict = None):
         body_lines += [
             "── Bot Settings ────────────────────────",
             f"Mode:         {'DRY RUN' if config.DRY_RUN else 'LIVE'}",
-            f"Contracts:    {config.CONTRACTS}x QQQ ATM 0DTE {option_type}",
+            f"Contracts:    {trade.get('contracts', config.CONTRACTS) if trade else config.CONTRACTS}x {signal.get('ticker', 'QQQ')} ATM 0DTE {option_type}",
             f"Option TP:    {config.PROFIT_TARGET:.0%}",
             f"Option SL:    {config.STOP_LOSS:.0%}",
             f"Setup ID:     {signal.get('setup_id', 'N/A')}",

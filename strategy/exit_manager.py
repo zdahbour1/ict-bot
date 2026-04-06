@@ -212,9 +212,10 @@ class ExitManager:
     def _log_result(self, trade: dict, exit_price: float, result: str, reason: str):
         pnl_pct = (exit_price - trade["entry_price"]) / trade["entry_price"] * 100
         pnl_usd = (exit_price - trade["entry_price"]) * 100 * trade["contracts"]
+        ticker  = trade.get("ticker", "UNK")
         log.info(
             f"{'='*50}\n"
-            f"TRADE CLOSED — {result} ({reason})\n"
+            f"[{ticker}] TRADE CLOSED — {result} ({reason})\n"
             f"Symbol:  {trade['symbol']}\n"
             f"Entry:   ${trade['entry_price']:.2f}\n"
             f"Exit:    ${exit_price:.2f}\n"
@@ -222,17 +223,30 @@ class ExitManager:
             f"{'='*50}"
         )
         import csv
-        log_path     = "trades.csv"
+        header = ["entry_time", "ticker", "symbol", "direction", "contracts",
+                  "entry_price", "exit_price", "pnl_pct",
+                  "pnl_usd", "result", "reason"]
+        row = [
+            trade.get("entry_time"), ticker, trade["symbol"],
+            trade.get("direction", "LONG"), trade["contracts"],
+            trade["entry_price"], exit_price,
+            round(pnl_pct, 2), round(pnl_usd, 2), result, reason
+        ]
+
+        # Write to combined trades.csv
+        log_path = "trades.csv"
         write_header = not os.path.exists(log_path)
         with open(log_path, "a", newline="") as f:
             writer = csv.writer(f)
             if write_header:
-                writer.writerow(["entry_time", "symbol", "direction", "contracts",
-                                 "entry_price", "exit_price", "pnl_pct",
-                                 "pnl_usd", "result", "reason"])
-            writer.writerow([
-                trade.get("entry_time"), trade["symbol"],
-                trade.get("direction", "LONG"), trade["contracts"],
-                trade["entry_price"], exit_price,
-                round(pnl_pct, 2), round(pnl_usd, 2), result, reason
-            ])
+                writer.writerow(header)
+            writer.writerow(row)
+
+        # Write to per-ticker trades file
+        ticker_log = f"trades_{ticker}.csv"
+        write_header_t = not os.path.exists(ticker_log)
+        with open(ticker_log, "a", newline="") as f:
+            writer = csv.writer(f)
+            if write_header_t:
+                writer.writerow(header)
+            writer.writerow(row)
