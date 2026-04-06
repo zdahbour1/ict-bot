@@ -184,6 +184,65 @@ class IBClient:
             return float(ticker_data.close)
         raise ValueError(f"No IB option price data for {symbol}")
 
+    # ── Option Greeks (IB real-time) ─────────────────────────
+    def get_option_greeks(self, symbol: str) -> dict:
+        """Get real-time Greeks for an option via IB. Thread-safe."""
+        try:
+            return self._submit_to_ib(self._ib_get_greeks, symbol)
+        except Exception as e:
+            log.warning(f"Greeks fetch failed for {symbol}: {e}")
+            return {"delta": None, "gamma": None, "theta": None, "vega": None}
+
+    def _ib_get_greeks(self, symbol: str) -> dict:
+        """Runs on IB thread. Uses modelGreeks from reqMktData."""
+        contract = self._occ_to_contract(symbol)
+        ticker_data = self.ib.reqMktData(contract, "", False, False)
+        self.ib.sleep(3)  # Greeks need extra time to populate
+        self.ib.cancelMktData(contract)
+
+        greeks = {"delta": None, "gamma": None, "theta": None, "vega": None}
+
+        # Try modelGreeks first (computed by IB's model)
+        mg = ticker_data.modelGreeks
+        if mg:
+            greeks["delta"] = round(mg.delta, 4) if mg.delta is not None else None
+            greeks["gamma"] = round(mg.gamma, 6) if mg.gamma is not None else None
+            greeks["theta"] = round(mg.theta, 4) if mg.theta is not None else None
+            greeks["vega"] = round(mg.vega, 4) if mg.vega is not None else None
+            log.info(f"[IB] Greeks {symbol}: Δ={greeks['delta']} Γ={greeks['gamma']} "
+                     f"Θ={greeks['theta']} V={greeks['vega']}")
+        else:
+            log.warning(f"[IB] No modelGreeks available for {symbol}")
+
+        return greeks
+
+    # ── VIX (IB real-time) ────────────────────────────────────
+    def get_vix(self) -> float | None:
+        """Get real-time VIX level via IB. Thread-safe."""
+        try:
+            return self._submit_to_ib(self._ib_get_vix)
+        except Exception as e:
+            log.warning(f"VIX fetch failed: {e}")
+            return None
+
+    def _ib_get_vix(self) -> float:
+        """Runs on IB thread."""
+        from ib_async import Index
+        contract = Index("VIX", "CBOE")
+        self.ib.qualifyContracts(contract)
+        ticker_data = self.ib.reqMktData(contract, "", False, False)
+        self.ib.sleep(2)
+        self.ib.cancelMktData(contract)
+        if ticker_data.last and ticker_data.last > 0:
+            val = round(float(ticker_data.last), 2)
+            log.info(f"[IB] VIX: {val}")
+            return val
+        if ticker_data.close and ticker_data.close > 0:
+            val = round(float(ticker_data.close), 2)
+            log.info(f"[IB] VIX (close): {val}")
+            return val
+        raise ValueError("No VIX data received")
+
     # ── Order Placement ───────────────────────────────────────
     def buy_call(self, option_symbol: str, contracts: int) -> object:
         return self._place_order(option_symbol, contracts, "BUY", "call")

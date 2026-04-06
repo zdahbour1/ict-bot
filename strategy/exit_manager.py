@@ -21,6 +21,7 @@ from datetime import datetime
 import pytz
 
 from alerts.emailer import send_trade_result_email
+from strategy.indicators import compute_snapshot
 import config
 
 log = logging.getLogger(__name__)
@@ -191,7 +192,29 @@ class ExitManager:
                         else:
                             self.client.sell_call(trade["symbol"], trade["contracts"])
 
-                        self._log_result(trade, current_price, result, reason)
+                        # ── Exit-time enrichment ──────────────
+                        exit_enrichment = {"exit_time": datetime.now(PT)}
+                        try:
+                            ticker = trade.get("ticker", "QQQ")
+                            from data.ib_provider import get_bars_1m_ib
+                            exit_bars = get_bars_1m_ib(self.client, ticker, days_back=2)
+                            exit_enrichment["exit_indicators"] = compute_snapshot(exit_bars)
+                        except Exception:
+                            exit_enrichment["exit_indicators"] = {}
+                        try:
+                            exit_enrichment["exit_stock_price"] = self.client.get_realtime_equity_price(ticker)
+                        except Exception:
+                            exit_enrichment["exit_stock_price"] = None
+                        try:
+                            exit_enrichment["exit_greeks"] = self.client.get_option_greeks(trade["symbol"])
+                        except Exception:
+                            exit_enrichment["exit_greeks"] = {}
+                        try:
+                            exit_enrichment["exit_vix"] = self.client.get_vix()
+                        except Exception:
+                            exit_enrichment["exit_vix"] = None
+
+                        self._log_result(trade, current_price, result, reason, exit_enrichment)
                         send_trade_result_email(trade, result, current_price)
                         # Don't add to still_open — trade is closed
                     else:
@@ -209,7 +232,8 @@ class ExitManager:
             else:
                 self._clear_trades()
 
-    def _log_result(self, trade: dict, exit_price: float, result: str, reason: str):
+    def _log_result(self, trade: dict, exit_price: float, result: str, reason: str,
+                    exit_enrichment: dict = None):
         pnl_pct = (exit_price - trade["entry_price"]) / trade["entry_price"] * 100
         pnl_usd = (exit_price - trade["entry_price"]) * 100 * trade["contracts"]
         ticker  = trade.get("ticker", "UNK")
@@ -223,30 +247,75 @@ class ExitManager:
             f"{'='*50}"
         )
         import csv
-        header = ["entry_time", "ticker", "symbol", "direction", "contracts",
-                  "entry_price", "exit_price", "pnl_pct",
-                  "pnl_usd", "result", "reason"]
-        row = [
-            trade.get("entry_time"), ticker, trade["symbol"],
-            trade.get("direction", "LONG"), trade["contracts"],
-            trade["entry_price"], exit_price,
-            round(pnl_pct, 2), round(pnl_usd, 2), result, reason
+
+        if exit_enrichment is None:
+            exit_enrichment = {}
+
+        # Extract entry enrichment from trade dict
+        ei = trade.get("entry_indicators", {})
+        eg = trade.get("entry_greeks", {})
+        # Extract exit enrichment
+        xi = exit_enrichment.get("exit_indicators", {})
+        xg = exit_enrichment.get("exit_greeks", {})
+
+        header = [
+            "entry_time", "exit_time", "ticker", "symbol", "direction", "contracts",
+            "entry_price", "exit_price", "pnl_pct", "pnl_usd", "result", "reason",
+            "entry_stock_price", "exit_stock_price",
+            "entry_delta", "entry_gamma", "entry_theta", "entry_vega",
+            "exit_delta", "exit_gamma", "exit_theta", "exit_vega",
+            "entry_vwap", "exit_vwap",
+            "entry_vix", "exit_vix",
+            "entry_rsi_14", "exit_rsi_14",
+            "entry_sma_7", "entry_sma_10", "entry_sma_20", "entry_sma_50",
+            "exit_sma_7", "exit_sma_10", "exit_sma_20", "exit_sma_50",
+            "entry_ema_7", "entry_ema_10", "entry_ema_20", "entry_ema_50",
+            "exit_ema_7", "exit_ema_10", "exit_ema_20", "exit_ema_50",
+            "entry_macd_line", "entry_macd_signal", "entry_macd_histogram",
+            "exit_macd_line", "exit_macd_signal", "exit_macd_histogram",
         ]
 
-        # Write to combined trades.csv
-        log_path = "trades.csv"
-        write_header = not os.path.exists(log_path)
-        with open(log_path, "a", newline="") as f:
-            writer = csv.writer(f)
-            if write_header:
-                writer.writerow(header)
-            writer.writerow(row)
+        row = [
+            trade.get("entry_time"),
+            exit_enrichment.get("exit_time"),
+            ticker, trade["symbol"],
+            trade.get("direction", "LONG"), trade["contracts"],
+            trade["entry_price"], exit_price,
+            round(pnl_pct, 2), round(pnl_usd, 2), result, reason,
+            trade.get("entry_stock_price"),
+            exit_enrichment.get("exit_stock_price"),
+            eg.get("delta"), eg.get("gamma"), eg.get("theta"), eg.get("vega"),
+            xg.get("delta"), xg.get("gamma"), xg.get("theta"), xg.get("vega"),
+            ei.get("vwap"), xi.get("vwap"),
+            trade.get("entry_vix"), exit_enrichment.get("exit_vix"),
+            ei.get("rsi_14"), xi.get("rsi_14"),
+            ei.get("sma_7"), ei.get("sma_10"), ei.get("sma_20"), ei.get("sma_50"),
+            xi.get("sma_7"), xi.get("sma_10"), xi.get("sma_20"), xi.get("sma_50"),
+            ei.get("ema_7"), ei.get("ema_10"), ei.get("ema_20"), ei.get("ema_50"),
+            xi.get("ema_7"), xi.get("ema_10"), xi.get("ema_20"), xi.get("ema_50"),
+            ei.get("macd_line"), ei.get("macd_signal"), ei.get("macd_histogram"),
+            xi.get("macd_line"), xi.get("macd_signal"), xi.get("macd_histogram"),
+        ]
 
-        # Write to per-ticker trades file
-        ticker_log = f"trades_{ticker}.csv"
-        write_header_t = not os.path.exists(ticker_log)
-        with open(ticker_log, "a", newline="") as f:
-            writer = csv.writer(f)
-            if write_header_t:
-                writer.writerow(header)
-            writer.writerow(row)
+        def _write_csv(path):
+            # Check if existing file has old header — rename to avoid mismatch
+            if os.path.exists(path):
+                try:
+                    with open(path, "r") as f:
+                        first_line = f.readline().strip()
+                    if first_line and "exit_time" not in first_line:
+                        old_path = path.replace(".csv", "_old.csv")
+                        os.rename(path, old_path)
+                        log.info(f"Migrated old CSV format: {path} → {old_path}")
+                except Exception:
+                    pass
+
+            write_header = not os.path.exists(path)
+            with open(path, "a", newline="") as f:
+                writer = csv.writer(f)
+                if write_header:
+                    writer.writerow(header)
+                writer.writerow(row)
+
+        _write_csv("trades.csv")
+        _write_csv(f"trades_{ticker}.csv")

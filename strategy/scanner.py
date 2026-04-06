@@ -18,6 +18,7 @@ from strategy.levels import get_all_levels
 from strategy.ict_long import run_strategy
 from strategy.ict_short import run_strategy_short
 from strategy.option_selector import select_and_enter, select_and_enter_put
+from strategy.indicators import compute_snapshot
 from alerts.emailer import send_signal_email
 import config
 
@@ -294,6 +295,25 @@ class Scanner:
                             trade["ict_entry"] = signal["entry_price"]
                             trade["ict_sl"]    = signal["sl"]
                             trade["ict_tp"]    = signal["tp"]
+
+                            # ── Entry-time enrichment ─────────
+                            try:
+                                trade["entry_indicators"] = compute_snapshot(bars_1m)
+                            except Exception:
+                                trade["entry_indicators"] = {}
+                            try:
+                                trade["entry_stock_price"] = self.client.get_realtime_equity_price(self.ticker)
+                            except Exception:
+                                trade["entry_stock_price"] = None
+                            try:
+                                trade["entry_greeks"] = self.client.get_option_greeks(trade["symbol"])
+                            except Exception:
+                                trade["entry_greeks"] = {}
+                            try:
+                                trade["entry_vix"] = self.client.get_vix()
+                            except Exception:
+                                trade["entry_vix"] = None
+
                             self.exit_manager.add_trade(trade)
                             self._seen_setups.add(setup_id)  # only block after actual entry
                             self._trades_today += 1
