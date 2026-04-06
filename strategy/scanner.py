@@ -274,13 +274,16 @@ class Scanner:
                             log.info(f"Too soon since last trade ({mins_since:.1f} min) — waiting {MIN_MINUTES_BETWEEN} min gap.")
                             continue
 
-                    # ── Enter the trade ───────────────────────
+                    # ── Enter the trade (with timeout) ────────
                     try:
+                        import concurrent.futures
                         direction = signal.get("direction", "LONG")
-                        if direction == "SHORT":
-                            trade = select_and_enter_put(self.client, self.ticker)
-                        else:
-                            trade = select_and_enter(self.client, self.ticker)
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                            if direction == "SHORT":
+                                future = pool.submit(select_and_enter_put, self.client, self.ticker)
+                            else:
+                                future = pool.submit(select_and_enter, self.client, self.ticker)
+                            trade = future.result(timeout=30)  # 30s max for option entry
 
                         if trade:
                             trade["signal"]    = signal["signal_type"]
@@ -292,8 +295,10 @@ class Scanner:
                             self._trades_today += 1
                             self._last_trade_time = datetime.now(PT)
                             log.info(f"[{self.ticker}] Trade #{self._trades_today}/{MAX_TRADES_PER_DAY} today opened.")
+                    except concurrent.futures.TimeoutError:
+                        log.warning(f"[{self.ticker}] Trade entry timed out (30s) — skipping, will retry next cycle.")
                     except Exception as e:
-                        log.error(f"Trade entry failed: {e}", exc_info=True)
+                        log.error(f"[{self.ticker}] Trade entry failed: {e}", exc_info=True)
             else:
                 # ── Outside trade window: alert only ─────────
                 log.info("Signal outside trade window — sending alert-only email, no trade placed.")
