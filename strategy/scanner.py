@@ -12,6 +12,7 @@ import pandas as pd
 import numpy as np
 
 from data.provider import get_bars_1m
+from data.ib_provider import get_bars_1m_ib
 from data.aggregator import aggregate
 from strategy.levels import get_all_levels
 from strategy.ict_long import run_strategy
@@ -178,8 +179,11 @@ class Scanner:
             log.info(f"NEWS FILTER: Skipping scan — {news_label} within {config.NEWS_BUFFER_MIN} min.")
             return
 
-        # ── Fetch and aggregate bars ─────────────────────
-        bars_1m = get_bars_1m(self.ticker, days_back=5)
+        # ── Fetch and aggregate bars (IB real-time) ──────
+        if hasattr(self.client, '_submit_to_ib'):
+            bars_1m = get_bars_1m_ib(self.client, self.ticker, days_back=5)
+        else:
+            bars_1m = get_bars_1m(self.ticker, days_back=5)
         if bars_1m.empty:
             log.warning("No data returned. Skipping scan.")
             return
