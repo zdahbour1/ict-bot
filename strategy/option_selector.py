@@ -1,7 +1,7 @@
 """
 Option Selector
 Decides WHICH option to buy when an ICT signal fires.
-Supports any ticker with ATM 0DTE options.
+Uses IB real-time data for pricing and captures actual fill prices.
 """
 import logging
 import config
@@ -13,10 +13,9 @@ def select_and_enter(client, ticker: str = "QQQ") -> dict | None:
     """
     Called when a bullish ICT signal is detected.
     1. Finds the ATM 0DTE call for the given ticker
-    2. Places the buy order
-    3. Returns trade info dict for the exit manager to monitor
-
-    Returns None if entry was skipped (e.g. outside trading hours).
+    2. Gets real-time quote from IB
+    3. Places the buy order on IB
+    4. Uses actual IB fill price as entry (not the pre-order quote)
     """
     import pytz
     from datetime import datetime
@@ -33,12 +32,20 @@ def select_and_enter(client, ticker: str = "QQQ") -> dict | None:
     # ── Find ATM 0DTE call ────────────────────────────────
     option_symbol = client.get_atm_call_symbol(ticker)
 
-    # ── Get entry price before placing order ──────────────
-    entry_price = client.get_option_price(option_symbol)
-    log.info(f"[{ticker}] Entry price: ${entry_price:.2f} per contract")
+    # ── Get IB real-time quote (pre-order reference) ──────
+    pre_quote = client.get_option_price(option_symbol)
+    log.info(f"[{ticker}] IB pre-order quote: ${pre_quote:.2f} per contract")
 
-    # ── Place order ───────────────────────────────────────
-    client.buy_call(option_symbol, contracts)
+    # ── Place order and get actual fill price ─────────────
+    order_result = client.buy_call(option_symbol, contracts)
+
+    # Use actual IB fill price if available, otherwise pre-order quote
+    if isinstance(order_result, dict) and order_result.get("fill_price", 0) > 0:
+        entry_price = order_result["fill_price"]
+        log.info(f"[{ticker}] Actual IB fill price: ${entry_price:.2f} (quote was ${pre_quote:.2f})")
+    else:
+        entry_price = pre_quote
+        log.info(f"[{ticker}] Using pre-order quote as entry: ${entry_price:.2f}")
 
     # ── Return trade info for exit manager ────────────────
     trade = {
@@ -63,8 +70,9 @@ def select_and_enter_put(client, ticker: str = "QQQ") -> dict | None:
     """
     Called when a bearish ICT signal is detected.
     1. Finds the ATM 0DTE put for the given ticker
-    2. Places the buy order
-    3. Returns trade info dict for the exit manager to monitor
+    2. Gets real-time quote from IB
+    3. Places the buy order on IB
+    4. Uses actual IB fill price as entry
     """
     import pytz
     from datetime import datetime
@@ -79,10 +87,20 @@ def select_and_enter_put(client, ticker: str = "QQQ") -> dict | None:
     log.info(f"[{ticker}] SHORT signal inside trading window — entering PUT trade...")
 
     option_symbol = client.get_atm_put_symbol(ticker)
-    entry_price   = client.get_option_price(option_symbol)
-    log.info(f"[{ticker}] PUT entry price: ${entry_price:.2f} per contract")
 
-    client.buy_put(option_symbol, contracts)
+    # ── Get IB real-time quote (pre-order reference) ──────
+    pre_quote = client.get_option_price(option_symbol)
+    log.info(f"[{ticker}] IB pre-order PUT quote: ${pre_quote:.2f} per contract")
+
+    # ── Place order and get actual fill price ─────────────
+    order_result = client.buy_put(option_symbol, contracts)
+
+    if isinstance(order_result, dict) and order_result.get("fill_price", 0) > 0:
+        entry_price = order_result["fill_price"]
+        log.info(f"[{ticker}] Actual IB fill price: ${entry_price:.2f} (quote was ${pre_quote:.2f})")
+    else:
+        entry_price = pre_quote
+        log.info(f"[{ticker}] Using pre-order quote as entry: ${entry_price:.2f}")
 
     trade = {
         "ticker":        ticker,

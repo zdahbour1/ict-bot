@@ -3,6 +3,7 @@ ICT QQQ Options Bot — Entry Point
 Run this file to start the bot:  python main.py
 """
 import logging
+import threading
 import config
 from strategy.exit_manager import ExitManager
 from strategy.scanner import Scanner
@@ -66,12 +67,33 @@ def main():
         scanners.append(scanner)
     log.info(f"Launched {len(scanners)} scanner threads: {', '.join(config.TICKERS)}")
 
-    # ── Start webhook server (also accepts manual signals) ─
+    # ── Start webhook server in background thread ──────────
     app = create_app(client, exit_manager)
     log.info(f"Webhook server on port {config.PORT} (manual override)")
     log.info(f"Health check: http://localhost:{config.PORT}/status")
     log.info("Bot is running. All scanners active during trade window.")
-    app.run(host="0.0.0.0", port=config.PORT)
+    flask_thread = threading.Thread(
+        target=lambda: app.run(host="0.0.0.0", port=config.PORT, use_reloader=False),
+        daemon=True, name="flask-webhook"
+    )
+    flask_thread.start()
+
+    # ── Main loop: process IB orders on the main thread ───
+    # IB's event loop must run on the thread that called connect()
+    import time
+    log.info("Main thread: processing IB order queue...")
+    while True:
+        try:
+            if hasattr(client, 'process_orders'):
+                client.process_orders()
+            else:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            log.info("Shutting down...")
+            break
+        except Exception as e:
+            log.error(f"Main loop error: {e}")
+            time.sleep(1)
 
 
 if __name__ == "__main__":
