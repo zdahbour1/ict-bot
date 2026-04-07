@@ -142,10 +142,17 @@ class ExitManager:
                         trade["peak_pnl_pct"] = pnl_pct
 
                     # ── Trailing stop logic ───────────────────
-                    if trade["peak_pnl_pct"] >= 0.20:
-                        trade["dynamic_sl_pct"] = trade["peak_pnl_pct"] - 0.10
-                    elif trade["peak_pnl_pct"] >= 0.10:
-                        trade["dynamic_sl_pct"] = 0.00
+                    # SL stays at -60% but resets relative to peak
+                    # every time peak moves up by another 10% increment.
+                    # E.g. peak +10% → SL at +10% - 60% = -50%
+                    #      peak +20% → SL at +20% - 60% = -40%
+                    #      peak +50% → SL at +50% - 60% = -10%
+                    peak = trade["peak_pnl_pct"]
+                    # How many 10% steps has the peak crossed?
+                    steps = int(peak / 0.10)
+                    if steps > 0:
+                        trail_base = steps * 0.10  # highest 10% milestone
+                        trade["dynamic_sl_pct"] = trail_base - config.STOP_LOSS
 
                     # ── Time exit (90 minutes) ────────────────
                     entry_time = trade.get("entry_time")
@@ -174,12 +181,10 @@ class ExitManager:
                         if hit_tp:
                             result = "WIN"
                             reason = "TAKE PROFIT"
-                        elif hit_sl and trade["dynamic_sl_pct"] == 0.0:
-                            result = "SCRATCH"
-                            reason = "BREAKEVEN"
-                        elif hit_sl and trade["dynamic_sl_pct"] > 0:
-                            result = "WIN"
-                            reason = "TRAIL STOP"
+                        elif hit_sl and trade["dynamic_sl_pct"] > -config.STOP_LOSS:
+                            # SL was trailed up from initial level
+                            result = "WIN" if pnl_pct > 0 else "LOSS" if pnl_pct < 0 else "SCRATCH"
+                            reason = f"TRAIL STOP (SL={trade['dynamic_sl_pct']:+.0%})"
                         elif hit_sl:
                             result = "LOSS"
                             reason = "STOP LOSS"
