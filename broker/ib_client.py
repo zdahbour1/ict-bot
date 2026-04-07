@@ -98,49 +98,89 @@ class IBClient:
             return float(ticker_data.close)
         raise ValueError(f"No IB price data for {ticker}")
 
-    # ── ATM Option Symbol ─────────────────────────────────────
+    # ── ATM Option Symbol (IB option chain) ─────────────────
     def get_atm_call_symbol(self, ticker: str) -> str:
-        return self._get_atm_symbol(ticker, "C")
+        """Find ATM call using IB's option chain. Thread-safe."""
+        return self._submit_to_ib(self._ib_get_atm_symbol, ticker, "C")
 
     def get_atm_put_symbol(self, ticker: str) -> str:
-        return self._get_atm_symbol(ticker, "P")
+        """Find ATM put using IB's option chain. Thread-safe."""
+        return self._submit_to_ib(self._ib_get_atm_symbol, ticker, "P")
 
-    def _get_atm_symbol(self, ticker: str, option_type: str) -> str:
+    def _ib_get_atm_symbol(self, ticker: str, option_type: str) -> str:
         """
-        Build OCC symbol for ATM contract with nearest expiration.
-        Uses IB for real-time price, yfinance only for chain metadata.
+        Find ATM option using IB's own option chain data.
+        Uses reqSecDefOptParams to get valid expirations and strikes.
+        Runs on IB thread.
         """
-        import yfinance as yf
+        # Get real-time price for ATM strike selection
+        contract = Stock(ticker, "SMART", "USD")
+        self.ib.qualifyContracts(contract)
+        ticker_data = self.ib.reqMktData(contract, "", False, False)
+        self.ib.sleep(2)
+        price = 0.0
+        if ticker_data.bid and ticker_data.bid > 0 and ticker_data.ask and ticker_data.ask > 0:
+            price = round((ticker_data.bid + ticker_data.ask) / 2, 2)
+        elif ticker_data.last and ticker_data.last > 0:
+            price = float(ticker_data.last)
+        elif ticker_data.close and ticker_data.close > 0:
+            price = float(ticker_data.close)
+        self.ib.cancelMktData(contract)
 
-        # Get real-time price from IB for ATM strike
-        price = self.get_realtime_equity_price(ticker)
-        strike = round(price)
-        today = date.today()
-        today_str = today.strftime("%Y-%m-%d")
+        if price <= 0:
+            raise ValueError(f"No IB price data for {ticker}")
 
-        # Use yfinance only for expiration date list (metadata, not pricing)
-        yf_ticker = yf.Ticker(ticker)
-        expirations = yf_ticker.options
+        log.info(f"[{ticker}] IB price: ${price:.2f}")
 
-        if not expirations:
-            raise RuntimeError(f"No option expirations found for {ticker}")
+        # Get valid option chain params from IB
+        chains = self.ib.reqSecDefOptParams(ticker, "", contract.secType, contract.conId)
+        if not chains:
+            raise RuntimeError(f"No option chain found on IB for {ticker}")
 
-        if today_str in expirations:
-            exp_date = today_str
-            log.info(f"[{ticker}] 0DTE expiration available: {exp_date}")
+        # Find the SMART exchange chain (most liquid)
+        chain = None
+        for c in chains:
+            if c.exchange == "SMART":
+                chain = c
+                break
+        if chain is None:
+            chain = chains[0]  # fallback to first available
+
+        # Find nearest expiration (prefer today/0DTE)
+        today_str = date.today().strftime("%Y%m%d")
+        expirations = sorted(chain.expirations)
+        exp = None
+        for e in expirations:
+            if e >= today_str:
+                exp = e
+                break
+        if exp is None:
+            raise RuntimeError(f"No future expirations found on IB for {ticker}")
+
+        exp_display = f"{exp[:4]}-{exp[4:6]}-{exp[6:8]}"
+        if exp == today_str:
+            log.info(f"[{ticker}] 0DTE expiration on IB: {exp_display}")
         else:
-            future_exps = [e for e in expirations if e >= today_str]
-            if not future_exps:
-                raise RuntimeError(f"No future expirations found for {ticker}")
-            exp_date = future_exps[0]
-            log.info(f"[{ticker}] No 0DTE — using nearest expiry: {exp_date}")
+            log.info(f"[{ticker}] Nearest IB expiry: {exp_display}")
 
-        exp_dt = datetime.strptime(exp_date, "%Y-%m-%d")
-        exp = exp_dt.strftime("%y%m%d")
-        strike_str = str(int(strike * 1000)).zfill(8)
-        symbol = f"{ticker}{exp}{option_type}{strike_str}"
-        log.info(f"[{ticker}] ATM {option_type} symbol: {symbol} (strike ${strike}, exp {exp_date})")
-        return symbol
+        # Find ATM strike from IB's valid strikes
+        strikes = sorted(chain.strikes)
+        atm_strike = min(strikes, key=lambda s: abs(s - price))
+        log.info(f"[{ticker}] ATM strike from IB chain: ${atm_strike} (price ${price:.2f})")
+
+        # Qualify the specific option contract on IB
+        right = "C" if option_type == "C" else "P"
+        opt_contract = Option(ticker, exp, atm_strike, right, "SMART")
+        qualified = self.ib.qualifyContracts(opt_contract)
+        if not qualified:
+            raise RuntimeError(f"Could not qualify IB option: {ticker} {exp} {atm_strike} {right}")
+
+        # Build OCC symbol for internal tracking
+        exp_short = exp[2:]  # YYMMDD
+        strike_str = str(int(atm_strike * 1000)).zfill(8)
+        occ_symbol = f"{ticker}{exp_short}{option_type}{strike_str}"
+        log.info(f"[{ticker}] ATM {option_type} symbol: {occ_symbol} (strike ${atm_strike}, exp {exp_display})")
+        return occ_symbol
 
     # ── OCC Symbol → IB Contract (runs on IB thread) ─────────
     def _occ_to_contract(self, occ_symbol: str) -> Option:
