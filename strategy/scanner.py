@@ -261,9 +261,12 @@ class Scanner:
             trade = None
 
             if in_trade_window:
-                # ── Check: already in a trade? ────────────────
-                if len(self.exit_manager.open_trades) > 0:
-                    log.info("Already in an open trade — skipping entry, sending alert-only email.")
+                # ── Check: already in a trade for THIS ticker? ─
+                ticker_has_open = any(
+                    t.get("ticker") == self.ticker for t in self.exit_manager.open_trades
+                )
+                if ticker_has_open:
+                    log.info(f"[{self.ticker}] Already has an open trade — skipping entry.")
                     signal["alert_only"] = True
 
                 else:
