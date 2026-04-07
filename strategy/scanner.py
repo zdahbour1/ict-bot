@@ -91,6 +91,7 @@ class Scanner:
         self._last_date      = None
         self._seen_setups    = set()
         self._last_trade_time = None  # PT datetime of last trade entry
+        self._entry_pending  = False  # True while an order is being placed
 
     def start(self):
         thread = threading.Thread(target=self._loop, daemon=True, name=f"scanner-{self.ticker}")
@@ -151,12 +152,23 @@ class Scanner:
         return in_market, in_trade_window, is_weekend
 
     def _scan(self):
+        # Clear pending flag if trade is now tracked or if no position exists
+        if self._entry_pending:
+            ticker_in_open = any(
+                t.get("ticker") == self.ticker for t in self.exit_manager.open_trades
+            )
+            if ticker_in_open:
+                self._entry_pending = False  # trade confirmed in exit manager
+
         # Reset seen setups when a trade just closed (transition from in-trade to no-trade)
-        now_in_trade = len(self.exit_manager.open_trades) > 0
-        if getattr(self, '_was_in_trade', False) and not now_in_trade:
-            log.info("Trade closed — resetting seen setups for fresh signals.")
+        ticker_has_trade = any(
+            t.get("ticker") == self.ticker for t in self.exit_manager.open_trades
+        )
+        if getattr(self, '_was_in_trade', False) and not ticker_has_trade:
+            log.info(f"[{self.ticker}] Trade closed — resetting seen setups for fresh signals.")
             self._seen_setups = set()
-        self._was_in_trade = now_in_trade
+            self._entry_pending = False
+        self._was_in_trade = ticker_has_trade
 
         in_market, in_trade_window, is_weekend = self._check_windows()
 
@@ -265,7 +277,7 @@ class Scanner:
                 ticker_has_open = any(
                     t.get("ticker") == self.ticker for t in self.exit_manager.open_trades
                 )
-                if ticker_has_open:
+                if ticker_has_open or self._entry_pending:
                     log.info(f"[{self.ticker}] Already has an open trade — skipping entry.")
                     signal["alert_only"] = True
 
@@ -285,6 +297,7 @@ class Scanner:
                     # ── Enter the trade (with timeout) ────────
                     try:
                         import concurrent.futures
+                        self._entry_pending = True
                         direction = signal.get("direction", "LONG")
                         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                             if direction == "SHORT":
@@ -323,8 +336,10 @@ class Scanner:
                             self._last_trade_time = datetime.now(PT)
                             log.info(f"[{self.ticker}] Trade #{self._trades_today}/{MAX_TRADES_PER_DAY} today opened.")
                     except concurrent.futures.TimeoutError:
-                        log.warning(f"[{self.ticker}] Trade entry timed out (30s) — skipping, will retry next cycle.")
+                        # Order may still fill in background — keep pending flag
+                        log.warning(f"[{self.ticker}] Trade entry timed out (30s) — keeping pending, will not enter another.")
                     except Exception as e:
+                        self._entry_pending = False
                         log.error(f"[{self.ticker}] Trade entry failed: {e}", exc_info=True)
             else:
                 # ── Outside trade window: alert only ─────────
