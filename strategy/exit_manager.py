@@ -28,6 +28,10 @@ log = logging.getLogger(__name__)
 PT  = pytz.timezone("America/Los_Angeles")
 
 TRADES_FILE = os.path.join(os.path.dirname(__file__), "..", "open_trades.json")
+LOGS_DIR    = os.path.join(os.path.dirname(__file__), "..", "logs")
+
+# Thread-safe lock for CSV writes (shared across all ExitManager instances)
+_csv_lock = threading.Lock()
 
 
 def _serialize_trade(trade: dict) -> dict:
@@ -297,25 +301,30 @@ class ExitManager:
             xi.get("macd_line"), xi.get("macd_signal"), xi.get("macd_histogram"),
         ]
 
-        def _write_csv(path):
-            # Check if existing file has old header — rename to avoid mismatch
-            if os.path.exists(path):
-                try:
-                    with open(path, "r") as f:
-                        first_line = f.readline().strip()
-                    if first_line and "exit_time" not in first_line:
-                        old_path = path.replace(".csv", "_old.csv")
-                        os.rename(path, old_path)
-                        log.info(f"Migrated old CSV format: {path} → {old_path}")
-                except Exception:
-                    pass
+        # ── Write to daily account CSV in logs/ directory ─────
+        # Filename: {account}_{YYYYMMDD_HH24MISS}.csv (one per day)
+        os.makedirs(LOGS_DIR, exist_ok=True)
+        account = config.IB_ACCOUNT or "unknown"
+        today_str = datetime.now(PT).strftime("%Y%m%d")
 
-            write_header = not os.path.exists(path)
-            with open(path, "a", newline="") as f:
+        # Find today's file for this account (reuse if exists)
+        daily_file = None
+        for fname in sorted(os.listdir(LOGS_DIR)):
+            if fname.startswith(f"{account}_{today_str}") and fname.endswith(".csv"):
+                daily_file = os.path.join(LOGS_DIR, fname)
+                break
+
+        # Create new daily file if none exists
+        if daily_file is None:
+            timestamp = datetime.now(PT).strftime("%Y%m%d_%H%M%S")
+            daily_file = os.path.join(LOGS_DIR, f"{account}_{timestamp}.csv")
+
+        # Thread-safe CSV write
+        with _csv_lock:
+            write_header = not os.path.exists(daily_file)
+            with open(daily_file, "a", newline="") as f:
                 writer = csv.writer(f)
                 if write_header:
                     writer.writerow(header)
                 writer.writerow(row)
-
-        _write_csv("trades.csv")
-        _write_csv(f"trades_{ticker}.csv")
+            log.info(f"Trade logged to {daily_file}")

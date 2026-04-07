@@ -20,7 +20,6 @@ env/
 
 # Logs
 *.log
-logs/
 
 # Trade data (local only)
 trades.csv

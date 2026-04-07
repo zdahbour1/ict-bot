@@ -1,0 +1,4 @@
+# Ignore trade CSV files (generated at runtime)
+*.csv
+# But track this .gitignore so the logs/ directory exists in the repo
+!.gitignore
