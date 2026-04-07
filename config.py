@@ -27,7 +27,7 @@ USE_ALPACA            = os.getenv("USE_ALPACA", "false").lower() == "true"
 
 # ── Broker (Interactive Brokers) ─────────────────────────
 IB_HOST               = os.getenv("IB_HOST", "127.0.0.1")
-IB_PORT               = int(os.getenv("IB_PORT", "4002"))       # 7497=TWS paper, 4002=Gateway paper
+IB_PORT               = int(os.getenv("IB_PORT", "7497"))       # 7497=TWS paper, 4002=Gateway paper
 IB_CLIENT_ID          = int(os.getenv("IB_CLIENT_ID", "1"))
 IB_ACCOUNT            = os.getenv("IB_ACCOUNT", "")
 USE_IB                = os.getenv("USE_IB", "false").lower() == "true"
@@ -91,3 +91,6 @@ WEBHOOK_SECRET        = os.getenv("WEBHOOK_SECRET", "ict-secret-token")
 
 # ── Exit Monitor ─────────────────────────────────────────
 MONITOR_INTERVAL      = 5        # check P&L every 5 seconds
+
+# ── Trade Cooldown ───────────────────────────────────
+COOLDOWN_MINUTES      = int(os.getenv("COOLDOWN_MINUTES", "15"))  # min wait after trade exit before re-entry (per ticker)

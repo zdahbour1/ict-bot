@@ -77,7 +77,6 @@ def _get_ema_bias(bars_1h: pd.DataFrame, now_pt: datetime) -> str:
 
 
 MAX_TRADES_PER_DAY  = 8    # max trades per day
-MIN_MINUTES_BETWEEN = 15   # minimum minutes between trades
 
 class Scanner:
     def __init__(self, client, exit_manager, ticker=None, scan_offset=0):
@@ -91,6 +90,7 @@ class Scanner:
         self._last_date      = None
         self._seen_setups    = set()
         self._last_trade_time = None  # PT datetime of last trade entry
+        self._last_exit_time  = None  # PT datetime of last trade exit (for cooldown)
         self._entry_pending  = False  # True while an order is being placed
 
     def start(self):
@@ -165,7 +165,8 @@ class Scanner:
             t.get("ticker") == self.ticker for t in self.exit_manager.open_trades
         )
         if getattr(self, '_was_in_trade', False) and not ticker_has_trade:
-            log.info(f"[{self.ticker}] Trade closed — resetting seen setups for fresh signals.")
+            self._last_exit_time = datetime.now(PT)
+            log.info(f"[{self.ticker}] Trade closed — cooldown {config.COOLDOWN_MINUTES} min before next entry.")
             self._seen_setups = set()
             self._entry_pending = False
         self._was_in_trade = ticker_has_trade
@@ -287,11 +288,12 @@ class Scanner:
                         log.info(f"Max trades per day ({MAX_TRADES_PER_DAY}) reached — skipping entry.")
                         continue
 
-                    # ── Check: 15 min gap between trades ─────
-                    if self._last_trade_time is not None:
-                        mins_since = (datetime.now(PT) - self._last_trade_time).total_seconds() / 60
-                        if mins_since < MIN_MINUTES_BETWEEN:
-                            log.info(f"Too soon since last trade ({mins_since:.1f} min) — waiting {MIN_MINUTES_BETWEEN} min gap.")
+                    # ── Check: cooldown after last trade exit ──
+                    if self._last_exit_time is not None:
+                        mins_since_exit = (datetime.now(PT) - self._last_exit_time).total_seconds() / 60
+                        if mins_since_exit < config.COOLDOWN_MINUTES:
+                            remaining = config.COOLDOWN_MINUTES - mins_since_exit
+                            log.info(f"[{self.ticker}] Cooldown active — {remaining:.1f} min remaining before next entry.")
                             continue
 
                     # ── Enter the trade (with timeout) ────────
