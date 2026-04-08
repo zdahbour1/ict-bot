@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ICT Trading Bot — Dashboard Wireframes</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f1117; color: #e1e4e8; }
+
+  /* Nav */
+  .nav { background: #161b22; border-bottom: 1px solid #30363d; padding: 12px 24px; display: flex; align-items: center; justify-content: space-between; }
+  .nav-left { display: flex; align-items: center; gap: 24px; }
+  .nav-logo { font-size: 18px; font-weight: 700; color: #58a6ff; }
+  .nav-tabs { display: flex; gap: 4px; }
+  .nav-tab { padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 14px; color: #8b949e; border: none; background: none; }
+  .nav-tab.active { background: #21262d; color: #e1e4e8; }
+  .nav-tab:hover { color: #e1e4e8; }
+  .nav-right { display: flex; align-items: center; gap: 16px; }
+  .bot-status { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .status-dot { width: 10px; height: 10px; border-radius: 50%; }
+  .status-dot.running { background: #3fb950; box-shadow: 0 0 6px #3fb950; }
+  .status-dot.stopped { background: #f85149; }
+  .btn { padding: 6px 14px; border-radius: 6px; font-size: 13px; cursor: pointer; border: 1px solid #30363d; }
+  .btn-danger { background: #da3633; color: white; border-color: #da3633; }
+  .btn-success { background: #238636; color: white; border-color: #238636; }
+  .btn-outline { background: transparent; color: #8b949e; }
+  .btn-primary { background: #1f6feb; color: white; border-color: #1f6feb; }
+
+  /* Page */
+  .page { padding: 24px; display: none; }
+  .page.active { display: block; }
+  .page-title { font-size: 14px; color: #8b949e; margin-bottom: 16px; text-transform: uppercase; letter-spacing: 1px; }
+
+  /* Summary Cards */
+  .summary-row { display: grid; grid-template-columns: repeat(6, 1fr); gap: 16px; margin-bottom: 24px; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
+  .card-label { font-size: 12px; color: #8b949e; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .card-value { font-size: 24px; font-weight: 700; }
+  .card-value.positive { color: #3fb950; }
+  .card-value.negative { color: #f85149; }
+  .card-value.neutral { color: #e1e4e8; }
+  .card-sub { font-size: 12px; color: #8b949e; margin-top: 4px; }
+
+  /* Controls Bar */
+  .controls { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  .controls-left { display: flex; align-items: center; gap: 12px; }
+  .controls-right { display: flex; align-items: center; gap: 12px; }
+  .select { background: #21262d; border: 1px solid #30363d; color: #e1e4e8; padding: 6px 10px; border-radius: 6px; font-size: 13px; }
+  .search-input { background: #21262d; border: 1px solid #30363d; color: #e1e4e8; padding: 6px 12px; border-radius: 6px; font-size: 13px; width: 200px; }
+  .filter-chip { background: #1f6feb22; color: #58a6ff; padding: 4px 10px; border-radius: 12px; font-size: 12px; display: flex; align-items: center; gap: 4px; }
+  .filter-chip .x { cursor: pointer; }
+
+  /* Table */
+  .table-wrapper { background: #161b22; border: 1px solid #30363d; border-radius: 8px; overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { background: #21262d; padding: 10px 12px; text-align: left; font-weight: 600; color: #8b949e; border-bottom: 1px solid #30363d; white-space: nowrap; cursor: pointer; user-select: none; }
+  th:hover { color: #e1e4e8; }
+  th .sort-arrow { font-size: 10px; margin-left: 4px; }
+  td { padding: 10px 12px; border-bottom: 1px solid #21262d; white-space: nowrap; }
+  tr:hover { background: #1c2128; }
+
+  /* Status badges */
+  .badge { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .badge-open { background: #1f6feb22; color: #58a6ff; }
+  .badge-closed { background: #21262d; color: #8b949e; }
+  .badge-errored { background: #f8514922; color: #f85149; }
+  .badge-win { background: #3fb95022; color: #3fb950; }
+  .badge-loss { background: #f8514922; color: #f85149; }
+  .badge-scratch { background: #d2992222; color: #d29922; }
+
+  /* Thread badges */
+  .badge-running { background: #3fb95022; color: #3fb950; }
+  .badge-scanning { background: #1f6feb22; color: #58a6ff; }
+  .badge-idle { background: #21262d; color: #8b949e; }
+  .badge-error { background: #f8514922; color: #f85149; }
+
+  .pnl-pos { color: #3fb950; }
+  .pnl-neg { color: #f85149; }
+  .pnl-zero { color: #8b949e; }
+
+  /* Actions */
+  .btn-close-trade { padding: 3px 10px; font-size: 11px; background: #21262d; border: 1px solid #30363d; color: #8b949e; border-radius: 4px; cursor: pointer; }
+  .btn-close-trade:hover { color: #f85149; border-color: #f85149; }
+
+  /* Modal */
+  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 100; }
+  .modal { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 24px; width: 440px; }
+  .modal-title { font-size: 18px; font-weight: 700; margin-bottom: 16px; }
+  .modal-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #21262d; font-size: 13px; }
+  .modal-row-label { color: #8b949e; }
+  .modal-input-row { margin: 16px 0; }
+  .modal-input-row label { display: block; font-size: 13px; color: #8b949e; margin-bottom: 6px; }
+  .modal-input-row input { width: 100%; padding: 8px 12px; background: #21262d; border: 1px solid #30363d; color: #e1e4e8; border-radius: 6px; font-size: 14px; }
+  .modal-buttons { display: flex; gap: 12px; justify-content: flex-end; margin-top: 20px; }
+
+  /* Thread tab */
+  .thread-log { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 12px; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 12px; color: #8b949e; max-height: 200px; overflow-y: auto; margin-top: 12px; white-space: pre-wrap; }
+  .log-line { padding: 2px 0; }
+  .log-info { color: #58a6ff; }
+  .log-warn { color: #d29922; }
+  .log-error { color: #f85149; }
+
+  /* Section labels */
+  .section-label { font-size: 11px; color: #484f58; text-transform: uppercase; letter-spacing: 1px; margin: 24px 0 8px; }
+
+  /* Wireframe label */
+  .wireframe-label { background: #d2992233; color: #d29922; text-align: center; padding: 6px; font-size: 12px; font-weight: 600; border-bottom: 1px solid #30363d; letter-spacing: 1px; }
+
+  /* Page separator */
+  .page-sep { border: none; border-top: 3px solid #1f6feb; margin: 48px 0 0; }
+</style>
+</head>
+<body>
+
+<!-- ============================================================ -->
+<!-- WIREFRAME 1: TRADES TAB (Main Dashboard)                     -->
+<!-- ============================================================ -->
+<div class="wireframe-label">WIREFRAME 1 — TRADES TAB (Main Dashboard View)</div>
+
+<nav class="nav">
+  <div class="nav-left">
+    <div class="nav-logo">ICT Trading Bot</div>
+    <div class="nav-tabs">
+      <button class="nav-tab active">Trades</button>
+      <button class="nav-tab">Threads</button>
+      <button class="nav-tab">Settings</button>
+    </div>
+  </div>
+  <div class="nav-right">
+    <div class="bot-status">
+      <span class="status-dot running"></span>
+      <span>Running</span>
+      <span style="color:#484f58">|</span>
+      <span style="color:#8b949e">DU1566080</span>
+      <span style="color:#484f58">|</span>
+      <span style="color:#8b949e">17 tickers</span>
+    </div>
+    <button class="btn btn-danger" style="font-size:12px">Stop Bot</button>
+  </div>
+</nav>
+
+<div class="page active" style="display:block">
+
+  <!-- Summary Cards -->
+  <div class="summary-row">
+    <div class="card">
+      <div class="card-label">Open P&L</div>
+      <div class="card-value positive">+$342.00</div>
+      <div class="card-sub">6 open trades</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Closed P&L</div>
+      <div class="card-value positive">+$300.00</div>
+      <div class="card-sub">8 closed trades</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Day Total</div>
+      <div class="card-value positive">+$642.00</div>
+      <div class="card-sub">14 total trades</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Win Rate</div>
+      <div class="card-value neutral">62.5%</div>
+      <div class="card-sub">5W / 2L / 1S</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Avg Win</div>
+      <div class="card-value positive">+$95.60</div>
+      <div class="card-sub">5 wins</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Avg Loss</div>
+      <div class="card-value negative">-$89.00</div>
+      <div class="card-sub">2 losses</div>
+    </div>
+  </div>
+
+  <!-- Controls -->
+  <div class="controls">
+    <div class="controls-left">
+      <button class="btn btn-danger">Close All Trades</button>
+      <button class="btn btn-outline">Refresh Now</button>
+      <select class="select">
+        <option>Auto-refresh: 1 min</option>
+        <option>Auto-refresh: 15 sec</option>
+        <option>Auto-refresh: 30 sec</option>
+        <option>Auto-refresh: 5 min</option>
+        <option>Manual only</option>
+      </select>
+      <select class="select">
+        <option>All statuses</option>
+        <option>Open only</option>
+        <option>Closed only</option>
+        <option>Errored only</option>
+      </select>
+      <select class="select">
+        <option>All tickers</option>
+        <option>QQQ</option>
+        <option>SPY</option>
+        <option>AAPL</option>
+        <option>NVDA</option>
+        <option>TSLA</option>
+      </select>
+      <div class="filter-chip">status: open <span class="x">&times;</span></div>
+    </div>
+    <div class="controls-right">
+      <span style="font-size:12px;color:#484f58">Last updated: 11:47:39 PT</span>
+      <input class="search-input" placeholder="Search trades..." />
+    </div>
+  </div>
+
+  <!-- Trade Table -->
+  <div class="table-wrapper">
+    <table>
+      <thead>
+        <tr>
+          <th>Status</th>
+          <th>Ticker <span class="sort-arrow">&#9660;</span></th>
+          <th>Direction</th>
+          <th>Symbol</th>
+          <th>Contracts <span style="font-size:10px;color:#484f58">(open/total)</span></th>
+          <th>Entry Price</th>
+          <th>Current</th>
+          <th>P&L % <span class="sort-arrow">&#9660;</span></th>
+          <th>P&L $</th>
+          <th>Peak</th>
+          <th>Trail SL</th>
+          <th>Entry Time</th>
+          <th>Exit Time</th>
+          <th>Exit Reason</th>
+          <th>Error</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="badge badge-open">OPEN</span></td>
+          <td><strong>TSLA</strong></td>
+          <td>SHORT</td>
+          <td>TSLA260408P00342500</td>
+          <td>2 / 2</td>
+          <td>$3.89</td>
+          <td>$5.12</td>
+          <td class="pnl-pos">+31.6%</td>
+          <td class="pnl-pos">+$246.00</td>
+          <td>+38.3%</td>
+          <td>+28.3%</td>
+          <td>10:17 AM</td>
+          <td>—</td>
+          <td>—</td>
+          <td>—</td>
+          <td><button class="btn-close-trade">Close</button></td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-open">OPEN</span></td>
+          <td><strong>GOOGL</strong></td>
+          <td>SHORT</td>
+          <td>GOOGL260408P00302500</td>
+          <td>2 / 2</td>
+          <td>$2.25</td>
+          <td>$2.83</td>
+          <td class="pnl-pos">+25.8%</td>
+          <td class="pnl-pos">+$116.00</td>
+          <td>+28.9%</td>
+          <td>+18.9%</td>
+          <td>10:18 AM</td>
+          <td>—</td>
+          <td>—</td>
+          <td>—</td>
+          <td><button class="btn-close-trade">Close</button></td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-open">OPEN</span></td>
+          <td><strong>AMZN</strong></td>
+          <td>LONG</td>
+          <td>AMZN260408C00212500</td>
+          <td>2 / 2</td>
+          <td>$2.37</td>
+          <td>$1.93</td>
+          <td class="pnl-neg">-18.6%</td>
+          <td class="pnl-neg">-$88.00</td>
+          <td>+2.1%</td>
+          <td>-60.0%</td>
+          <td>10:29 AM</td>
+          <td>—</td>
+          <td>—</td>
+          <td>—</td>
+          <td><button class="btn-close-trade">Close</button></td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-open">OPEN</span></td>
+          <td><strong>QQQ</strong></td>
+          <td>LONG</td>
+          <td>QQQ260407C00584000</td>
+          <td>1 / 2</td>
+          <td>$0.99</td>
+          <td>$0.84</td>
+          <td class="pnl-neg">-15.2%</td>
+          <td class="pnl-neg">-$15.00</td>
+          <td>+0.0%</td>
+          <td>-60.0%</td>
+          <td>11:01 AM</td>
+          <td>—</td>
+          <td>—</td>
+          <td>—</td>
+          <td><button class="btn-close-trade">Close</button></td>
+        </tr>
+        <tr style="opacity: 0.6;">
+          <td><span class="badge badge-closed">CLOSED</span></td>
+          <td><strong>QQQ</strong></td>
+          <td>LONG</td>
+          <td>QQQ260407C00584000</td>
+          <td>0 / 2</td>
+          <td>$1.50</td>
+          <td>$2.70</td>
+          <td class="pnl-pos">+80.0%</td>
+          <td class="pnl-pos">+$240.00</td>
+          <td>+82.1%</td>
+          <td>—</td>
+          <td>10:27 AM</td>
+          <td>10:39 AM</td>
+          <td><span class="badge badge-win">TRAIL STOP</span></td>
+          <td>—</td>
+          <td>—</td>
+        </tr>
+        <tr style="opacity: 0.6;">
+          <td><span class="badge badge-closed">CLOSED</span></td>
+          <td><strong>IWM</strong></td>
+          <td>LONG</td>
+          <td>IWM260407C00250000</td>
+          <td>0 / 2</td>
+          <td>$1.00</td>
+          <td>$1.35</td>
+          <td class="pnl-pos">+35.0%</td>
+          <td class="pnl-pos">+$70.00</td>
+          <td>+36.2%</td>
+          <td>—</td>
+          <td>8:13 AM</td>
+          <td>8:16 AM</td>
+          <td><span class="badge badge-win">TRAIL STOP</span></td>
+          <td>—</td>
+          <td>—</td>
+        </tr>
+        <tr style="opacity: 0.6;">
+          <td><span class="badge badge-closed">CLOSED</span></td>
+          <td><strong>NFLX</strong></td>
+          <td>SHORT</td>
+          <td>NFLX260410P00099000</td>
+          <td>0 / 2</td>
+          <td>$1.54</td>
+          <td>$1.46</td>
+          <td class="pnl-neg">-5.2%</td>
+          <td class="pnl-neg">-$16.00</td>
+          <td>+1.3%</td>
+          <td>—</td>
+          <td>8:13 AM</td>
+          <td>10:03 AM</td>
+          <td><span class="badge badge-loss">TIME EXIT</span></td>
+          <td>—</td>
+          <td>—</td>
+        </tr>
+        <tr style="opacity: 0.6;">
+          <td><span class="badge badge-errored">ERROR</span></td>
+          <td><strong>NVDA</strong></td>
+          <td>LONG</td>
+          <td>NVDA260408C00176000</td>
+          <td>0 / 2</td>
+          <td>—</td>
+          <td>—</td>
+          <td class="pnl-zero">—</td>
+          <td class="pnl-zero">—</td>
+          <td>—</td>
+          <td>—</td>
+          <td>10:17 AM</td>
+          <td>—</td>
+          <td>—</td>
+          <td style="color:#f85149;font-size:11px">No security definition</td>
+          <td>—</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+
+<!-- ============================================================ -->
+<!-- WIREFRAME 2: CLOSE TRADE MODAL                               -->
+<!-- ============================================================ -->
+<hr class="page-sep">
+<div class="wireframe-label">WIREFRAME 2 — CLOSE TRADE MODAL (Partial Close)</div>
+
+<div class="modal-overlay" style="position:relative; height: 480px;">
+  <div class="modal">
+    <div class="modal-title">Close Trade — TSLA PUT</div>
+    <div class="modal-row"><span class="modal-row-label">Symbol</span><span>TSLA260408P00342500</span></div>
+    <div class="modal-row"><span class="modal-row-label">Direction</span><span>SHORT (PUT)</span></div>
+    <div class="modal-row"><span class="modal-row-label">Entry Price</span><span>$3.89</span></div>
+    <div class="modal-row"><span class="modal-row-label">Current Price</span><span class="pnl-pos">$5.12</span></div>
+    <div class="modal-row"><span class="modal-row-label">P&L</span><span class="pnl-pos">+31.6% (+$246.00)</span></div>
+    <div class="modal-row"><span class="modal-row-label">Open Contracts</span><span>2</span></div>
+
+    <div class="modal-input-row">
+      <label>Contracts to close:</label>
+      <input type="number" value="2" min="1" max="2" />
+      <div style="font-size:11px; color:#8b949e; margin-top:4px;">Enter 1-2 contracts (default: close all)</div>
+    </div>
+
+    <div class="modal-buttons">
+      <button class="btn btn-outline">Cancel</button>
+      <button class="btn btn-danger">Close 2 Contracts</button>
+    </div>
+  </div>
+</div>
+
+
+<!-- ============================================================ -->
+<!-- WIREFRAME 3: THREADS TAB                                     -->
+<!-- ============================================================ -->
+<hr class="page-sep">
+<div class="wireframe-label">WIREFRAME 3 — THREADS TAB (Scanner Monitoring)</div>
+
+<nav class="nav">
+  <div class="nav-left">
+    <div class="nav-logo">ICT Trading Bot</div>
+    <div class="nav-tabs">
+      <button class="nav-tab">Trades</button>
+      <button class="nav-tab active">Threads</button>
+      <button class="nav-tab">Settings</button>
+    </div>
+  </div>
+  <div class="nav-right">
+    <div class="bot-status">
+      <span class="status-dot running"></span>
+      <span>Running</span>
+    </div>
+  </div>
+</nav>
+
+<div style="padding: 24px;">
+  <div class="summary-row" style="grid-template-columns: repeat(4, 1fr);">
+    <div class="card">
+      <div class="card-label">Total Threads</div>
+      <div class="card-value neutral">19</div>
+      <div class="card-sub">17 scanners + exit mgr + webhook</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Active</div>
+      <div class="card-value positive">17</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Errors</div>
+      <div class="card-value negative">2</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Total Scans Today</div>
+      <div class="card-value neutral">1,247</div>
+    </div>
+  </div>
+
+  <div class="table-wrapper">
+    <table>
+      <thead>
+        <tr>
+          <th>Status</th>
+          <th>Thread Name</th>
+          <th>Ticker</th>
+          <th>Last Scan</th>
+          <th>Scans Today</th>
+          <th>Trades Today</th>
+          <th>Alerts</th>
+          <th>Errors</th>
+          <th>Last Message</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="badge badge-scanning">SCANNING</span></td>
+          <td>scanner-QQQ</td>
+          <td><strong>QQQ</strong></td>
+          <td>11:47:18 AM</td>
+          <td>187</td>
+          <td>4</td>
+          <td>12</td>
+          <td>0</td>
+          <td style="color:#8b949e;font-size:12px">1H EMA bias: BEARISH | 312 raids evaluated</td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-idle">IDLE</span></td>
+          <td>scanner-SPY</td>
+          <td><strong>SPY</strong></td>
+          <td>11:47:20 AM</td>
+          <td>185</td>
+          <td>2</td>
+          <td>8</td>
+          <td>0</td>
+          <td style="color:#8b949e;font-size:12px">Cooldown active — 8.2 min remaining</td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-idle">IDLE</span></td>
+          <td>scanner-AAPL</td>
+          <td><strong>AAPL</strong></td>
+          <td>11:47:22 AM</td>
+          <td>183</td>
+          <td>2</td>
+          <td>6</td>
+          <td>0</td>
+          <td style="color:#8b949e;font-size:12px">Already has an open trade — skipping entry</td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-error">ERROR</span></td>
+          <td>scanner-NVDA</td>
+          <td><strong>NVDA</strong></td>
+          <td>11:46:43 AM</td>
+          <td>180</td>
+          <td>0</td>
+          <td>3</td>
+          <td>4</td>
+          <td style="color:#f85149;font-size:12px">Trade entry failed: No security definition for NVDA 260408 C 176.0</td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-scanning">SCANNING</span></td>
+          <td>scanner-TSLA</td>
+          <td><strong>TSLA</strong></td>
+          <td>11:47:25 AM</td>
+          <td>184</td>
+          <td>1</td>
+          <td>5</td>
+          <td>0</td>
+          <td style="color:#8b949e;font-size:12px">Already has an open trade — skipping entry</td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-running">RUNNING</span></td>
+          <td>exit-manager</td>
+          <td>—</td>
+          <td>11:47:39 AM</td>
+          <td>—</td>
+          <td>—</td>
+          <td>—</td>
+          <td>0</td>
+          <td style="color:#8b949e;font-size:12px">Monitoring 6 open trades | Last check: 5s ago</td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-running">RUNNING</span></td>
+          <td>flask-webhook</td>
+          <td>—</td>
+          <td>—</td>
+          <td>—</td>
+          <td>—</td>
+          <td>—</td>
+          <td>0</td>
+          <td style="color:#8b949e;font-size:12px">Listening on port 5000</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Thread Log Panel -->
+  <div class="section-label" style="margin-top:24px">Thread Log — scanner-NVDA</div>
+  <div class="thread-log">
+<span class="log-line log-info">11:46:43  INFO   [NVDA] Running ICT scan at 11:46 PT [TRADE MODE]...</span>
+<span class="log-line log-info">11:46:43  INFO   [IB] Fetched 1684 real-time 1m bars for NVDA</span>
+<span class="log-line log-info">11:46:43  INFO   Computed 10 significant levels</span>
+<span class="log-line log-info">11:46:43  INFO   1H EMA bias: BULLISH</span>
+<span class="log-line log-info">11:46:43  INFO   Found 0 long raid events</span>
+<span class="log-line log-info">11:46:43  INFO   Found 8 short raid events to evaluate</span>
+<span class="log-line log-info">11:46:43  INFO   SHORT SIGNAL SHORT_OB | Entry=175.32 SL=175.47 TP=175.26</span>
+<span class="log-line log-info">11:46:43  INFO   [NVDA] SHORT signal inside trading window</span>
+<span class="log-line log-error">11:46:43  ERROR  IB Error 200: No security definition for Option NVDA 20260408 176.0 C SMART</span>
+<span class="log-line log-error">11:46:43  ERROR  [NVDA] Trade entry failed: 'NoneType' has no attribute 'secType'</span>
+<span class="log-line log-warn">11:46:43  WARN   [NVDA] Trade entry timed out (30s) — keeping pending</span>
+  </div>
+</div>
+
+
+<!-- ============================================================ -->
+<!-- WIREFRAME 4: CLOSE ALL CONFIRMATION                          -->
+<!-- ============================================================ -->
+<hr class="page-sep">
+<div class="wireframe-label">WIREFRAME 4 — CLOSE ALL TRADES CONFIRMATION DIALOG</div>
+
+<div class="modal-overlay" style="position:relative; height: 320px;">
+  <div class="modal" style="width: 480px;">
+    <div class="modal-title" style="color: #f85149;">Close All Open Trades</div>
+    <p style="color:#8b949e; font-size:14px; margin-bottom: 16px;">
+      This will close all <strong style="color:#e1e4e8">6 open trades</strong> across 5 tickers at market price.
+    </p>
+    <div style="background:#21262d; border-radius:6px; padding:12px; font-size:13px; margin-bottom:16px;">
+      <div style="display:flex; justify-content:space-between; padding:4px 0;"><span>TSLA (2 contracts)</span><span class="pnl-pos">+$246</span></div>
+      <div style="display:flex; justify-content:space-between; padding:4px 0;"><span>GOOGL (2 contracts)</span><span class="pnl-pos">+$116</span></div>
+      <div style="display:flex; justify-content:space-between; padding:4px 0;"><span>AMZN (2 contracts)</span><span class="pnl-neg">-$88</span></div>
+      <div style="display:flex; justify-content:space-between; padding:4px 0;"><span>AAPL (2 contracts)</span><span class="pnl-neg">-$30</span></div>
+      <div style="display:flex; justify-content:space-between; padding:4px 0;"><span>QQQ (1 contract)</span><span class="pnl-neg">-$15</span></div>
+      <div style="display:flex; justify-content:space-between; padding:8px 0 0; border-top:1px solid #30363d; font-weight:700;"><span>Estimated Total</span><span class="pnl-pos">+$229</span></div>
+    </div>
+    <div class="modal-buttons">
+      <button class="btn btn-outline">Cancel</button>
+      <button class="btn btn-danger">Close All 6 Trades</button>
+    </div>
+  </div>
+</div>
+
+
+<!-- ============================================================ -->
+<!-- WIREFRAME 5: BOT STOPPED STATE                               -->
+<!-- ============================================================ -->
+<hr class="page-sep">
+<div class="wireframe-label">WIREFRAME 5 — BOT STOPPED STATE</div>
+
+<nav class="nav">
+  <div class="nav-left">
+    <div class="nav-logo">ICT Trading Bot</div>
+    <div class="nav-tabs">
+      <button class="nav-tab active">Trades</button>
+      <button class="nav-tab">Threads</button>
+      <button class="nav-tab">Settings</button>
+    </div>
+  </div>
+  <div class="nav-right">
+    <div class="bot-status">
+      <span class="status-dot stopped"></span>
+      <span style="color:#f85149">Stopped</span>
+    </div>
+    <button class="btn btn-success" style="font-size:12px">Start Bot</button>
+  </div>
+</nav>
+
+<div style="padding: 24px;">
+  <div style="text-align:center; padding: 80px 0;">
+    <div style="font-size: 48px; margin-bottom: 16px;">&#9679;</div>
+    <div style="font-size: 20px; font-weight: 600; margin-bottom: 8px; color: #8b949e;">Bot is not running</div>
+    <div style="font-size: 14px; color: #484f58; margin-bottom: 24px;">Click "Start Bot" to begin scanning and trading</div>
+    <button class="btn btn-success" style="font-size: 16px; padding: 12px 32px;">Start Bot</button>
+    <div style="margin-top: 24px; font-size: 13px; color: #484f58;">
+      Last session: Apr 7, 2026 — 14 trades | +$642.00 P&L | 62.5% win rate
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
