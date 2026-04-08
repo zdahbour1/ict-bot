@@ -19,7 +19,9 @@ services:
       timeout: 5s
       retries: 5
 
-  # ── Trading Bot ─────────────────────────────────────────
+  # ── Trading Bot (optional — use profiles: with-bot) ─────
+  # Run locally for best IB connectivity, or enable with:
+  #   docker compose --profile with-bot up
   bot:
     build:
       context: .
@@ -31,11 +33,15 @@ services:
       IB_PORT: ${IB_PORT:-7497}
       IB_CLIENT_ID: ${IB_CLIENT_ID:-1}
       IB_ACCOUNT: ${IB_ACCOUNT:-}
-      DRY_RUN: ${DRY_RUN:-false}
+      DRY_RUN: ${DRY_RUN:-true}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
     restart: unless-stopped
+    profiles:
+      - with-bot
 
   # ── Dashboard API (FastAPI) ─────────────────────────────
   api:

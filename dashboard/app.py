@@ -116,7 +116,7 @@ app.add_middleware(
 )
 
 # Mount Socket.IO
-socket_app = socketio.ASGIApp(sio, other_app=app)
+socket_app = socketio.ASGIApp(sio, app)
 
 # Import and include route modules
 from dashboard.routes import trades, tickers, settings, threads, bot, summary
