@@ -187,6 +187,18 @@ class Scanner:
 
         log.info(f"[{self.ticker}] Running ICT scan at {now_str} PT [{mode}]...")
 
+        # ── Update thread status in DB ────────────────────
+        try:
+            from db.writer import update_thread_status
+            update_thread_status(
+                f"scanner-{self.ticker}", self.ticker, "scanning",
+                f"Scanning at {now_str} PT [{mode}]",
+                scans_today=self._alerts_today,
+                trades_today=self._trades_today,
+            )
+        except Exception:
+            pass
+
         # ── News filter ───────────────────────────────────
         near_news, news_label = _is_near_news(now_pt)
         if near_news:

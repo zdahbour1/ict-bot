@@ -111,6 +111,14 @@ class ExitManager:
         with self._lock:
             self.open_trades.append(trade)
             self._save_trades()
+        # Write to DB
+        try:
+            from db.writer import insert_trade
+            db_id = insert_trade(trade, config.IB_ACCOUNT or "unknown")
+            if db_id:
+                trade["db_id"] = db_id
+        except Exception as e:
+            log.debug(f"DB insert_trade skipped: {e}")
         log.info(f"Exit manager now tracking: {trade['symbol']}")
 
     def start(self):
@@ -169,6 +177,18 @@ class ExitManager:
                     hit_tp = pnl_pct >= config.PROFIT_TARGET
                     hit_sl = pnl_pct <= trade["dynamic_sl_pct"]
 
+                    # ── Update DB with live pricing ───────────
+                    if trade.get("db_id"):
+                        try:
+                            from db.writer import update_trade_price
+                            pnl_usd_live = (current_price - entry_price) * 100 * trade["contracts"]
+                            update_trade_price(
+                                trade["db_id"], current_price, pnl_pct,
+                                pnl_usd_live, trade["peak_pnl_pct"], trade["dynamic_sl_pct"]
+                            )
+                        except Exception:
+                            pass
+
                     log.info(
                         f"Monitoring {trade['symbol']} | "
                         f"Current: ${current_price:.2f} | "
@@ -225,6 +245,13 @@ class ExitManager:
 
                         self._log_result(trade, current_price, result, reason, exit_enrichment)
                         send_trade_result_email(trade, result, current_price)
+                        # Close in DB
+                        if trade.get("db_id"):
+                            try:
+                                from db.writer import close_trade as db_close_trade
+                                db_close_trade(trade["db_id"], current_price, result, reason, exit_enrichment)
+                            except Exception:
+                                pass
                         # Don't add to still_open — trade is closed
                     else:
                         still_open.append(trade)
@@ -234,6 +261,34 @@ class ExitManager:
                     still_open.append(trade)
 
             self.open_trades = still_open
+
+            # ── Check for UI commands (close trade requests) ──
+            try:
+                from db.writer import check_pending_commands, complete_command
+                commands = check_pending_commands()
+                for cmd in (commands or []):
+                    try:
+                        # Find the matching open trade by db_id
+                        target = None
+                        for t in self.open_trades:
+                            if t.get("db_id") == cmd["trade_id"]:
+                                target = t
+                                break
+                        if target:
+                            direction = target.get("direction", "LONG")
+                            contracts = cmd.get("contracts") or target["contracts"]
+                            if direction == "SHORT":
+                                self.client.sell_put(target["symbol"], contracts)
+                            else:
+                                self.client.sell_call(target["symbol"], contracts)
+                            log.info(f"UI command executed: close {contracts}x {target['symbol']}")
+                            complete_command(cmd["id"])
+                        else:
+                            complete_command(cmd["id"], error="Trade not found in open trades")
+                    except Exception as e:
+                        complete_command(cmd["id"], error=str(e))
+            except Exception:
+                pass
 
             # Save after every check
             if self.open_trades:

@@ -3,6 +3,7 @@ ICT QQQ Options Bot — Entry Point
 Run this file to start the bot:  python main.py
 """
 import logging
+import os
 import threading
 import config
 from strategy.exit_manager import ExitManager
@@ -55,6 +56,14 @@ def main():
         client = TastytradeClient()
     client.connect()
 
+    # ── Update bot state in DB ────────────────────────────
+    try:
+        from db.writer import update_bot_state
+        update_bot_state("running", account=config.IB_ACCOUNT, pid=os.getpid(),
+                         total_tickers=len(config.TICKERS))
+    except Exception:
+        pass
+
     # ── Start exit monitor (shared, thread-safe) ──────────
     exit_manager = ExitManager(client)
     exit_manager.start()
@@ -90,6 +99,11 @@ def main():
                 time.sleep(1)
         except KeyboardInterrupt:
             log.info("Shutting down...")
+            try:
+                from db.writer import update_bot_state
+                update_bot_state("stopped")
+            except Exception:
+                pass
             break
         except Exception as e:
             log.error(f"Main loop error: {e}")

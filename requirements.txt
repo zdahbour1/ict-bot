@@ -7,3 +7,5 @@ yfinance
 pandas
 numpy
 ib_async
+sqlalchemy>=2.0
+psycopg2-binary
