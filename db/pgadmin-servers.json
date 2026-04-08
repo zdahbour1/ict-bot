@@ -1,0 +1,14 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "ICT Bot Database",
+      "Group": "Servers",
+      "Host": "postgres",
+      "Port": 5432,
+      "MaintenanceDB": "ict_bot",
+      "Username": "ict_bot",
+      "SSLMode": "prefer",
+      "PassFile": ""
+    }
+  }
+}

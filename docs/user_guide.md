@@ -9,9 +9,10 @@
 5. [Tickers Tab](#tickers-tab)
 6. [Settings Tab](#settings-tab)
 7. [Bot Management](#bot-management)
-8. [Trading Behavior](#trading-behavior)
-9. [Configuration Reference](#configuration-reference)
-10. [Troubleshooting](#troubleshooting)
+8. [Database Access](#database-access)
+9. [Trading Behavior](#trading-behavior)
+10. [Configuration Reference](#configuration-reference)
+11. [Troubleshooting](#troubleshooting)
 11. [API Reference](#api-reference)
 
 ---
@@ -324,6 +325,99 @@ The bot writes daily log files to the `logs/` directory:
 - Logs are account-based (one file per day per account)
 - Contains trade entries, exits, errors, and system events
 - Credentials and secrets are stripped from log output
+
+---
+
+## Database Access
+
+The system uses PostgreSQL for all trade data, settings, and ticker configuration. You can connect directly to run custom queries, inspect data, or export reports.
+
+### Option 1: pgAdmin (Web GUI)
+
+pgAdmin runs as part of the Docker stack on **http://localhost:5050**.
+
+| Field | Value |
+|-------|-------|
+| **URL** | http://localhost:5050 |
+| **Login Email** | `admin@ictbot.com` |
+| **Login Password** | `admin` |
+
+The "ICT Bot Database" server is pre-configured. Click it and enter password `ict_bot_dev` when prompted.
+
+Features: visual schema browser, SQL query editor, data export (CSV/JSON), table viewer, ER diagrams.
+
+### Option 2: psql via Docker (Command Line)
+
+No installation needed -- runs inside the PostgreSQL container:
+
+```bash
+docker exec -it ict-bot-postgres-1 psql -U ict_bot -d ict_bot
+```
+
+Useful commands:
+```sql
+\dt                              -- list all tables
+\d trades                        -- describe trades table schema
+\dv                              -- list all views
+SELECT * FROM tickers;           -- view all tickers
+SELECT * FROM settings WHERE category = 'broker';  -- broker settings
+SELECT * FROM thread_status;     -- scanner thread status
+SELECT * FROM v_daily_summary;   -- daily P&L summary view
+SELECT * FROM v_ticker_performance;  -- per-ticker performance view
+```
+
+### Option 3: External SQL Client
+
+PostgreSQL port 5432 is exposed to your host machine. Connect with any SQL tool (DBeaver, DataGrip, Azure Data Studio, TablePlus, etc.):
+
+| Field | Value |
+|-------|-------|
+| **Host** | `localhost` |
+| **Port** | `5432` |
+| **Database** | `ict_bot` |
+| **Username** | `ict_bot` |
+| **Password** | `ict_bot_dev` |
+
+### Key Tables
+
+| Table | Purpose |
+|-------|---------|
+| `trades` | All trades (open, closed, errored) with live P&L, enrichment JSONB |
+| `trade_closes` | Partial close audit trail |
+| `trade_commands` | UI-to-bot command queue (close requests) |
+| `thread_status` | Scanner thread health (updated every scan) |
+| `bot_state` | Bot running/stopped status (singleton) |
+| `errors` | Structured error log |
+| `tickers` | Tradeable instruments with active/inactive flag |
+| `settings` | All bot configuration (key-value, typed, categorized) |
+
+### Useful Views
+
+| View | Purpose |
+|------|---------|
+| `v_daily_summary` | Daily P&L, win rate, trade counts per account |
+| `v_ticker_performance` | All-time P&L and win rate per ticker |
+| `v_pending_commands` | Active close commands waiting for bot execution |
+
+### Example Queries
+
+```sql
+-- Today's trades with P&L
+SELECT ticker, direction, entry_price, exit_price, pnl_usd, exit_reason
+FROM trades WHERE entry_time::date = CURRENT_DATE ORDER BY entry_time;
+
+-- Best performing tickers (all time)
+SELECT * FROM v_ticker_performance;
+
+-- Open trades right now
+SELECT ticker, symbol, pnl_pct, peak_pnl_pct, dynamic_sl_pct
+FROM trades WHERE status = 'open';
+
+-- Trades where Greeks were captured
+SELECT ticker, entry_enrichment->'entry_greeks'->>'delta' as entry_delta,
+       exit_enrichment->'exit_greeks'->>'delta' as exit_delta
+FROM trades WHERE status = 'closed' LIMIT 10;
+```
 
 ---
 
