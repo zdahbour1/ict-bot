@@ -161,3 +161,17 @@ MONITOR_INTERVAL      = _get("MONITOR_INTERVAL", 5, int)
 
 # ── Trade Cooldown ───────────────────────────────────
 COOLDOWN_MINUTES      = _get("COOLDOWN_MINUTES", 15, int)
+
+# ── Bracket Orders (IB server-side TP/SL) ────────────
+USE_BRACKET_ORDERS    = _get("USE_BRACKET_ORDERS", True, bool)
+
+# ── Option Rolling ───────────────────────────────────
+ROLL_ENABLED          = _get("ROLL_ENABLED", True, bool)
+ROLL_THRESHOLD        = _get("ROLL_THRESHOLD", 0.70, float)  # roll at 70% of TP
+
+# ── TP → Trailing Stop ──────────────────────────────
+# At TP level, instead of hard exit, move SL to TP and let trade run
+TP_TO_TRAIL           = _get("TP_TO_TRAIL", True, bool)
+
+# ── IB Reconciliation ────────────────────────────────
+RECONCILIATION_INTERVAL_MIN = _get("RECONCILIATION_INTERVAL_MIN", 5, int)

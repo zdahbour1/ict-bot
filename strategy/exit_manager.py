@@ -130,9 +130,88 @@ class ExitManager:
         self._stop_event.set()
 
     def _monitor_loop(self):
+        reconcile_counter = 0
+        reconcile_interval = config.RECONCILIATION_INTERVAL_MIN * 60 // config.MONITOR_INTERVAL
         while not self._stop_event.is_set():
             self._check_exits()
+            # Periodic IB reconciliation
+            reconcile_counter += 1
+            if reconcile_counter >= reconcile_interval:
+                reconcile_counter = 0
+                self._reconcile_with_ib()
             time.sleep(config.MONITOR_INTERVAL)
+
+    def _reconcile_with_ib(self):
+        """Compare bot's open_trades with IB's actual positions. Detect discrepancies."""
+        try:
+            ib_positions = self.client.get_ib_positions_raw()
+        except Exception as e:
+            log.debug(f"Reconciliation skipped: {e}")
+            return
+
+        if not ib_positions:
+            return
+
+        with self._lock:
+            bot_symbols = {t["symbol"] for t in self.open_trades}
+            ib_symbols = set()
+            for p in ib_positions:
+                # Build OCC-like symbol from IB position
+                sym = p.get("symbol", "").replace(" ", "")
+                if sym:
+                    ib_symbols.add(sym)
+
+            # Orphaned IB positions (on IB but bot doesn't know)
+            for p in ib_positions:
+                sym = p.get("symbol", "").replace(" ", "")
+                if sym and sym not in bot_symbols and p["qty"] > 0:
+                    log.warning(f"[RECONCILE] Orphaned IB position: {sym} qty={p['qty']} "
+                                f"avg_cost=${p['avg_cost']:.2f} — NOT tracked by bot")
+                    # Auto-adopt: create a trade entry
+                    try:
+                        trade = {
+                            "ticker": p.get("ticker", "UNK"),
+                            "symbol": sym,
+                            "contracts": int(abs(p["qty"])),
+                            "entry_price": p["avg_cost"],
+                            "profit_target": p["avg_cost"] * (1 + config.PROFIT_TARGET),
+                            "stop_loss": p["avg_cost"] * (1 - config.STOP_LOSS),
+                            "entry_time": datetime.now(PT),
+                            "direction": "SHORT" if p.get("right") == "P" else "LONG",
+                            "_adopted": True,  # flag for tracking
+                        }
+                        trade["peak_pnl_pct"] = 0.0
+                        trade["dynamic_sl_pct"] = -config.STOP_LOSS
+                        self.open_trades.append(trade)
+                        self._save_trades()
+                        # Write to DB
+                        try:
+                            from db.writer import insert_trade
+                            db_id = insert_trade(trade, config.IB_ACCOUNT or "unknown")
+                            if db_id:
+                                trade["db_id"] = db_id
+                        except Exception:
+                            pass
+                        log.info(f"[RECONCILE] Adopted orphan: {sym} → tracking with "
+                                 f"TP=${trade['profit_target']:.2f} SL=${trade['stop_loss']:.2f}")
+                    except Exception as e:
+                        log.error(f"[RECONCILE] Failed to adopt {sym}: {e}")
+
+            # Phantom bot trades (bot thinks open, but not on IB)
+            for trade in list(self.open_trades):
+                sym = trade["symbol"]
+                if sym not in ib_symbols and not trade.get("_adopted"):
+                    log.warning(f"[RECONCILE] Phantom bot trade: {sym} — "
+                                f"tracked by bot but NOT on IB. Removing.")
+                    self.open_trades.remove(trade)
+                    if trade.get("db_id"):
+                        try:
+                            from db.writer import mark_trade_errored
+                            mark_trade_errored(trade["db_id"], "Phantom trade: not found on IB during reconciliation")
+                        except Exception:
+                            pass
+
+            self._save_trades()
 
     def _check_exits(self):
         now_pt = datetime.now(PT)
@@ -152,15 +231,21 @@ class ExitManager:
                     # ── Trailing stop logic ───────────────────
                     # SL stays at -60% but resets relative to peak
                     # every time peak moves up by another 10% increment.
-                    # E.g. peak +10% → SL at +10% - 60% = -50%
-                    #      peak +20% → SL at +20% - 60% = -40%
-                    #      peak +50% → SL at +50% - 60% = -10%
                     peak = trade["peak_pnl_pct"]
-                    # How many 10% steps has the peak crossed?
+                    old_sl = trade["dynamic_sl_pct"]
                     steps = int(peak / 0.10)
                     if steps > 0:
-                        trail_base = steps * 0.10  # highest 10% milestone
+                        trail_base = steps * 0.10
                         trade["dynamic_sl_pct"] = trail_base - config.STOP_LOSS
+
+                    # ── Update bracket SL on IB if trail changed ──
+                    if trade["dynamic_sl_pct"] != old_sl and trade.get("ib_sl_order_id"):
+                        new_sl_price = round(entry_price * (1 + trade["dynamic_sl_pct"]), 2)
+                        try:
+                            self.client.update_bracket_sl(trade["ib_sl_order_id"], new_sl_price)
+                            log.info(f"[{trade.get('ticker')}] Bracket SL updated → ${new_sl_price:.2f} ({trade['dynamic_sl_pct']:+.0%})")
+                        except Exception:
+                            pass
 
                     # ── Time exit (90 minutes) ────────────────
                     entry_time = trade.get("entry_time")
@@ -173,8 +258,45 @@ class ExitManager:
                     # ── EOD exit (1:00 PM PT) ─────────────────
                     eod_exit = now_pt.hour >= 13
 
-                    # ── Check exit conditions ─────────────────
-                    hit_tp = pnl_pct >= config.PROFIT_TARGET
+                    # ── TP → Trailing Stop (don't hard exit, let it run) ─
+                    hit_tp = False
+                    if config.TP_TO_TRAIL and pnl_pct >= config.PROFIT_TARGET:
+                        if not trade.get("_tp_trailed"):
+                            # First time hitting TP: move SL to TP level instead of exiting
+                            trade["dynamic_sl_pct"] = config.PROFIT_TARGET - config.STOP_LOSS
+                            trade["_tp_trailed"] = True
+                            log.info(f"[{trade.get('ticker')}] TP hit at {pnl_pct:+.1%} — "
+                                     f"converting to trailing stop at {trade['dynamic_sl_pct']:+.0%}")
+                            # Update bracket SL on IB
+                            if trade.get("ib_sl_order_id"):
+                                new_sl_price = round(entry_price * (1 + trade["dynamic_sl_pct"]), 2)
+                                try:
+                                    self.client.update_bracket_sl(trade["ib_sl_order_id"], new_sl_price)
+                                except Exception:
+                                    pass
+                            # Cancel the TP bracket leg — we're trailing now
+                            if trade.get("ib_tp_order_id"):
+                                try:
+                                    self.client.cancel_bracket_children(trade["ib_tp_order_id"])
+                                    trade["ib_tp_order_id"] = None
+                                except Exception:
+                                    pass
+                        # Don't set hit_tp = True — let it run
+                    elif not config.TP_TO_TRAIL:
+                        hit_tp = pnl_pct >= config.PROFIT_TARGET
+
+                    # ── Option Rolling at ~70% ────────────────
+                    roll_trade = None
+                    if (config.ROLL_ENABLED and not trade.get("_rolled")
+                            and pnl_pct >= config.ROLL_THRESHOLD * config.PROFIT_TARGET):
+                        # Roll: close this position and open next strike
+                        log.info(f"[{trade.get('ticker')}] Roll trigger at {pnl_pct:+.1%} — "
+                                 f"closing and rolling to next strike")
+                        trade["_rolled"] = True
+                        # We'll handle the roll after closing this trade
+                        # Set a flag so the close logic knows to roll
+                        trade["_should_roll"] = True
+
                     hit_sl = pnl_pct <= trade["dynamic_sl_pct"]
 
                     # ── Update DB with live pricing ───────────
@@ -197,12 +319,16 @@ class ExitManager:
                         f"SL: {trade['dynamic_sl_pct']:+.1%}"
                     )
 
-                    if hit_tp or hit_sl or time_exit or eod_exit:
-                        if hit_tp:
+                    should_roll = trade.get("_should_roll", False)
+
+                    if hit_tp or hit_sl or time_exit or eod_exit or should_roll:
+                        if should_roll:
+                            result = "WIN"
+                            reason = f"ROLL (P&L={pnl_pct:+.0%})"
+                        elif hit_tp:
                             result = "WIN"
                             reason = "TAKE PROFIT"
                         elif hit_sl and trade["dynamic_sl_pct"] > -config.STOP_LOSS:
-                            # SL was trailed up from initial level
                             result = "WIN" if pnl_pct > 0 else "LOSS" if pnl_pct < 0 else "SCRATCH"
                             reason = f"TRAIL STOP (SL={trade['dynamic_sl_pct']:+.0%})"
                         elif hit_sl:
@@ -214,6 +340,17 @@ class ExitManager:
                         else:
                             result = "WIN" if pnl_pct > 0 else "LOSS"
                             reason = "EOD EXIT"
+
+                        # Cancel bracket children before manual close
+                        if trade.get("ib_tp_order_id") or trade.get("ib_sl_order_id"):
+                            try:
+                                tp_id = trade.get("ib_tp_order_id")
+                                sl_id = trade.get("ib_sl_order_id")
+                                ids = [i for i in [tp_id, sl_id] if i]
+                                if ids:
+                                    self.client.cancel_bracket_children(*ids)
+                            except Exception:
+                                pass
 
                         direction = trade.get("direction", "LONG")
                         if direction == "SHORT":
@@ -252,6 +389,24 @@ class ExitManager:
                                 db_close_trade(trade["db_id"], current_price, result, reason, exit_enrichment)
                             except Exception:
                                 pass
+                        # ── Option Rolling: open next strike ──
+                        if should_roll and not time_exit and not eod_exit:
+                            try:
+                                ticker = trade.get("ticker", "QQQ")
+                                direction = trade.get("direction", "LONG")
+                                from strategy.option_selector import select_and_enter, select_and_enter_put
+                                if direction == "SHORT":
+                                    rolled_trade = select_and_enter_put(self.client, ticker)
+                                else:
+                                    rolled_trade = select_and_enter(self.client, ticker)
+                                if rolled_trade:
+                                    rolled_trade["signal"] = f"ROLL from {trade['symbol']}"
+                                    rolled_trade["_rolled_from"] = trade["symbol"]
+                                    self.add_trade(rolled_trade)
+                                    log.info(f"[{ticker}] Rolled to {rolled_trade['symbol']} @ ${rolled_trade['entry_price']:.2f}")
+                            except Exception as e:
+                                log.error(f"[{trade.get('ticker')}] Roll failed: {e}")
+
                         # Don't add to still_open — trade is closed
                     else:
                         still_open.append(trade)

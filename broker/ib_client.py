@@ -1,10 +1,15 @@
 """
 Interactive Brokers Paper Trading Broker Client
-All pricing uses IB real-time market data (no delayed yfinance).
-yfinance is only used for option chain metadata (expirations, strikes).
+All pricing uses IB real-time market data.
 
 Architecture: IB event loop runs on the main thread. All IB API calls
 are dispatched via a queue and executed by process_orders() on main thread.
+
+Features:
+- Contract validation before order placement
+- Bracket orders (OCO TP+SL) for server-side enforcement
+- Timeout hardening with fill status checking
+- Position reconciliation
 """
 import logging
 import re
@@ -12,7 +17,7 @@ import threading
 import queue
 from datetime import date, datetime
 
-from ib_async import IB, Stock, Option, MarketOrder
+from ib_async import IB, Stock, Option, MarketOrder, LimitOrder, StopOrder
 
 import config
 
@@ -24,10 +29,11 @@ class IBClient:
         self.ib = IB()
         self._order_queue = queue.Queue()
         self._connected = False
+        # Cache of validated contracts: occ_symbol → Option contract
+        self._contract_cache = {}
 
     # ── Connection ────────────────────────────────────────────
     def connect(self):
-        """Connect to IB TWS or Gateway on the calling (main) thread."""
         log.info(f"Connecting to Interactive Brokers at {config.IB_HOST}:{config.IB_PORT} "
                  f"(clientId={config.IB_CLIENT_ID})...")
         self.ib.connect(
@@ -44,10 +50,7 @@ class IBClient:
         self._connected = True
 
     def process_orders(self):
-        """
-        Must be called in a loop on the MAIN thread (where connect() ran).
-        Processes all queued IB API calls and drives the event loop.
-        """
+        """Must be called in a loop on the MAIN thread."""
         while not self._order_queue.empty():
             try:
                 func, args, result_event, result_holder = self._order_queue.get_nowait()
@@ -62,7 +65,6 @@ class IBClient:
         self.ib.sleep(0.1)
 
     def _submit_to_ib(self, func, *args, timeout=30):
-        """Submit a function to be executed on the main/IB thread."""
         result_event = threading.Event()
         result_holder = {}
         self._order_queue.put((func, args, result_event, result_holder))
@@ -74,11 +76,9 @@ class IBClient:
 
     # ── Real-time Equity Price (IB market data) ───────────────
     def get_realtime_equity_price(self, ticker: str) -> float:
-        """Get real-time mid price for a stock/ETF via IB. Thread-safe."""
         return self._submit_to_ib(self._ib_get_equity_price, ticker)
 
     def _ib_get_equity_price(self, ticker: str) -> float:
-        """Runs on IB thread."""
         contract = Stock(ticker, "SMART", "USD")
         self.ib.qualifyContracts(contract)
         ticker_data = self.ib.reqMktData(contract, "", False, False)
@@ -91,29 +91,19 @@ class IBClient:
             log.info(f"[IB] {ticker}: bid={bid:.2f} ask={ask:.2f} mid={mid:.2f}")
             return mid
         if ticker_data.last > 0:
-            log.info(f"[IB] {ticker}: last={ticker_data.last:.2f}")
             return float(ticker_data.last)
         if ticker_data.close > 0:
-            log.info(f"[IB] {ticker}: close={ticker_data.close:.2f}")
             return float(ticker_data.close)
         raise ValueError(f"No IB price data for {ticker}")
 
-    # ── ATM Option Symbol (IB option chain) ─────────────────
+    # ── ATM Option Symbol (IB option chain) ───────────────────
     def get_atm_call_symbol(self, ticker: str) -> str:
-        """Find ATM call using IB's option chain. Thread-safe."""
         return self._submit_to_ib(self._ib_get_atm_symbol, ticker, "C")
 
     def get_atm_put_symbol(self, ticker: str) -> str:
-        """Find ATM put using IB's option chain. Thread-safe."""
         return self._submit_to_ib(self._ib_get_atm_symbol, ticker, "P")
 
     def _ib_get_atm_symbol(self, ticker: str, option_type: str) -> str:
-        """
-        Find ATM option using IB's own option chain data.
-        Uses reqSecDefOptParams to get valid expirations and strikes.
-        Runs on IB thread.
-        """
-        # Get real-time price for ATM strike selection
         contract = Stock(ticker, "SMART", "USD")
         self.ib.qualifyContracts(contract)
         ticker_data = self.ib.reqMktData(contract, "", False, False)
@@ -126,27 +116,22 @@ class IBClient:
         elif ticker_data.close and ticker_data.close > 0:
             price = float(ticker_data.close)
         self.ib.cancelMktData(contract)
-
         if price <= 0:
             raise ValueError(f"No IB price data for {ticker}")
-
         log.info(f"[{ticker}] IB price: ${price:.2f}")
 
-        # Get valid option chain params from IB
         chains = self.ib.reqSecDefOptParams(ticker, "", contract.secType, contract.conId)
         if not chains:
             raise RuntimeError(f"No option chain found on IB for {ticker}")
 
-        # Find the SMART exchange chain (most liquid)
         chain = None
         for c in chains:
             if c.exchange == "SMART":
                 chain = c
                 break
         if chain is None:
-            chain = chains[0]  # fallback to first available
+            chain = chains[0]
 
-        # Find nearest expiration (prefer today/0DTE)
         today_str = date.today().strftime("%Y%m%d")
         expirations = sorted(chain.expirations)
         exp = None
@@ -163,27 +148,52 @@ class IBClient:
         else:
             log.info(f"[{ticker}] Nearest IB expiry: {exp_display}")
 
-        # Find ATM strike from IB's valid strikes
         strikes = sorted(chain.strikes)
         atm_strike = min(strikes, key=lambda s: abs(s - price))
         log.info(f"[{ticker}] ATM strike from IB chain: ${atm_strike} (price ${price:.2f})")
 
-        # Qualify the specific option contract on IB
         right = "C" if option_type == "C" else "P"
         opt_contract = Option(ticker, exp, atm_strike, right, "SMART")
         qualified = self.ib.qualifyContracts(opt_contract)
         if not qualified:
             raise RuntimeError(f"Could not qualify IB option: {ticker} {exp} {atm_strike} {right}")
 
-        # Build OCC symbol for internal tracking
-        exp_short = exp[2:]  # YYMMDD
+        # Cache the validated contract
+        exp_short = exp[2:]
         strike_str = str(int(atm_strike * 1000)).zfill(8)
         occ_symbol = f"{ticker}{exp_short}{option_type}{strike_str}"
-        log.info(f"[{ticker}] ATM {option_type} symbol: {occ_symbol} (strike ${atm_strike}, exp {exp_display})")
+        self._contract_cache[occ_symbol] = qualified[0]
+
+        log.info(f"[{ticker}] ATM {option_type} symbol: {occ_symbol} (strike ${atm_strike}, exp {exp_display}) ✓ validated")
         return occ_symbol
 
-    # ── OCC Symbol → IB Contract (runs on IB thread) ─────────
+    # ── Contract Validation ───────────────────────────────────
+    def validate_contract(self, occ_symbol: str) -> bool:
+        """Validate an option contract exists on IB. Thread-safe."""
+        try:
+            return self._submit_to_ib(self._ib_validate_contract, occ_symbol)
+        except Exception:
+            return False
+
+    def _ib_validate_contract(self, occ_symbol: str) -> bool:
+        """Qualify contract on IB. Cache if valid."""
+        if occ_symbol in self._contract_cache:
+            return True
+        try:
+            contract = self._occ_to_contract(occ_symbol)
+            if contract:
+                self._contract_cache[occ_symbol] = contract
+                log.info(f"[IB] Contract validated: {occ_symbol}")
+                return True
+        except Exception as e:
+            log.warning(f"[IB] Contract validation failed for {occ_symbol}: {e}")
+        return False
+
     def _occ_to_contract(self, occ_symbol: str) -> Option:
+        # Return cached contract if available
+        if occ_symbol in self._contract_cache:
+            return self._contract_cache[occ_symbol]
+
         match = re.match(r'^([A-Z]+)(\d{6})([CP])(\d{8})$', occ_symbol)
         if not match:
             raise ValueError(f"Invalid OCC symbol: {occ_symbol}")
@@ -191,21 +201,19 @@ class IBClient:
         exp_str = match.group(2)
         right = "C" if match.group(3) == "C" else "P"
         strike = int(match.group(4)) / 1000
-
         expiry = f"20{exp_str}"
         contract = Option(ticker, expiry, strike, right, "SMART")
         qualified = self.ib.qualifyContracts(contract)
         if not qualified:
             raise RuntimeError(f"Could not qualify IB contract for {occ_symbol}")
+        self._contract_cache[occ_symbol] = qualified[0]
         return qualified[0]
 
     # ── Option Price (IB real-time) ───────────────────────────
     def get_option_price(self, symbol: str) -> float:
-        """Get real-time option mid price via IB. Thread-safe."""
         return self._submit_to_ib(self._ib_get_option_price, symbol)
 
     def _ib_get_option_price(self, symbol: str) -> float:
-        """Runs on IB thread."""
         contract = self._occ_to_contract(symbol)
         ticker_data = self.ib.reqMktData(contract, "", False, False)
         self.ib.sleep(2)
@@ -217,16 +225,13 @@ class IBClient:
             log.info(f"[IB] {symbol}: bid={bid:.2f} ask={ask:.2f} mid={mid:.2f}")
             return mid
         if ticker_data.last > 0:
-            log.info(f"[IB] {symbol}: last={ticker_data.last:.2f}")
             return float(ticker_data.last)
         if ticker_data.close > 0:
-            log.info(f"[IB] {symbol}: close={ticker_data.close:.2f}")
             return float(ticker_data.close)
         raise ValueError(f"No IB option price data for {symbol}")
 
-    # ── Option Greeks (IB real-time) ─────────────────────────
+    # ── Option Greeks (IB real-time) ──────────────────────────
     def get_option_greeks(self, symbol: str) -> dict:
-        """Get real-time Greeks for an option via IB. Thread-safe."""
         try:
             return self._submit_to_ib(self._ib_get_greeks, symbol)
         except Exception as e:
@@ -234,31 +239,21 @@ class IBClient:
             return {"delta": None, "gamma": None, "theta": None, "vega": None}
 
     def _ib_get_greeks(self, symbol: str) -> dict:
-        """Runs on IB thread. Uses modelGreeks from reqMktData."""
         contract = self._occ_to_contract(symbol)
         ticker_data = self.ib.reqMktData(contract, "", False, False)
-        self.ib.sleep(3)  # Greeks need extra time to populate
+        self.ib.sleep(3)
         self.ib.cancelMktData(contract)
-
         greeks = {"delta": None, "gamma": None, "theta": None, "vega": None}
-
-        # Try modelGreeks first (computed by IB's model)
         mg = ticker_data.modelGreeks
         if mg:
             greeks["delta"] = round(mg.delta, 4) if mg.delta is not None else None
             greeks["gamma"] = round(mg.gamma, 6) if mg.gamma is not None else None
             greeks["theta"] = round(mg.theta, 4) if mg.theta is not None else None
             greeks["vega"] = round(mg.vega, 4) if mg.vega is not None else None
-            log.info(f"[IB] Greeks {symbol}: Δ={greeks['delta']} Γ={greeks['gamma']} "
-                     f"Θ={greeks['theta']} V={greeks['vega']}")
-        else:
-            log.warning(f"[IB] No modelGreeks available for {symbol}")
-
         return greeks
 
     # ── VIX (IB real-time) ────────────────────────────────────
     def get_vix(self) -> float | None:
-        """Get real-time VIX level via IB. Thread-safe."""
         try:
             return self._submit_to_ib(self._ib_get_vix)
         except Exception as e:
@@ -266,7 +261,6 @@ class IBClient:
             return None
 
     def _ib_get_vix(self) -> float:
-        """Runs on IB thread."""
         from ib_async import Index
         contract = Index("VIX", "CBOE")
         self.ib.qualifyContracts(contract)
@@ -274,13 +268,9 @@ class IBClient:
         self.ib.sleep(2)
         self.ib.cancelMktData(contract)
         if ticker_data.last and ticker_data.last > 0:
-            val = round(float(ticker_data.last), 2)
-            log.info(f"[IB] VIX: {val}")
-            return val
+            return round(float(ticker_data.last), 2)
         if ticker_data.close and ticker_data.close > 0:
-            val = round(float(ticker_data.close), 2)
-            log.info(f"[IB] VIX (close): {val}")
-            return val
+            return round(float(ticker_data.close), 2)
         raise ValueError("No VIX data received")
 
     # ── Order Placement ───────────────────────────────────────
@@ -303,21 +293,39 @@ class IBClient:
         return self._submit_to_ib(self._ib_place_order, option_symbol, contracts, action, desc)
 
     def _ib_place_order(self, option_symbol, contracts, action, desc):
-        """Runs on IB thread. Returns dict with actual fill price."""
+        """Place order with contract validation and fill confirmation."""
+        # ── Contract validation ───────────────────────────
         contract = self._occ_to_contract(option_symbol)
+        if not contract or not contract.conId:
+            raise RuntimeError(f"Contract validation failed for {option_symbol} — order NOT placed")
+
         order = MarketOrder(action, contracts)
         if config.IB_ACCOUNT:
             order.account = config.IB_ACCOUNT
         trade = self.ib.placeOrder(contract, order)
 
-        # Wait for fill (up to 10 seconds)
-        for _ in range(20):
+        # ── Wait for fill (up to 15 seconds) ──────────────
+        for _ in range(30):
             self.ib.sleep(0.5)
             if trade.orderStatus.status == "Filled":
                 break
 
         fill_price = trade.orderStatus.avgFillPrice
         status = trade.orderStatus.status
+
+        # ── Timeout hardening: check actual fill ──────────
+        if status != "Filled" and status not in ("Cancelled", "Inactive"):
+            # Order may still be working — check executions
+            self.ib.sleep(2)
+            if trade.orderStatus.status == "Filled":
+                fill_price = trade.orderStatus.avgFillPrice
+                status = "Filled"
+            elif trade.fills:
+                fill_price = trade.fills[0].execution.avgPrice
+                status = "Filled"
+            else:
+                log.warning(f"[IB] Order {trade.order.orderId} not filled after 17s — status: {trade.orderStatus.status}")
+
         log.info(f"[IB] {action} {desc.upper()}: {contracts}x {option_symbol} — "
                  f"orderId={trade.order.orderId} status={status} "
                  f"avgFillPrice=${fill_price:.2f}")
@@ -328,6 +336,165 @@ class IBClient:
             "status": status,
             "fill_price": fill_price,
         }
+
+    # ── Bracket Orders (OCO TP + SL on IB) ────────────────────
+    def place_bracket_order(self, option_symbol: str, contracts: int,
+                            action: str, tp_price: float, sl_price: float) -> dict:
+        """Place a bracket order: parent (market) + TP (limit) + SL (stop)."""
+        if config.DRY_RUN:
+            log.info(f"[DRY RUN] Bracket {action}: {contracts}x {option_symbol} TP=${tp_price:.2f} SL=${sl_price:.2f}")
+            return {"dry_run": True, "symbol": option_symbol}
+        return self._submit_to_ib(
+            self._ib_place_bracket, option_symbol, contracts, action, tp_price, sl_price
+        )
+
+    def _ib_place_bracket(self, option_symbol, contracts, action, tp_price, sl_price):
+        """Runs on IB thread. Places bracket order."""
+        contract = self._occ_to_contract(option_symbol)
+        if not contract or not contract.conId:
+            raise RuntimeError(f"Contract validation failed for {option_symbol}")
+
+        # Exit side is opposite of entry
+        exit_action = "SELL" if action == "BUY" else "BUY"
+
+        # Parent: market order
+        parent = MarketOrder(action, contracts)
+        parent.orderId = self.ib.client.getReqId()
+        parent.transmit = False
+        if config.IB_ACCOUNT:
+            parent.account = config.IB_ACCOUNT
+
+        # Take profit: limit order
+        tp_order = LimitOrder(exit_action, contracts, tp_price)
+        tp_order.orderId = self.ib.client.getReqId()
+        tp_order.parentId = parent.orderId
+        tp_order.transmit = False
+        if config.IB_ACCOUNT:
+            tp_order.account = config.IB_ACCOUNT
+
+        # Stop loss: stop order
+        sl_order = StopOrder(exit_action, contracts, sl_price)
+        sl_order.orderId = self.ib.client.getReqId()
+        sl_order.parentId = parent.orderId
+        sl_order.transmit = True  # last child triggers all
+        if config.IB_ACCOUNT:
+            sl_order.account = config.IB_ACCOUNT
+
+        # Place all three
+        parent_trade = self.ib.placeOrder(contract, parent)
+        tp_trade = self.ib.placeOrder(contract, tp_order)
+        sl_trade = self.ib.placeOrder(contract, sl_order)
+
+        # Wait for parent fill
+        for _ in range(30):
+            self.ib.sleep(0.5)
+            if parent_trade.orderStatus.status == "Filled":
+                break
+
+        fill_price = parent_trade.orderStatus.avgFillPrice
+        status = parent_trade.orderStatus.status
+
+        log.info(f"[IB] BRACKET {action}: {contracts}x {option_symbol} — "
+                 f"parent={parent.orderId} status={status} fill=${fill_price:.2f} "
+                 f"TP={tp_order.orderId}@${tp_price:.2f} SL={sl_order.orderId}@${sl_price:.2f}")
+
+        return {
+            "symbol": option_symbol,
+            "contracts": contracts,
+            "order_id": parent.orderId,
+            "tp_order_id": tp_order.orderId,
+            "sl_order_id": sl_order.orderId,
+            "status": status,
+            "fill_price": fill_price,
+        }
+
+    def update_bracket_sl(self, sl_order_id: int, new_sl_price: float) -> bool:
+        """Update the stop loss leg of a bracket order."""
+        if config.DRY_RUN:
+            return True
+        try:
+            return self._submit_to_ib(self._ib_update_bracket_sl, sl_order_id, new_sl_price)
+        except Exception as e:
+            log.warning(f"Failed to update bracket SL: {e}")
+            return False
+
+    def _ib_update_bracket_sl(self, sl_order_id: int, new_sl_price: float) -> bool:
+        """Modify the SL order price on IB."""
+        for trade in self.ib.openTrades():
+            if trade.order.orderId == sl_order_id:
+                trade.order.auxPrice = new_sl_price
+                self.ib.placeOrder(trade.contract, trade.order)
+                log.info(f"[IB] Updated bracket SL orderId={sl_order_id} → ${new_sl_price:.2f}")
+                return True
+        log.warning(f"[IB] SL orderId={sl_order_id} not found in open trades")
+        return False
+
+    def cancel_bracket_children(self, tp_order_id: int, sl_order_id: int):
+        """Cancel TP and SL legs when bot closes a trade manually."""
+        if config.DRY_RUN:
+            return
+        try:
+            self._submit_to_ib(self._ib_cancel_orders, tp_order_id, sl_order_id)
+        except Exception as e:
+            log.warning(f"Failed to cancel bracket children: {e}")
+
+    def _ib_cancel_orders(self, *order_ids):
+        for trade in self.ib.openTrades():
+            if trade.order.orderId in order_ids:
+                self.ib.cancelOrder(trade.order)
+                log.info(f"[IB] Cancelled orderId={trade.order.orderId}")
+
+    # ── IB Reconciliation ─────────────────────────────────────
+    def get_ib_positions_raw(self) -> list:
+        """Get raw IB positions for reconciliation. Thread-safe."""
+        try:
+            return self._submit_to_ib(self._ib_get_positions_raw)
+        except Exception as e:
+            log.warning(f"Reconciliation position fetch failed: {e}")
+            return []
+
+    def _ib_get_positions_raw(self) -> list:
+        """Returns detailed position info for reconciliation."""
+        positions = self.ib.positions()
+        result = []
+        for p in positions:
+            if p.contract.secType == "OPT" and p.position != 0:
+                result.append({
+                    "symbol": p.contract.localSymbol.strip() if p.contract.localSymbol else "",
+                    "conId": p.contract.conId,
+                    "ticker": p.contract.symbol,
+                    "expiry": p.contract.lastTradeDateOrContractMonth,
+                    "strike": p.contract.strike,
+                    "right": p.contract.right,
+                    "qty": float(p.position),
+                    "avg_cost": float(p.avgCost) / 100,  # IB avgCost is per share, convert to per contract
+                    "market_price": float(p.marketPrice) if hasattr(p, 'marketPrice') else 0,
+                })
+        return result
+
+    # ── Check Recent Executions (for timeout hardening) ───────
+    def check_recent_fills(self, symbol: str) -> dict | None:
+        """Check if a symbol was recently filled on IB. Thread-safe."""
+        try:
+            return self._submit_to_ib(self._ib_check_fills, symbol)
+        except Exception:
+            return None
+
+    def _ib_check_fills(self, symbol: str) -> dict | None:
+        """Check recent executions for a symbol."""
+        fills = self.ib.fills()
+        for fill in reversed(fills):
+            local_sym = fill.contract.localSymbol.strip() if fill.contract.localSymbol else ""
+            if symbol in local_sym or (fill.contract.symbol and fill.contract.symbol in symbol):
+                return {
+                    "symbol": local_sym,
+                    "qty": float(fill.execution.shares),
+                    "price": float(fill.execution.price),
+                    "side": fill.execution.side,
+                    "time": str(fill.execution.time),
+                    "order_id": fill.execution.orderId,
+                }
+        return None
 
     # ── Positions ─────────────────────────────────────────────
     def get_open_positions(self) -> list:
