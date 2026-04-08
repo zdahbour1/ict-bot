@@ -203,6 +203,139 @@ CREATE INDEX idx_errors_ticker          ON errors (ticker);
 
 
 -- ══════════════════════════════════════════════════════════════
+-- TICKERS — Master list of tradeable instruments
+-- Replaces tickers.txt. Bot reads active tickers on startup.
+-- ══════════════════════════════════════════════════════════════
+CREATE TABLE IF NOT EXISTS tickers (
+    id                  INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    symbol              VARCHAR(10)     NOT NULL UNIQUE,
+    name                VARCHAR(100),
+    is_active           BOOLEAN         NOT NULL DEFAULT TRUE,
+    contracts           INT             NOT NULL DEFAULT 2 CHECK (contracts > 0),
+    notes               TEXT,
+    created_at          TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ     NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_tickers_active ON tickers (is_active) WHERE is_active = TRUE;
+
+CREATE TRIGGER trg_tickers_updated_at
+    BEFORE UPDATE ON tickers
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+
+-- ══════════════════════════════════════════════════════════════
+-- SETTINGS — Key-value config store
+-- Replaces .env and config.py hardcoded values.
+-- Bot reads on startup; UI can edit; bot hot-reloads on demand.
+-- ══════════════════════════════════════════════════════════════
+CREATE TABLE IF NOT EXISTS settings (
+    id                  INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    category            VARCHAR(30)     NOT NULL,
+    key                 VARCHAR(50)     NOT NULL UNIQUE,
+    value               TEXT            NOT NULL,
+    data_type           VARCHAR(20)     NOT NULL DEFAULT 'string'
+                        CHECK (data_type IN ('string', 'int', 'float', 'bool')),
+    description         TEXT,
+    is_secret           BOOLEAN         NOT NULL DEFAULT FALSE,
+    created_at          TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ     NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_settings_category ON settings (category);
+
+CREATE TRIGGER trg_settings_updated_at
+    BEFORE UPDATE ON settings
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+
+-- ══════════════════════════════════════════════════════════════
+-- SEED DATA — Tickers (from current tickers.txt)
+-- ══════════════════════════════════════════════════════════════
+INSERT INTO tickers (symbol, name, contracts) VALUES
+    ('QQQ',   'Invesco QQQ Trust',                  2),
+    ('SPY',   'SPDR S&P 500 ETF',                   2),
+    ('AAPL',  'Apple Inc.',                          2),
+    ('NVDA',  'NVIDIA Corporation',                  2),
+    ('TSLA',  'Tesla Inc.',                          2),
+    ('IWM',   'iShares Russell 2000 ETF',            2),
+    ('AMD',   'Advanced Micro Devices',              2),
+    ('AMZN',  'Amazon.com Inc.',                     2),
+    ('META',  'Meta Platforms Inc.',                  2),
+    ('MSFT',  'Microsoft Corporation',               2),
+    ('GOOGL', 'Alphabet Inc.',                       2),
+    ('NFLX',  'Netflix Inc.',                        2),
+    ('PLTR',  'Palantir Technologies',               2),
+    ('SLV',   'iShares Silver Trust',                2),
+    ('XLF',   'Financial Select Sector SPDR',        2),
+    ('MU',    'Micron Technology',                    2),
+    ('INTC',  'Intel Corporation',                   2),
+    ('TQQQ',  'ProShares UltraPro QQQ',              2),
+    ('SSO',   'ProShares Ultra S&P500',              2)
+ON CONFLICT (symbol) DO NOTHING;
+
+
+-- ══════════════════════════════════════════════════════════════
+-- SEED DATA — Settings (from current config.py / .env)
+-- ══════════════════════════════════════════════════════════════
+INSERT INTO settings (category, key, value, data_type, description, is_secret) VALUES
+    -- Broker: Interactive Brokers
+    ('broker', 'USE_IB',               'true',         'bool',   'Use Interactive Brokers as the broker',       FALSE),
+    ('broker', 'IB_HOST',              '127.0.0.1',    'string', 'IB Gateway/TWS host address',                 FALSE),
+    ('broker', 'IB_PORT',              '7497',         'int',    'IB Gateway/TWS port (7497=TWS paper, 4002=Gateway paper)', FALSE),
+    ('broker', 'IB_CLIENT_ID',         '1',            'int',    'IB API client ID',                            FALSE),
+    ('broker', 'IB_ACCOUNT',           '',             'string', 'IB account number (e.g. DU1566080)',          FALSE),
+    ('broker', 'DRY_RUN',              'false',        'bool',   'If true, log trades but do not place real orders', FALSE),
+    ('broker', 'PAPER_TRADING',        'true',         'bool',   'Use paper trading mode',                      FALSE),
+    -- Broker: Tastytrade
+    ('broker', 'USE_TASTYTRADE',       'false',        'bool',   'Use Tastytrade as the broker',                FALSE),
+    ('broker', 'TASTYTRADE_USERNAME',  '',             'string', 'Tastytrade login email',                      TRUE),
+    ('broker', 'TASTYTRADE_PASSWORD',  '',             'string', 'Tastytrade login password',                   TRUE),
+    ('broker', 'TASTYTRADE_ACCOUNT',   '',             'string', 'Tastytrade account number',                   FALSE),
+    -- Broker: Schwab
+    ('broker', 'USE_SCHWAB',           'false',        'bool',   'Use Schwab as the broker',                    FALSE),
+    ('broker', 'SCHWAB_APP_KEY',       '',             'string', 'Schwab OAuth app key',                        TRUE),
+    ('broker', 'SCHWAB_APP_SECRET',    '',             'string', 'Schwab OAuth app secret',                     TRUE),
+    ('broker', 'SCHWAB_CALLBACK_URL',  'https://127.0.0.1', 'string', 'Schwab OAuth callback URL',             FALSE),
+    ('broker', 'SCHWAB_PAPER_ACCOUNT', '',             'string', 'Schwab paper account number',                 FALSE),
+    -- Broker: Alpaca
+    ('broker', 'USE_ALPACA',           'false',        'bool',   'Use Alpaca as the broker',                    FALSE),
+    ('broker', 'ALPACA_API_KEY',       '',             'string', 'Alpaca API key',                              TRUE),
+    ('broker', 'ALPACA_SECRET_KEY',    '',             'string', 'Alpaca secret key',                           TRUE),
+    -- Strategy: ICT Parameters
+    ('strategy', 'RAID_THRESHOLD',        '0.05',  'float', 'Min $ penetration below level to qualify as raid',     FALSE),
+    ('strategy', 'BODY_MULT',             '1.2',   'float', 'Displacement candle body multiplier',                  FALSE),
+    ('strategy', 'DISPLACEMENT_LOOKBACK', '20',    'int',   'Bars back for median body calculation',                FALSE),
+    ('strategy', 'N_CONFIRM_BARS',        '2',     'int',   'Bars after raid to confirm displacement',              FALSE),
+    ('strategy', 'FVG_MIN_SIZE',          '0.10',  'float', 'Minimum FVG size in dollars',                          FALSE),
+    ('strategy', 'OB_MAX_CANDLES',        '3',     'int',   'Max bearish candles for order block',                  FALSE),
+    ('strategy', 'SL_BUFFER',             '0.05',  'float', 'Buffer below raid low for stop loss ($)',               FALSE),
+    ('strategy', 'TP_LOOKBACK',           '40',    'int',   'Bars back to find swing high take profit',             FALSE),
+    ('strategy', 'MAX_ALERTS_PER_DAY',    '999',   'int',   'Max signal alerts per day (no practical limit)',       FALSE),
+    ('strategy', 'EMA_PERIOD_1H',         '20',    'int',   '1H EMA period for trend direction filter',            FALSE),
+    ('strategy', 'NEWS_BUFFER_MIN',       '30',    'int',   'Minutes around major news events to block trades',    FALSE),
+    -- Exit Rules
+    ('exit_rules', 'PROFIT_TARGET',    '1.00',  'float', 'Exit when option premium is up this % (1.00 = 100%)',    FALSE),
+    ('exit_rules', 'STOP_LOSS',        '0.60',  'float', 'Exit when option premium is down this % (0.60 = 60%)',   FALSE),
+    ('exit_rules', 'COOLDOWN_MINUTES', '15',    'int',   'Min minutes after trade exit before re-entry per ticker', FALSE),
+    -- Trade Window
+    ('trade_window', 'TRADE_WINDOW_START_PT',  '6',   'int', 'Trade window start hour (PT)',                       FALSE),
+    ('trade_window', 'TRADE_WINDOW_START_MIN', '30',  'int', 'Trade window start minute (PT)',                     FALSE),
+    ('trade_window', 'TRADE_WINDOW_END_PT',    '13',  'int', 'Trade window end hour (PT)',                         FALSE),
+    -- General
+    ('general', 'CONTRACTS',         '2',     'int',   'Default number of option contracts per trade',              FALSE),
+    ('general', 'MONITOR_INTERVAL',  '5',     'int',   'Seconds between exit monitor checks',                      FALSE),
+    -- Email
+    ('email', 'EMAIL_TO',            '',      'string', 'Email address for trade alerts',                           FALSE),
+    ('email', 'EMAIL_FROM',          '',      'string', 'Sender email address (Gmail)',                             FALSE),
+    ('email', 'EMAIL_APP_PASSWORD',  '',      'string', 'Gmail app-specific password',                              TRUE),
+    -- Webhook
+    ('webhook', 'PORT',              '5000',  'int',    'Webhook server port',                                      FALSE),
+    ('webhook', 'WEBHOOK_SECRET',    'ict-secret-token', 'string', 'Secret token for webhook authentication',       TRUE)
+ON CONFLICT (key) DO NOTHING;
+
+
+-- ══════════════════════════════════════════════════════════════
 -- VIEWS — Aggregated queries for the dashboard
 -- ══════════════════════════════════════════════════════════════
 

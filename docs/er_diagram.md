@@ -4,11 +4,37 @@
 
 ```mermaid
 erDiagram
+    tickers ||--o{ trades : "traded as"
+    tickers ||--o{ thread_status : "scanned by"
     trades ||--o{ trade_closes : "has partial closes"
     trades ||--o{ trade_commands : "receives commands"
     trades ||--o{ errors : "may have errors"
     thread_status ||--o{ errors : "may log errors"
     bot_state ||--|| bot_state : "singleton"
+    settings ||--|| settings : "key-value config"
+
+    tickers {
+        serial id PK "GENERATED ALWAYS AS IDENTITY"
+        varchar_10 symbol "NOT NULL UNIQUE"
+        varchar_100 name "NULL"
+        boolean is_active "NOT NULL DEFAULT TRUE"
+        int contracts "NOT NULL DEFAULT 2, CHECK > 0"
+        text notes "NULL"
+        timestamptz created_at "NOT NULL DEFAULT NOW()"
+        timestamptz updated_at "NOT NULL DEFAULT NOW()"
+    }
+
+    settings {
+        serial id PK "GENERATED ALWAYS AS IDENTITY"
+        varchar_30 category "NOT NULL (broker/strategy/exit_rules/trade_window/email/webhook/general)"
+        varchar_50 key "NOT NULL UNIQUE"
+        text value "NOT NULL"
+        varchar_20 data_type "NOT NULL DEFAULT 'string' (string/int/float/bool)"
+        text description "NULL"
+        boolean is_secret "NOT NULL DEFAULT FALSE"
+        timestamptz created_at "NOT NULL DEFAULT NOW()"
+        timestamptz updated_at "NOT NULL DEFAULT NOW()"
+    }
 
     trades {
         serial id PK "GENERATED ALWAYS AS IDENTITY"
