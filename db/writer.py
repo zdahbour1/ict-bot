@@ -1,0 +1,359 @@
+"""
+Database writer — functions for the bot to write trade, thread, and error data.
+All functions are no-op if DATABASE_URL is not configured.
+"""
+import logging
+import traceback as tb
+from datetime import datetime, timezone
+
+from db.connection import get_session, db_available
+
+log = logging.getLogger(__name__)
+
+
+def _safe_db(func):
+    """Decorator that catches DB errors and logs them without crashing the bot."""
+    def wrapper(*args, **kwargs):
+        if not db_available():
+            return None
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            log.warning(f"DB write failed ({func.__name__}): {e}")
+            return None
+    return wrapper
+
+
+@_safe_db
+def insert_trade(trade: dict, account: str) -> int | None:
+    """Insert a new trade row. Returns the DB id."""
+    from db.models import Trade
+    session = get_session()
+    if not session:
+        return None
+    try:
+        # Build enrichment JSONB
+        entry_enrichment = {}
+        for key in ("entry_indicators", "entry_greeks", "entry_stock_price", "entry_vix"):
+            if key in trade:
+                entry_enrichment[key] = trade[key]
+
+        row = Trade(
+            account=account,
+            ticker=trade.get("ticker", "UNK"),
+            symbol=trade["symbol"],
+            direction=trade.get("direction", "LONG"),
+            contracts_entered=trade["contracts"],
+            contracts_open=trade["contracts"],
+            entry_price=float(trade["entry_price"]),
+            ib_fill_price=float(trade["entry_price"]),
+            current_price=float(trade["entry_price"]),
+            profit_target=float(trade.get("profit_target", 0)),
+            stop_loss_level=float(trade.get("stop_loss", 0)),
+            signal_type=trade.get("signal"),
+            ict_entry=float(trade["ict_entry"]) if trade.get("ict_entry") else None,
+            ict_sl=float(trade["ict_sl"]) if trade.get("ict_sl") else None,
+            ict_tp=float(trade["ict_tp"]) if trade.get("ict_tp") else None,
+            entry_time=trade.get("entry_time", datetime.now(timezone.utc)),
+            entry_enrichment=entry_enrichment,
+        )
+        session.add(row)
+        session.commit()
+        trade_id = row.id
+        session.close()
+        log.debug(f"DB: inserted trade {trade_id} for {trade.get('ticker')}")
+        return trade_id
+    except Exception:
+        session.rollback()
+        session.close()
+        raise
+
+
+@_safe_db
+def update_trade_price(trade_id: int, current_price: float, pnl_pct: float,
+                       pnl_usd: float, peak_pnl_pct: float, dynamic_sl_pct: float):
+    """Update live pricing for an open trade (called every 5 seconds)."""
+    from db.models import Trade
+    session = get_session()
+    if not session:
+        return
+    try:
+        session.query(Trade).filter(Trade.id == trade_id).update({
+            "current_price": current_price,
+            "pnl_pct": pnl_pct,
+            "pnl_usd": pnl_usd,
+            "peak_pnl_pct": peak_pnl_pct,
+            "dynamic_sl_pct": dynamic_sl_pct,
+        })
+        session.commit()
+        session.close()
+    except Exception:
+        session.rollback()
+        session.close()
+        raise
+
+
+@_safe_db
+def close_trade(trade_id: int, exit_price: float, result: str, reason: str,
+                exit_enrichment: dict = None):
+    """Mark a trade as closed in the database."""
+    from db.models import Trade
+    session = get_session()
+    if not session:
+        return
+    try:
+        pnl_pct = 0
+        pnl_usd = 0
+        trade = session.query(Trade).filter(Trade.id == trade_id).first()
+        if trade:
+            entry = float(trade.entry_price)
+            if entry > 0:
+                pnl_pct = (exit_price - entry) / entry * 100
+                pnl_usd = (exit_price - entry) * 100 * trade.contracts_entered
+
+        session.query(Trade).filter(Trade.id == trade_id).update({
+            "exit_price": exit_price,
+            "current_price": exit_price,
+            "pnl_pct": pnl_pct,
+            "pnl_usd": pnl_usd,
+            "exit_time": datetime.now(timezone.utc),
+            "status": "closed",
+            "exit_reason": reason,
+            "exit_result": result,
+            "contracts_open": 0,
+            "contracts_closed": trade.contracts_entered if trade else 0,
+            "exit_enrichment": exit_enrichment or {},
+        })
+        session.commit()
+        session.close()
+        log.debug(f"DB: closed trade {trade_id} — {result} ({reason})")
+    except Exception:
+        session.rollback()
+        session.close()
+        raise
+
+
+@_safe_db
+def record_partial_close(trade_id: int, contracts: int, close_price: float,
+                         pnl_pct: float, pnl_usd: float, reason: str,
+                         ib_order_id: int = None, ib_fill_price: float = None):
+    """Record a partial close event and update the trade's contract counts."""
+    from db.models import Trade, TradeClose
+    session = get_session()
+    if not session:
+        return
+    try:
+        close = TradeClose(
+            trade_id=trade_id,
+            contracts=contracts,
+            close_price=close_price,
+            pnl_pct=pnl_pct,
+            pnl_usd=pnl_usd,
+            reason=reason,
+            ib_order_id=ib_order_id,
+            ib_fill_price=ib_fill_price,
+        )
+        session.add(close)
+
+        trade = session.query(Trade).filter(Trade.id == trade_id).first()
+        if trade:
+            trade.contracts_open = max(0, trade.contracts_open - contracts)
+            trade.contracts_closed += contracts
+            if trade.contracts_open == 0:
+                trade.status = "closed"
+                trade.exit_time = datetime.now(timezone.utc)
+                trade.exit_price = close_price
+
+        session.commit()
+        session.close()
+    except Exception:
+        session.rollback()
+        session.close()
+        raise
+
+
+@_safe_db
+def mark_trade_errored(trade_id: int, error_message: str):
+    """Mark a trade as errored."""
+    from db.models import Trade
+    session = get_session()
+    if not session:
+        return
+    try:
+        session.query(Trade).filter(Trade.id == trade_id).update({
+            "status": "errored",
+            "error_message": error_message,
+        })
+        session.commit()
+        session.close()
+    except Exception:
+        session.rollback()
+        session.close()
+        raise
+
+
+@_safe_db
+def update_thread_status(thread_name: str, ticker: str = None, status: str = "idle",
+                         message: str = None, scans_today: int = None,
+                         trades_today: int = None, alerts_today: int = None,
+                         error_count: int = None):
+    """Upsert thread status row."""
+    from db.models import ThreadStatus
+    from sqlalchemy import text
+    session = get_session()
+    if not session:
+        return
+    try:
+        existing = session.query(ThreadStatus).filter(
+            ThreadStatus.thread_name == thread_name
+        ).first()
+
+        if existing:
+            existing.status = status
+            if ticker:
+                existing.ticker = ticker
+            if message is not None:
+                existing.last_message = message
+            if status == "scanning":
+                existing.last_scan_time = datetime.now(timezone.utc)
+            if scans_today is not None:
+                existing.scans_today = scans_today
+            if trades_today is not None:
+                existing.trades_today = trades_today
+            if alerts_today is not None:
+                existing.alerts_today = alerts_today
+            if error_count is not None:
+                existing.error_count = error_count
+        else:
+            row = ThreadStatus(
+                thread_name=thread_name,
+                ticker=ticker,
+                status=status,
+                last_message=message,
+                last_scan_time=datetime.now(timezone.utc) if status == "scanning" else None,
+                scans_today=scans_today or 0,
+                trades_today=trades_today or 0,
+                alerts_today=alerts_today or 0,
+                error_count=error_count or 0,
+            )
+            session.add(row)
+
+        session.commit()
+        session.close()
+    except Exception:
+        session.rollback()
+        session.close()
+        raise
+
+
+@_safe_db
+def update_bot_state(status: str, account: str = None, pid: int = None,
+                     total_tickers: int = None):
+    """Update the bot_state singleton."""
+    from db.models import BotState
+    session = get_session()
+    if not session:
+        return
+    try:
+        state = session.query(BotState).filter(BotState.id == 1).first()
+        if state:
+            state.status = status
+            if account:
+                state.account = account
+            if pid:
+                state.pid = pid
+            if total_tickers is not None:
+                state.total_tickers = total_tickers
+            if status == "running":
+                state.started_at = datetime.now(timezone.utc)
+            elif status == "stopped":
+                state.stopped_at = datetime.now(timezone.utc)
+        else:
+            state = BotState(
+                id=1, status=status, account=account, pid=pid,
+                total_tickers=total_tickers or 0,
+            )
+            session.add(state)
+        session.commit()
+        session.close()
+    except Exception:
+        session.rollback()
+        session.close()
+        raise
+
+
+@_safe_db
+def log_error(thread_name: str = None, ticker: str = None, trade_id: int = None,
+              error_type: str = "unknown", message: str = "", trace: str = None):
+    """Insert an error log row."""
+    from db.models import Error
+    session = get_session()
+    if not session:
+        return
+    try:
+        row = Error(
+            thread_name=thread_name,
+            ticker=ticker,
+            trade_id=trade_id,
+            error_type=error_type,
+            message=message[:2000] if message else "",
+            traceback=trace[:5000] if trace else None,
+        )
+        session.add(row)
+        session.commit()
+        session.close()
+    except Exception:
+        session.rollback()
+        session.close()
+        raise
+
+
+@_safe_db
+def check_pending_commands() -> list:
+    """Fetch all pending trade commands from the UI. Returns list of dicts."""
+    from db.models import TradeCommand
+    session = get_session()
+    if not session:
+        return []
+    try:
+        commands = session.query(TradeCommand).filter(
+            TradeCommand.status == "pending"
+        ).order_by(TradeCommand.created_at).all()
+
+        result = []
+        for cmd in commands:
+            cmd.status = "executing"
+            result.append({
+                "id": cmd.id,
+                "trade_id": cmd.trade_id,
+                "command": cmd.command,
+                "contracts": cmd.contracts,
+            })
+        session.commit()
+        session.close()
+        return result
+    except Exception:
+        session.rollback()
+        session.close()
+        raise
+
+
+@_safe_db
+def complete_command(command_id: int, error: str = None):
+    """Mark a command as executed or failed."""
+    from db.models import TradeCommand
+    session = get_session()
+    if not session:
+        return
+    try:
+        session.query(TradeCommand).filter(TradeCommand.id == command_id).update({
+            "status": "failed" if error else "executed",
+            "error": error,
+            "executed_at": datetime.now(timezone.utc),
+        })
+        session.commit()
+        session.close()
+    except Exception:
+        session.rollback()
+        session.close()
+        raise
