@@ -119,17 +119,29 @@ class BotManagerHandler(BaseHTTPRequestHandler):
         pid = _bot_process.pid
         log.info(f"Stopping bot (PID: {pid})...")
 
-        # Send SIGTERM for graceful shutdown
+        # Write stop file for graceful shutdown (works on Windows)
+        stop_file = os.path.join(BOT_DIR, ".bot_stop")
         try:
-            _bot_process.terminate()
+            with open(stop_file, "w") as f:
+                f.write("stop")
+            log.info("Stop file written — waiting for bot to shut down gracefully...")
+
+            # Wait up to 15 seconds for graceful exit
             try:
-                _bot_process.wait(timeout=10)
+                _bot_process.wait(timeout=15)
+                log.info("Bot exited gracefully")
             except subprocess.TimeoutExpired:
-                log.warning("Bot didn't stop in 10s — killing")
+                log.warning("Bot didn't stop in 15s — force killing")
                 _bot_process.kill()
                 _bot_process.wait(timeout=5)
         except Exception as e:
             log.error(f"Error stopping bot: {e}")
+            # Fallback: force kill
+            try:
+                _bot_process.kill()
+                _bot_process.wait(timeout=5)
+            except Exception:
+                pass
 
         exit_code = _bot_process.returncode
         _bot_process = None

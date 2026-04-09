@@ -96,18 +96,29 @@ def main():
         _running = False
     signal.signal(signal.SIGTERM, _handle_sigterm)
 
+    # ── Stop file for sidecar-initiated shutdown (Windows compat) ──
+    STOP_FILE = os.path.join(os.path.dirname(__file__), ".bot_stop")
+    # Clean up any stale stop file from previous runs
+    if os.path.exists(STOP_FILE):
+        os.remove(STOP_FILE)
+
     # ── Main loop: process IB orders on the main thread ───
     import time
     log.info("Main thread: processing IB order queue...")
     while _running:
         try:
+            # Check for sidecar stop signal (Windows doesn't support SIGTERM properly)
+            if os.path.exists(STOP_FILE):
+                log.info("Stop file detected — shutting down gracefully...")
+                os.remove(STOP_FILE)
+                break
+
             if hasattr(client, 'process_orders'):
                 client.process_orders()
             else:
                 time.sleep(1)
         except KeyboardInterrupt:
             log.info("Shutting down...")
-            _shutdown_cleanup()
             break
         except Exception as e:
             log.error(f"Main loop error: {e}")
