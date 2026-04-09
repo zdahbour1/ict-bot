@@ -87,7 +87,13 @@ def get_trade(trade_id: int):
 
 
 @router.post("/trades/{trade_id}/close")
-def close_trade(trade_id: int, req: CloseRequest = CloseRequest()):
+async def close_trade(trade_id: int, req: CloseRequest = CloseRequest()):
+    """
+    Smart close: checks IB position, decides what to do.
+    1. If position closed on IB → mark closed in DB with IB exit price
+    2. If position open on IB → cancel brackets, close on IB, update DB
+    3. If can't reach IB (bot down) → queue command for when bot restarts
+    """
     session = get_session()
     if not session:
         raise HTTPException(503, "Database not available")
@@ -98,6 +104,51 @@ def close_trade(trade_id: int, req: CloseRequest = CloseRequest()):
         if trade.status != "open":
             raise HTTPException(400, f"Trade is already {trade.status}")
 
+        # Try to close via sidecar (which talks to IB)
+        try:
+            import httpx
+            import os
+            sidecar_url = os.getenv("BOT_SIDECAR_URL", "http://host.docker.internal:9000")
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(f"{sidecar_url}/close-trade",
+                    json={"trade_id": trade_id, "symbol": trade.symbol,
+                          "ticker": trade.ticker, "contracts": req.contracts or trade.contracts_open,
+                          "direction": trade.direction})
+                if resp.status_code == 200:
+                    result = resp.json()
+                    # Update DB based on sidecar response
+                    from datetime import datetime, timezone
+                    if result.get("position_was_open") == False:
+                        # Already closed on IB — just update DB
+                        trade.status = "closed"
+                        trade.exit_time = datetime.now(timezone.utc)
+                        trade.exit_price = result.get("exit_price", trade.current_price)
+                        trade.exit_reason = "CLOSED (BRACKET/IB)"
+                        entry = float(trade.entry_price) if trade.entry_price else 0
+                        exit_p = float(trade.exit_price) if trade.exit_price else 0
+                        trade.pnl_pct = (exit_p - entry) / entry if entry > 0 else 0
+                        trade.pnl_usd = (exit_p - entry) * 100 * trade.contracts_entered
+                        trade.exit_result = "WIN" if trade.pnl_pct > 0 else "LOSS" if trade.pnl_pct < 0 else "SCRATCH"
+                    else:
+                        # Closed on IB by sidecar
+                        trade.status = "closed"
+                        trade.exit_time = datetime.now(timezone.utc)
+                        trade.exit_price = result.get("exit_price", trade.current_price)
+                        trade.exit_reason = "CLOSED (UI)"
+                        entry = float(trade.entry_price) if trade.entry_price else 0
+                        exit_p = float(trade.exit_price) if trade.exit_price else 0
+                        trade.pnl_pct = (exit_p - entry) / entry if entry > 0 else 0
+                        trade.pnl_usd = (exit_p - entry) * 100 * trade.contracts_entered
+                        trade.exit_result = "WIN" if trade.pnl_pct > 0 else "LOSS" if trade.pnl_pct < 0 else "SCRATCH"
+                    trade.contracts_open = 0
+                    trade.contracts_closed = trade.contracts_entered
+                    session.commit()
+                    session.close()
+                    return {"status": "closed", "trade_id": trade_id, "detail": result}
+        except Exception:
+            pass  # Sidecar not available — fall back to command queue
+
+        # Fallback: queue command for bot to process
         cmd = TradeCommand(
             trade_id=trade_id,
             command="close_partial" if req.contracts else "close",
@@ -106,68 +157,15 @@ def close_trade(trade_id: int, req: CloseRequest = CloseRequest()):
         session.add(cmd)
         session.commit()
         session.close()
-        return {"status": "command_queued", "command_id": cmd.id}
-    finally:
-        session.close()
-
-
-@router.post("/trades/{trade_id}/mark-closed")
-def mark_trade_closed(trade_id: int):
-    """Mark a trade as closed in the DB without sending an IB order.
-    Use when the trade was already closed on IB (manually or by bracket)."""
-    session = get_session()
-    if not session:
-        raise HTTPException(503, "Database not available")
-    try:
-        trade = session.query(Trade).filter(Trade.id == trade_id).first()
-        if not trade:
-            raise HTTPException(404, "Trade not found")
-        if trade.status != "open":
-            raise HTTPException(400, f"Trade is already {trade.status}")
-
-        from datetime import datetime, timezone
-        trade.status = "closed"
-        trade.exit_time = datetime.now(timezone.utc)
-        trade.exit_reason = "MANUALLY CLOSED (DB)"
-        trade.exit_result = "SCRATCH"
-        trade.contracts_open = 0
-        trade.contracts_closed = trade.contracts_entered
-        session.commit()
-        session.close()
-        return {"status": "marked_closed", "trade_id": trade_id}
-    finally:
-        session.close()
-
-
-@router.post("/trades/mark-all-closed")
-def mark_all_trades_closed():
-    """Mark ALL open trades as closed in DB. Cleanup when IB positions already closed."""
-    session = get_session()
-    if not session:
-        raise HTTPException(503, "Database not available")
-    try:
-        from datetime import datetime, timezone
-        open_trades = session.query(Trade).filter(Trade.status == "open").all()
-        if not open_trades:
-            return {"status": "no_open_trades"}
-        count = 0
-        for t in open_trades:
-            t.status = "closed"
-            t.exit_time = datetime.now(timezone.utc)
-            t.exit_reason = "MANUALLY CLOSED (DB)"
-            t.exit_result = "SCRATCH"
-            t.contracts_open = 0
-            t.contracts_closed = t.contracts_entered
-            count += 1
-        session.commit()
-        session.close()
-        return {"status": "all_marked_closed", "count": count}
+        return {"status": "command_queued", "command_id": cmd.id,
+                "note": "Bot will process when running"}
     finally:
         session.close()
 
 
 @router.post("/trades/close-all")
-def close_all_trades():
+async def close_all_trades():
+    """Close all open trades. Tries sidecar first, falls back to command queue."""
     session = get_session()
     if not session:
         raise HTTPException(503, "Database not available")
@@ -175,13 +173,43 @@ def close_all_trades():
         open_trades = session.query(Trade).filter(Trade.status == "open").all()
         if not open_trades:
             return {"status": "no_open_trades"}
-        commands = []
+
+        results = []
         for t in open_trades:
+            try:
+                import httpx
+                import os
+                sidecar_url = os.getenv("BOT_SIDECAR_URL", "http://host.docker.internal:9000")
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    resp = await client.post(f"{sidecar_url}/close-trade",
+                        json={"trade_id": t.id, "symbol": t.symbol,
+                              "ticker": t.ticker, "contracts": t.contracts_open,
+                              "direction": t.direction})
+                    if resp.status_code == 200:
+                        from datetime import datetime, timezone
+                        detail = resp.json()
+                        t.status = "closed"
+                        t.exit_time = datetime.now(timezone.utc)
+                        t.exit_price = detail.get("exit_price", t.current_price)
+                        t.exit_reason = "CLOSED (UI CLOSE ALL)"
+                        entry = float(t.entry_price) if t.entry_price else 0
+                        exit_p = float(t.exit_price) if t.exit_price else 0
+                        t.pnl_pct = (exit_p - entry) / entry if entry > 0 else 0
+                        t.pnl_usd = (exit_p - entry) * 100 * t.contracts_entered
+                        t.exit_result = "WIN" if t.pnl_pct > 0 else "LOSS" if t.pnl_pct < 0 else "SCRATCH"
+                        t.contracts_open = 0
+                        t.contracts_closed = t.contracts_entered
+                        results.append({"id": t.id, "status": "closed"})
+                        continue
+            except Exception:
+                pass
+            # Fallback: queue
             cmd = TradeCommand(trade_id=t.id, command="close")
             session.add(cmd)
-            commands.append(t.id)
+            results.append({"id": t.id, "status": "queued"})
+
         session.commit()
         session.close()
-        return {"status": "commands_queued", "trade_ids": commands, "count": len(commands)}
+        return {"status": "processed", "trades": results, "count": len(results)}
     finally:
         session.close()

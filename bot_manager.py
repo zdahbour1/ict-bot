@@ -64,8 +64,92 @@ class BotManagerHandler(BaseHTTPRequestHandler):
             self._handle_scan_control("pause")
         elif self.path == "/resume-scans":
             self._handle_scan_control("resume")
+        elif self.path == "/close-trade":
+            self._handle_close_trade()
         else:
             self._send_json({"error": "not found"}, 404)
+
+    def _handle_close_trade(self):
+        """Close a trade on IB. Checks position, cancels brackets, sells if still open."""
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = json.loads(self.rfile.read(content_length)) if content_length > 0 else {}
+
+        symbol = body.get("symbol", "")
+        ticker = body.get("ticker", "")
+        contracts = body.get("contracts", 0)
+        direction = body.get("direction", "LONG")
+
+        log.info(f"Close trade request: {ticker} {symbol} {contracts}x {direction}")
+
+        try:
+            from ib_async import IB, Stock, Option, MarketOrder
+            # Connect a temporary IB client to check and close
+            ib = IB()
+            ib.connect(host=os.getenv("IB_HOST", "127.0.0.1"),
+                       port=int(os.getenv("IB_PORT", "7497")),
+                       clientId=99)  # Use clientId 99 to avoid conflict with bot
+
+            # Check if position exists
+            positions = ib.positions()
+            position = None
+            for p in positions:
+                local_sym = (p.contract.localSymbol or "").strip().replace(" ", "")
+                if symbol.replace(" ", "") in local_sym and abs(p.position) > 0:
+                    position = p
+                    break
+
+            if not position:
+                ib.disconnect()
+                self._send_json({"status": "already_closed", "position_was_open": False,
+                                "exit_price": 0})
+                return
+
+            # Cancel any open orders for this symbol
+            for trade in ib.openTrades():
+                if trade.contract.conId == position.contract.conId:
+                    ib.cancelOrder(trade.order)
+                    log.info(f"Cancelled order {trade.order.orderId} for {symbol}")
+
+            ib.sleep(1)
+
+            # Check position again after cancels
+            positions = ib.positions()
+            still_open = False
+            for p in positions:
+                if p.contract.conId == position.contract.conId and abs(p.position) > 0:
+                    still_open = True
+                    break
+
+            exit_price = 0
+            if still_open:
+                # Close with market order
+                qty = int(abs(position.position))
+                action = "SELL" if position.position > 0 else "BUY"
+                position.contract.exchange = "SMART"
+                order = MarketOrder(action, qty)
+                if os.getenv("IB_ACCOUNT"):
+                    order.account = os.getenv("IB_ACCOUNT")
+                trade = ib.placeOrder(position.contract, order)
+                for _ in range(20):
+                    ib.sleep(0.5)
+                    if trade.orderStatus.status == "Filled":
+                        break
+                exit_price = trade.orderStatus.avgFillPrice
+                log.info(f"Closed {ticker}: {action} {qty}x @ ${exit_price:.2f}")
+            else:
+                # Position was closed by bracket before our cancel arrived
+                exit_price = position.marketPrice if hasattr(position, 'marketPrice') else 0
+
+            ib.disconnect()
+            self._send_json({
+                "status": "closed",
+                "position_was_open": still_open,
+                "exit_price": exit_price,
+            })
+
+        except Exception as e:
+            log.error(f"Close trade failed: {e}")
+            self._send_json({"error": str(e)}, 500)
 
     def _handle_scan_control(self, action: str):
         global _bot_process
