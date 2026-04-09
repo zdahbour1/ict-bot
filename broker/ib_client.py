@@ -28,6 +28,7 @@ class IBClient:
     def __init__(self):
         self.ib = IB()
         self._order_queue = queue.Queue()
+        self._priority_queue = queue.Queue()  # Exit manager gets priority
         self._connected = False
         # Cache of validated contracts: occ_symbol → Option contract
         self._contract_cache = {}
@@ -50,8 +51,22 @@ class IBClient:
         self._connected = True
 
     def process_orders(self):
-        """Must be called in a loop on the MAIN thread."""
-        while not self._order_queue.empty():
+        """Must be called in a loop on the MAIN thread.
+        Priority queue (exit manager) always processed first."""
+        # Process ALL priority items first (trade monitoring)
+        while not self._priority_queue.empty():
+            try:
+                func, args, result_event, result_holder = self._priority_queue.get_nowait()
+                try:
+                    result_holder["value"] = func(*args)
+                except Exception as e:
+                    result_holder["error"] = e
+                finally:
+                    result_event.set()
+            except queue.Empty:
+                break
+        # Then process one normal item (scanner requests)
+        if not self._order_queue.empty():
             try:
                 func, args, result_event, result_holder = self._order_queue.get_nowait()
                 try:
@@ -61,13 +76,14 @@ class IBClient:
                 finally:
                     result_event.set()
             except queue.Empty:
-                break
+                pass
         self.ib.sleep(0.1)
 
-    def _submit_to_ib(self, func, *args, timeout=30):
+    def _submit_to_ib(self, func, *args, timeout=30, priority=False):
         result_event = threading.Event()
         result_holder = {}
-        self._order_queue.put((func, args, result_event, result_holder))
+        q = self._priority_queue if priority else self._order_queue
+        q.put((func, args, result_event, result_holder))
         if not result_event.wait(timeout=timeout):
             raise TimeoutError(f"IB call timed out after {timeout}s: {func.__name__}")
         if "error" in result_holder:
@@ -210,8 +226,8 @@ class IBClient:
         return qualified[0]
 
     # ── Option Price (IB real-time) ───────────────────────────
-    def get_option_price(self, symbol: str) -> float:
-        return self._submit_to_ib(self._ib_get_option_price, symbol)
+    def get_option_price(self, symbol: str, priority: bool = False) -> float:
+        return self._submit_to_ib(self._ib_get_option_price, symbol, priority=priority)
 
     def _ib_get_option_price(self, symbol: str) -> float:
         contract = self._occ_to_contract(symbol)

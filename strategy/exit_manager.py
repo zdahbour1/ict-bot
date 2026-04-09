@@ -223,7 +223,7 @@ class ExitManager:
             still_open = []
             for trade in self.open_trades:
                 try:
-                    current_price = self.client.get_option_price(trade["symbol"])
+                    current_price = self.client.get_option_price(trade["symbol"], priority=True)
                     entry_price   = trade["entry_price"]
                     pnl_pct       = (current_price - entry_price) / entry_price
 
