@@ -99,21 +99,23 @@ class BotManagerHandler(BaseHTTPRequestHandler):
                     break
 
             if not position:
-                # Position already closed — try to find the fill price
+                # Position already closed — find fill price and time from IB
                 exit_price = 0
+                exit_time = None
                 try:
                     fills = ib.fills()
                     for fill in reversed(fills):
                         local_sym = (fill.contract.localSymbol or "").strip().replace(" ", "")
                         if symbol.replace(" ", "") in local_sym:
                             exit_price = float(fill.execution.price)
-                            log.info(f"Found fill price for closed position: ${exit_price:.2f}")
+                            exit_time = str(fill.execution.time) if fill.execution.time else None
+                            log.info(f"Found fill for closed position: ${exit_price:.2f} at {exit_time}")
                             break
                 except Exception:
                     pass
                 ib.disconnect()
                 self._send_json({"status": "already_closed", "position_was_open": False,
-                                "exit_price": exit_price})
+                                "exit_price": exit_price, "exit_time": exit_time})
                 return
 
             # Cancel any open orders for this symbol
@@ -147,16 +149,22 @@ class BotManagerHandler(BaseHTTPRequestHandler):
                     if trade.orderStatus.status == "Filled":
                         break
                 exit_price = trade.orderStatus.avgFillPrice
-                log.info(f"Closed {ticker}: {action} {qty}x @ ${exit_price:.2f}")
+                # Get fill time
+                fill_time = None
+                if trade.fills:
+                    fill_time = str(trade.fills[-1].execution.time)
+                log.info(f"Closed {ticker}: {action} {qty}x @ ${exit_price:.2f} at {fill_time}")
             else:
                 # Position was closed by bracket before our cancel arrived
                 exit_price = position.marketPrice if hasattr(position, 'marketPrice') else 0
+                fill_time = None
 
             ib.disconnect()
             self._send_json({
                 "status": "closed",
                 "position_was_open": still_open,
                 "exit_price": exit_price,
+                "exit_time": fill_time,
             })
 
         except Exception as e:

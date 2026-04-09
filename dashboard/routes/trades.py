@@ -123,14 +123,25 @@ async def close_trade(trade_id: int, req: CloseRequest = CloseRequest()):
                     ib_exit_price = result.get("exit_price", 0)
                     exit_p = float(ib_exit_price) if ib_exit_price else float(trade.current_price or trade.entry_price or 0)
 
+                    # Use IB execution time, fall back to now
+                    ib_exit_time = result.get("exit_time")
+                    if ib_exit_time:
+                        try:
+                            exit_time = datetime.fromisoformat(str(ib_exit_time).replace('Z', '+00:00'))
+                        except Exception:
+                            exit_time = datetime.now(timezone.utc)
+                    else:
+                        exit_time = datetime.now(timezone.utc)
+
                     if result.get("position_was_open") == False:
                         trade.exit_reason = "CLOSED (BRACKET/IB)"
                     else:
                         trade.exit_reason = "CLOSED (UI)"
 
                     trade.status = "closed"
-                    trade.exit_time = datetime.now(timezone.utc)
+                    trade.exit_time = exit_time
                     trade.exit_price = exit_p
+                    trade.current_price = exit_p  # sync current with exit
                     entry = float(trade.entry_price) if trade.entry_price else 0
                     trade.pnl_pct = (exit_p - entry) / entry if entry > 0 else 0
                     trade.pnl_usd = (exit_p - entry) * 100 * trade.contracts_entered
@@ -185,9 +196,18 @@ async def close_all_trades():
                         detail = resp.json()
                         ib_exit = detail.get("exit_price", 0)
                         exit_p = float(ib_exit) if ib_exit else float(t.current_price or t.entry_price or 0)
+                        ib_time = detail.get("exit_time")
+                        if ib_time:
+                            try:
+                                exit_time = datetime.fromisoformat(str(ib_time).replace('Z', '+00:00'))
+                            except Exception:
+                                exit_time = datetime.now(timezone.utc)
+                        else:
+                            exit_time = datetime.now(timezone.utc)
                         t.status = "closed"
-                        t.exit_time = datetime.now(timezone.utc)
+                        t.exit_time = exit_time
                         t.exit_price = exit_p
+                        t.current_price = exit_p
                         t.exit_reason = "CLOSED (UI CLOSE ALL)"
                         entry = float(t.entry_price) if t.entry_price else 0
                         t.pnl_pct = (exit_p - entry) / entry if entry > 0 else 0
