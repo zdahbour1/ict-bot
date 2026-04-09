@@ -13,6 +13,7 @@
 9. [Trading Behavior](#trading-behavior)
 10. [Configuration Reference](#configuration-reference)
 11. [Troubleshooting](#troubleshooting)
+12. [Bug Fixes & Changelog](#bug-fixes--changelog)
 11. [API Reference](#api-reference)
 
 ---
@@ -638,6 +639,85 @@ Because all trades use IB server-side bracket orders:
 3. Check Docker logs: `docker compose logs`
 4. Ensure Docker has sufficient resources allocated
 5. Try `docker compose down` then `docker compose up -d`
+
+---
+
+## Bug Fixes & Changelog
+
+### 2026-04-09 — Dashboard Bug Fix Session
+
+#### BUG-001: Threads show "scanning" after bot stops
+**Symptom:** After stopping the bot, the Threads tab continued showing all 19 threads with "scanning" status instead of "stopped".
+**Root Cause:** Bot was killed via SIGTERM but never updated the `thread_status` table before dying. Daemon threads don't get cleanup hooks.
+**Fix:** Added `_shutdown_cleanup()` in `main.py` that marks all threads as "stopped" in DB. Added SIGTERM signal handler so the sidecar's graceful stop triggers the cleanup.
+**Commit:** `5aa988f`
+
+#### BUG-002: Scans/Trades/Errors counters always zero
+**Symptom:** The Scans, Trades, and Errors columns in the Threads tab always showed 0 even after the bot had been running and executing trades.
+**Root Cause:** Two issues: (1) `scans_today` was mapped to `self._alerts_today` (wrong field — should be a dedicated scan counter), (2) No `_scans_today` or `_errors_today` counters existed in the Scanner class.
+**Fix:** Added `_scans_today` and `_errors_today` counters to Scanner. Fixed `update_thread_status()` call to pass correct counter values. Added error counter increments on timeout and exceptions.
+**Commit:** `5aa988f`
+
+#### BUG-003: No refresh button on Threads tab
+**Symptom:** Threads tab auto-refreshed every 10 seconds but user had no way to force an immediate refresh.
+**Fix:** Added "Refresh Now" button and "Auto-refreshes 10s" indicator to the Threads tab controls bar.
+**Commit:** `5aa988f`
+
+#### BUG-004: No PID/Thread ID for OS-level debugging
+**Symptom:** When threads showed unexpected status, there was no way to verify at the OS level whether the process/thread was actually running.
+**Fix:** Added `pid` and `thread_id` columns to `thread_status` table. Writer auto-detects `os.getpid()` and `threading.get_ident()` on each update. Threads tab now shows PID and Thread ID columns in monospace font. User can run `tasklist /FI "PID eq <pid>"` to verify.
+**Commit:** `ffc934b`
+
+#### BUG-005: start_all doesn't check for already-running system
+**Symptom:** Running `start_all.bat` while the system was already running could start duplicate sidecar/bot processes.
+**Fix:** Added pre-flight check in `start_all.bat`, `start_all.sh`, and `start_dashboard.py` that queries the sidecar at port 9000. If running, shows current status and PID, tells user to run `stop_all` first.
+**Commit:** `ffc934b`
+
+#### BUG-006: Threads and Tickers tabs not sortable
+**Symptom:** Column headers in Threads and Tickers tabs were static — no way to sort by scans, errors, ticker name, etc.
+**Fix:** Replaced static HTML tables with TanStack Table (same as Trades tab). All columns are now clickable for ascending/descending sort with arrow indicators.
+**Commit:** `6386fa8`
+
+#### BUG-007: KPI cards too large, wasting screen space
+**Symptom:** The P&L summary on the Trades tab used 6 large cards taking up ~200px of vertical space. Threads tab had 4 large cards. This pushed the actual data below the fold.
+**Fix:** Replaced large card grids with compact single-line inline stats. Trades tab P&L is now one line. Threads tab KPIs are inline text with pipe separators. Saves ~150px of vertical space on each tab.
+**Commit:** `6386fa8`
+
+#### BUG-008: No way to view error details
+**Symptom:** Threads tab showed error count but clicking it did nothing. No way to see what the actual errors were.
+**Fix:** Added `GET /api/errors` endpoint (filterable by ticker/thread). Error count in Threads tab is now a clickable red link that opens a modal popup showing the most recent errors in descending order with error_type, message, traceback, and timestamp.
+**Commit:** `6386fa8`
+
+#### BUG-009: No next scan time shown
+**Symptom:** After a scan completed, the Last Message column showed generic text with no indication of when the next scan would occur.
+**Fix:** Post-scan message now includes: "Scan #N done at HH:MM PT | X signals | Next scan ~HH:MM PT". The next scan time is calculated as current time + 60 seconds (the scan interval).
+**Commit:** `6386fa8`
+
+#### BUG-010: Trades counter not updating in real-time
+**Symptom:** After a trade was placed, the Trades column in Threads tab stayed at the old count until the next scan cycle (up to 60 seconds later).
+**Root Cause:** The counter was incremented in Python but only written to DB at the start of the next scan via `update_thread_status()`.
+**Fix:** Added an immediate `update_thread_status()` call right after `add_trade()` succeeds, so the DB reflects the new trade count within seconds.
+**Commit:** `6386fa8`
+
+### 2026-04-08 — Bot Start/Stop from Dashboard
+
+#### BUG-011: "Start Bot" button does nothing
+**Symptom:** Clicking "Start Bot" in the dashboard returned 200 OK but bot didn't actually start.
+**Root Cause:** The FastAPI API in Docker tried to spawn `python main.py` as a subprocess inside the container, but the bot needs to run on the host machine for IB TWS connectivity.
+**Fix:** Implemented Bot Manager Sidecar architecture: `bot_manager.py` runs on the host (port 9000) and manages the bot process. The API in Docker calls the sidecar via `host.docker.internal:9000`. Added `start_dashboard.py` as single-command launcher.
+**Commit:** `b2745bb`
+
+#### BUG-012: pgAdmin email validation error
+**Symptom:** pgAdmin container crashed on startup with "admin@ict-bot.local does not appear to be a valid email address".
+**Root Cause:** The `.local` TLD is a reserved/special-use domain rejected by pgAdmin's email validator.
+**Fix:** Changed email to `admin@ictbot.com`. Added `pgadmin-servers.json` to pre-configure the database connection.
+**Commit:** `07c4564`
+
+#### BUG-013: Socket.IO API initialization error
+**Symptom:** API container crashed with `TypeError: ASGIApp.__init__() got an unexpected keyword argument 'other_app'`.
+**Root Cause:** The `python-socketio` library changed the `ASGIApp` constructor signature — `other_app` became a positional argument.
+**Fix:** Changed `socketio.ASGIApp(sio, other_app=app)` to `socketio.ASGIApp(sio, app)`.
+**Commit:** `a3a5830`
 
 ---
 
