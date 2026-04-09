@@ -67,6 +67,14 @@ def main():
 
     # ── Start exit monitor (shared, thread-safe) ──────────
     exit_manager = ExitManager(client)
+
+    # ── Startup reconciliation: sync DB with IB positions ─
+    try:
+        from strategy.reconciliation import startup_reconciliation
+        startup_reconciliation(client, exit_manager)
+    except Exception as e:
+        log.warning(f"Startup reconciliation failed: {e}")
+
     exit_manager.start()
 
     # ── Start one scanner per ticker (parallel threads) ───
