@@ -93,17 +93,40 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
       cell: ({ row }) => {
         if (row.original.status !== 'open') return null;
         return (
-          <button
-            onClick={async () => {
-              if (confirm(`Close ${row.original.ticker} (${row.original.contracts_open} contracts)?`)) {
-                await apiPost(`/trades/${row.original.id}/close`);
-                onRefresh();
-              }
-            }}
-            className="px-2 py-1 text-xs bg-[#21262d] border border-[#30363d] text-gray-400 rounded hover:text-red-400 hover:border-red-400"
-          >
-            Close
-          </button>
+          <div className="flex gap-1">
+            <button
+              onClick={async () => {
+                if (confirm(`Close ${row.original.ticker} via bot?\n(Bot must be running)`)) {
+                  try {
+                    await apiPost(`/trades/${row.original.id}/close`);
+                    onRefresh();
+                  } catch (e: any) {
+                    alert(`Close failed: ${e.message}`);
+                  }
+                }
+              }}
+              className="px-2 py-1 text-xs bg-[#21262d] border border-[#30363d] text-gray-400 rounded hover:text-red-400 hover:border-red-400"
+              title="Send close command to bot (requires bot running)"
+            >
+              Close
+            </button>
+            <button
+              onClick={async () => {
+                if (confirm(`Mark ${row.original.ticker} as closed in DB?\n(Use when already closed on IB)`)) {
+                  try {
+                    await apiPost(`/trades/${row.original.id}/mark-closed`);
+                    onRefresh();
+                  } catch (e: any) {
+                    alert(`Mark closed failed: ${e.message}`);
+                  }
+                }
+              }}
+              className="px-2 py-1 text-xs bg-[#21262d] border border-[#30363d] text-gray-500 rounded hover:text-yellow-400 hover:border-yellow-400"
+              title="Mark as closed in DB (no IB order sent)"
+            >
+              Mark Closed
+            </button>
+          </div>
         );
       },
     }),
@@ -124,9 +147,13 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
     <div>
       {/* Controls */}
       <div className="flex items-center gap-3 mb-4">
-        <button onClick={async () => { if (confirm('Close ALL open trades?')) { await apiPost('/trades/close-all'); onRefresh(); } }}
+        <button onClick={async () => { if (confirm('Close ALL open trades via bot?\n(Bot must be running)')) { try { await apiPost('/trades/close-all'); onRefresh(); } catch(e:any) { alert(`Failed: ${e.message}`); } } }}
           className="px-3 py-1.5 text-sm bg-red-600 text-white rounded-md hover:bg-red-700">
-          Close All Trades
+          Close All (Bot)
+        </button>
+        <button onClick={async () => { if (confirm('Mark ALL trades as closed in DB?\n(Use when already closed on IB)')) { try { await apiPost('/trades/mark-all-closed'); onRefresh(); } catch(e:any) { alert(`Failed: ${e.message}`); } } }}
+          className="px-3 py-1.5 text-sm bg-yellow-600 text-white rounded-md hover:bg-yellow-700">
+          Mark All Closed
         </button>
         <button onClick={handleRefresh}
           className={`px-3 py-1.5 text-sm border rounded-md transition-colors ${
