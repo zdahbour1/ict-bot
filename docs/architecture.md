@@ -319,31 +319,58 @@ Flask Webhook -----|                                    v
 
 ```
 Docker Compose
-+-----------------------------------------------------+
-|                                                     |
-|  +-------------+  +-----------+  +---------------+  |
-|  | PostgreSQL  |  | FastAPI   |  | React Frontend|  |
-|  | :5432       |  | API :8000 |  | nginx :80     |  |
-|  |             |  |           |  |               |  |
-|  | Volume:     |  | Depends:  |  | Depends:      |  |
-|  | pgdata      |  | postgres  |  | api           |  |
-|  +-------------+  +-----------+  +---------------+  |
-|                                                     |
-+-----------------------------------------------------+
-
-Local Machine (outside Docker)
-+-----------------------------------------------------+
-|                                                     |
-|  +------------------+     +----------------------+  |
-|  | Trading Bot      |     | IB TWS / Gateway     |  |
-|  | Python process   |---->| :7497 (TWS)          |  |
-|  |                  |     | :4001 (Gateway)       |  |
-|  +------------------+     +----------------------+  |
-|         |                                           |
-|         | Connects to PostgreSQL :5432               |
-|         | (exposed from Docker)                      |
-+-----------------------------------------------------+
++----------------------------------------------------------+
+|                                                          |
+|  +-------------+  +-----------+  +--------+  +--------+ |
+|  | PostgreSQL  |  | FastAPI   |  | React  |  | pgAdmin| |
+|  | :5432       |  | API :8000 |  | :80    |  | :5050  | |
+|  +-------------+  +-----------+  +--------+  +--------+ |
+|                         |                                |
++-------------------------|--------------------------------+
+                          | HTTP (host.docker.internal:9000)
+                          v
+Local Machine (Host)
++----------------------------------------------------------+
+|                                                          |
+|  +---------------------+                                 |
+|  | Bot Manager Sidecar |  ← manages bot lifecycle        |
+|  | :9000               |                                 |
+|  +--------|------------+                                 |
+|           | spawns / stops                                |
+|           v                                              |
+|  +------------------+     +----------------------+       |
+|  | Trading Bot      |     | IB TWS / Gateway     |      |
+|  | Python process   |---->| :7497 (TWS)          |      |
+|  |                  |     | :4001 (Gateway)       |      |
+|  +------------------+     +----------------------+       |
+|         |                                                |
+|         | Connects to PostgreSQL :5432                    |
+|         | (exposed from Docker)                          |
++----------------------------------------------------------+
 ```
+
+### Bot Manager Sidecar
+
+The bot must run on the host machine (not in Docker) because it needs direct access to IB TWS/Gateway. The Bot Manager Sidecar bridges this gap:
+
+- **`bot_manager.py`** — a lightweight HTTP server running on the host (port 9000)
+- Provides `POST /start`, `POST /stop`, `GET /status` endpoints
+- The FastAPI API in Docker calls the sidecar via `host.docker.internal:9000`
+- When you click "Start Bot" in the dashboard, the request flows: **Browser → nginx → FastAPI → sidecar → spawns python main.py**
+- The sidecar also auto-restarts if it crashes (via `start_dashboard.py`)
+
+### Single-Command Launch
+
+```bash
+python start_dashboard.py
+```
+
+This script:
+1. Starts Docker Compose (PostgreSQL, API, Frontend, pgAdmin)
+2. Starts the Bot Manager sidecar (port 9000)
+3. Prints all URLs
+4. Monitors sidecar health, restarts if it dies
+5. On Ctrl+C: stops sidecar, runs `docker compose down`
 
 **Container configuration:**
 - **PostgreSQL**: Persistent volume for data. Port 5432 exposed to host for bot access.

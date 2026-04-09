@@ -294,37 +294,68 @@ After changing settings, most values take effect automatically on the bot's next
 
 ## Bot Management
 
-### Starting and Stopping from the Dashboard
+### Quick Start (Recommended)
 
-The dashboard provides bot start/stop controls:
-
-- **Start**: Sends a start command via the API. The bot process must already be running locally (the dashboard cannot launch the Python process). This resumes scanning and trading if the bot was in a stopped state.
-- **Stop**: Sends a stop command. Scanner threads halt, but open trades remain protected by their IB bracket orders (server-side TP/SL).
-
-### Running Locally
-
-The bot must run on the local machine (not in Docker) because it needs direct access to IB TWS/Gateway:
+Launch everything with one command:
 
 ```bash
-# Start the bot
-python main.py
-
-# The bot will:
-# 1. Connect to PostgreSQL (reads connection from .env)
-# 2. Connect to IB TWS/Gateway
-# 3. Load tickers and settings from the database
-# 4. Start scanner threads and exit manager
-# 5. Begin trading
+python start_dashboard.py
 ```
+
+This starts:
+1. **Docker Compose** — PostgreSQL, API, Frontend, pgAdmin
+2. **Bot Manager Sidecar** — HTTP server on port 9000 that manages the bot process
+
+Once running, open **http://localhost** and click **"Start Bot"** in the dashboard.
+
+### How Bot Start/Stop Works
+
+The bot must run on your host machine (not in Docker) because it needs direct access to IB TWS/Gateway. A lightweight **Bot Manager Sidecar** (`bot_manager.py`) bridges the gap:
+
+```
+Dashboard "Start Bot" button
+    → FastAPI API (Docker :8000)
+    → Bot Manager Sidecar (host :9000)
+    → spawns python main.py as a subprocess
+    → Bot connects to IB TWS (host :7497)
+```
+
+| Action | What Happens |
+|--------|-------------|
+| **Start Bot** | Sidecar spawns `python main.py`, bot connects to IB + PostgreSQL |
+| **Stop Bot** | Sidecar sends SIGTERM to bot process, waits 10s, then kills if needed |
+| **Status** | Sidecar checks if bot PID is alive, dashboard shows green/red dot |
+
+### Manual Start (Without Sidecar)
+
+If you prefer to start the bot directly:
+
+```bash
+# Set DATABASE_URL so bot writes to Docker PostgreSQL
+DATABASE_URL=postgresql://ict_bot:ict_bot_dev@localhost:5432/ict_bot python main.py
+```
+
+The bot will:
+1. Connect to PostgreSQL (read tickers + settings from DB)
+2. Connect to IB TWS/Gateway
+3. Start scanner threads (one per active ticker)
+4. Begin scanning and trading
+
+### Stopping Everything
+
+- **Ctrl+C in `start_dashboard.py`** — stops sidecar, bot (if running), and Docker services
+- **"Stop Bot" in dashboard** — stops only the bot, dashboard stays up
+- **`docker compose down`** — stops Docker services only
 
 ### Log Files
 
-The bot writes daily log files to the `logs/` directory:
+The bot writes to multiple log destinations:
 
-- Filename format: `bot_YYYY-MM-DD.log`
-- Logs are account-based (one file per day per account)
-- Contains trade entries, exits, errors, and system events
-- Credentials and secrets are stripped from log output
+| File | Content |
+|------|---------|
+| `bot.log` | Main bot log (scanner activity, trades, errors) |
+| `bot_stdout.log` | Stdout/stderr when launched via sidecar |
+| `logs/{account}_{timestamp}.csv` | Daily trade CSV with 50 columns |
 
 ---
 
