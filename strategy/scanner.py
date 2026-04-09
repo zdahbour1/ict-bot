@@ -156,13 +156,19 @@ class Scanner:
         return in_market, in_trade_window, is_weekend
 
     def _scan(self):
-        # Clear pending flag if trade is now tracked or if no position exists
+        # Clear pending flag if trade is now tracked, or after 2 min timeout
         if self._entry_pending:
             ticker_in_open = any(
                 t.get("ticker") == self.ticker for t in self.exit_manager.open_trades
             )
             if ticker_in_open:
                 self._entry_pending = False  # trade confirmed in exit manager
+            elif self._last_trade_time:
+                # Auto-clear if pending for more than 2 minutes (entry probably failed)
+                elapsed = (datetime.now(PT) - self._last_trade_time).total_seconds()
+                if elapsed > 120:
+                    log.warning(f"[{self.ticker}] Entry pending flag stuck for {elapsed:.0f}s — clearing")
+                    self._entry_pending = False
 
         # Reset seen setups when a trade just closed (transition from in-trade to no-trade)
         ticker_has_trade = any(
@@ -373,10 +379,23 @@ class Scanner:
                         # Order may still fill in background — keep pending flag
                         log.warning(f"[{self.ticker}] Trade entry timed out (30s) — keeping pending, will not enter another.")
                         self._errors_today += 1
+                        try:
+                            from db.writer import log_error
+                            log_error(f"scanner-{self.ticker}", self.ticker, None,
+                                     "trade_entry_timeout", "Trade entry timed out after 30s")
+                        except Exception:
+                            pass
                     except Exception as e:
                         self._entry_pending = False
                         self._errors_today += 1
                         log.error(f"[{self.ticker}] Trade entry failed: {e}", exc_info=True)
+                        try:
+                            from db.writer import log_error
+                            import traceback
+                            log_error(f"scanner-{self.ticker}", self.ticker, None,
+                                     "trade_entry_failed", str(e), traceback.format_exc())
+                        except Exception:
+                            pass
             else:
                 # ── Outside trade window: alert only ─────────
                 log.info("Signal outside trade window — sending alert-only email, no trade placed.")

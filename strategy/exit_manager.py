@@ -13,6 +13,7 @@ Persistent storage: open trades saved to open_trades.json on every update.
 On restart, any saved trades are reloaded and monitoring resumes automatically.
 """
 import logging
+import re
 import threading
 import time
 import json
@@ -61,6 +62,20 @@ def _deserialize_trade(t: dict) -> dict:
         except Exception:
             t["entry_time"] = datetime.now(PT)
     return t
+
+
+def _is_expired(symbol: str) -> bool:
+    """Check if an OCC option symbol has expired (expiry date < today)."""
+    match = re.match(r'^[A-Z]+(\d{6})[CP]\d+$', symbol)
+    if not match:
+        return False
+    exp_str = match.group(1)  # YYMMDD
+    try:
+        from datetime import date
+        exp_date = date(2000 + int(exp_str[:2]), int(exp_str[2:4]), int(exp_str[4:6]))
+        return exp_date < date.today()
+    except (ValueError, IndexError):
+        return False
 
 
 class ExitManager:
@@ -220,8 +235,27 @@ class ExitManager:
         now_pt = datetime.now(PT)
 
         with self._lock:
-            # ── Batch fetch all prices in one IB call ─────
-            symbols = [t["symbol"] for t in self.open_trades]
+            # ── Auto-close expired contracts ──────────────
+            active_trades = []
+            for trade in self.open_trades:
+                if _is_expired(trade["symbol"]):
+                    ticker = trade.get("ticker", "UNK")
+                    log.warning(f"[{ticker}] Contract EXPIRED: {trade['symbol']} — auto-closing")
+                    # Mark as closed in DB
+                    if trade.get("db_id"):
+                        try:
+                            from db.writer import close_trade as db_close_trade
+                            db_close_trade(trade["db_id"], trade.get("entry_price", 0),
+                                         "LOSS", "EXPIRED CONTRACT", {})
+                        except Exception:
+                            pass
+                    # Don't add to active_trades — remove from tracking
+                else:
+                    active_trades.append(trade)
+            self.open_trades = active_trades
+
+            # ── Batch fetch prices for non-expired contracts ─
+            symbols = [t["symbol"] for t in self.open_trades if not _is_expired(t["symbol"])]
             try:
                 batch_prices = self.client.get_option_prices_batch(symbols)
             except Exception as e:
