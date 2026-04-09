@@ -99,9 +99,21 @@ class BotManagerHandler(BaseHTTPRequestHandler):
                     break
 
             if not position:
+                # Position already closed — try to find the fill price
+                exit_price = 0
+                try:
+                    fills = ib.fills()
+                    for fill in reversed(fills):
+                        local_sym = (fill.contract.localSymbol or "").strip().replace(" ", "")
+                        if symbol.replace(" ", "") in local_sym:
+                            exit_price = float(fill.execution.price)
+                            log.info(f"Found fill price for closed position: ${exit_price:.2f}")
+                            break
+                except Exception:
+                    pass
                 ib.disconnect()
                 self._send_json({"status": "already_closed", "position_was_open": False,
-                                "exit_price": 0})
+                                "exit_price": exit_price})
                 return
 
             # Cancel any open orders for this symbol

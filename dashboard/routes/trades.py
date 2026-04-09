@@ -118,28 +118,23 @@ async def close_trade(trade_id: int, req: CloseRequest = CloseRequest()):
                     result = resp.json()
                     # Update DB based on sidecar response
                     from datetime import datetime, timezone
+
+                    # Use IB fill price, fall back to last known price
+                    ib_exit_price = result.get("exit_price", 0)
+                    exit_p = float(ib_exit_price) if ib_exit_price else float(trade.current_price or trade.entry_price or 0)
+
                     if result.get("position_was_open") == False:
-                        # Already closed on IB — just update DB
-                        trade.status = "closed"
-                        trade.exit_time = datetime.now(timezone.utc)
-                        trade.exit_price = result.get("exit_price", trade.current_price)
                         trade.exit_reason = "CLOSED (BRACKET/IB)"
-                        entry = float(trade.entry_price) if trade.entry_price else 0
-                        exit_p = float(trade.exit_price) if trade.exit_price else 0
-                        trade.pnl_pct = (exit_p - entry) / entry if entry > 0 else 0
-                        trade.pnl_usd = (exit_p - entry) * 100 * trade.contracts_entered
-                        trade.exit_result = "WIN" if trade.pnl_pct > 0 else "LOSS" if trade.pnl_pct < 0 else "SCRATCH"
                     else:
-                        # Closed on IB by sidecar
-                        trade.status = "closed"
-                        trade.exit_time = datetime.now(timezone.utc)
-                        trade.exit_price = result.get("exit_price", trade.current_price)
                         trade.exit_reason = "CLOSED (UI)"
-                        entry = float(trade.entry_price) if trade.entry_price else 0
-                        exit_p = float(trade.exit_price) if trade.exit_price else 0
-                        trade.pnl_pct = (exit_p - entry) / entry if entry > 0 else 0
-                        trade.pnl_usd = (exit_p - entry) * 100 * trade.contracts_entered
-                        trade.exit_result = "WIN" if trade.pnl_pct > 0 else "LOSS" if trade.pnl_pct < 0 else "SCRATCH"
+
+                    trade.status = "closed"
+                    trade.exit_time = datetime.now(timezone.utc)
+                    trade.exit_price = exit_p
+                    entry = float(trade.entry_price) if trade.entry_price else 0
+                    trade.pnl_pct = (exit_p - entry) / entry if entry > 0 else 0
+                    trade.pnl_usd = (exit_p - entry) * 100 * trade.contracts_entered
+                    trade.exit_result = "WIN" if trade.pnl_pct > 0 else "LOSS" if trade.pnl_pct < 0 else "SCRATCH"
                     trade.contracts_open = 0
                     trade.contracts_closed = trade.contracts_entered
                     session.commit()
@@ -188,12 +183,13 @@ async def close_all_trades():
                     if resp.status_code == 200:
                         from datetime import datetime, timezone
                         detail = resp.json()
+                        ib_exit = detail.get("exit_price", 0)
+                        exit_p = float(ib_exit) if ib_exit else float(t.current_price or t.entry_price or 0)
                         t.status = "closed"
                         t.exit_time = datetime.now(timezone.utc)
-                        t.exit_price = detail.get("exit_price", t.current_price)
+                        t.exit_price = exit_p
                         t.exit_reason = "CLOSED (UI CLOSE ALL)"
                         entry = float(t.entry_price) if t.entry_price else 0
-                        exit_p = float(t.exit_price) if t.exit_price else 0
                         t.pnl_pct = (exit_p - entry) / entry if entry > 0 else 0
                         t.pnl_usd = (exit_p - entry) * 100 * t.contracts_entered
                         t.exit_result = "WIN" if t.pnl_pct > 0 else "LOSS" if t.pnl_pct < 0 else "SCRATCH"
