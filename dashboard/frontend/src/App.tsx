@@ -36,8 +36,13 @@ export default function App() {
         refetchBot();
       }
     } else {
-      await apiPost('/bot/start');
-      refetchBot();
+      try {
+        await apiPost('/bot/start');
+        refetchBot();
+      } catch (e: any) {
+        alert(`Failed to start bot:\n\n${e.message}\n\nMake sure IB TWS/Gateway is running.`);
+        refetchBot();
+      }
     }
   };
 

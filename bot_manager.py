@@ -210,13 +210,40 @@ class BotManagerHandler(BaseHTTPRequestHandler):
         env["DATABASE_URL"] = DATABASE_URL
 
         # Start bot as subprocess
+        log_file = os.path.join(BOT_DIR, "bot_stdout.log")
         _bot_process = subprocess.Popen(
             [PYTHON, "main.py"],
             cwd=BOT_DIR,
             env=env,
-            stdout=open(os.path.join(BOT_DIR, "bot_stdout.log"), "a"),
+            stdout=open(log_file, "a"),
             stderr=subprocess.STDOUT,
         )
+
+        # Wait a few seconds to see if bot crashes immediately
+        import time
+        time.sleep(3)
+
+        if _bot_process.poll() is not None:
+            # Bot died within 3 seconds — read last lines of log for error
+            exit_code = _bot_process.returncode
+            error_msg = ""
+            try:
+                with open(log_file, "r") as f:
+                    lines = f.readlines()
+                    # Get last 5 non-empty lines
+                    last_lines = [l.strip() for l in lines[-10:] if l.strip()]
+                    error_msg = "\n".join(last_lines[-5:])
+            except Exception:
+                error_msg = f"Bot crashed with exit code {exit_code}"
+            _bot_process = None
+            log.error(f"Bot crashed on startup: {error_msg}")
+            self._send_json({
+                "status": "failed",
+                "error": error_msg,
+                "exit_code": exit_code,
+            }, 500)
+            return
+
         _bot_start_time = datetime.now()
         log.info(f"Bot started — PID: {_bot_process.pid}")
 
