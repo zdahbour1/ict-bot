@@ -27,7 +27,7 @@ export default function App() {
   const trades = tradesData?.trades || [];
   const bot = botStatus || { status: 'unknown', account: null, total_tickers: 0, db: false } as BotStatus;
 
-  const scansPaused = (botStatus as any)?.scans_paused || false;
+  const scansActive = (botStatus as any)?.scans_active || false;
 
   const handleStartStop = async () => {
     if (bot.status === 'running') {
@@ -42,10 +42,10 @@ export default function App() {
   };
 
   const handleScanToggle = async () => {
-    if (scansPaused) {
-      await apiPost('/bot/resume-scans');
-    } else {
+    if (scansActive) {
       await apiPost('/bot/pause-scans');
+    } else {
+      await apiPost('/bot/resume-scans');
     }
     setTimeout(refetchBot, 2000);
   };
@@ -71,7 +71,7 @@ export default function App() {
           <div className="flex items-center gap-2 text-sm">
             <BotStatusDot status={bot.status} />
             <span className={bot.status === 'running' ? 'text-gray-200' : 'text-red-400'}>
-              {bot.status === 'running' ? (scansPaused ? 'Monitoring' : 'Trading') : bot.status}
+              {bot.status === 'running' ? (scansActive ? 'Trading' : 'Monitoring') : bot.status}
             </span>
             {bot.account && <span className="text-gray-500">| {bot.account}</span>}
             {bot.total_tickers > 0 && <span className="text-gray-500">| {bot.total_tickers} tickers</span>}
@@ -86,11 +86,11 @@ export default function App() {
           {bot.status === 'running' && (
             <button onClick={handleScanToggle}
               className={`px-3 py-1.5 text-xs rounded-md font-medium ${
-                scansPaused
-                  ? 'bg-green-600 text-white hover:bg-green-700'
-                  : 'bg-yellow-600 text-white hover:bg-yellow-700'
+                scansActive
+                  ? 'bg-yellow-600 text-white hover:bg-yellow-700'
+                  : 'bg-green-600 text-white hover:bg-green-700'
               }`}>
-              {scansPaused ? 'Start Scans' : 'Stop Scans'}
+              {scansActive ? 'Stop Scans' : 'Start Scans'}
             </button>
           )}
           <button onClick={handleStartStop}

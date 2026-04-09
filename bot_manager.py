@@ -157,10 +157,18 @@ class BotManagerHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "Bot is not running"}, 400)
             return
 
+        scans_active_file = os.path.join(BOT_DIR, ".scans_active")
+
         if action == "pause":
             control_file = os.path.join(BOT_DIR, ".pause_scans")
+            # Remove active marker
+            if os.path.exists(scans_active_file):
+                os.remove(scans_active_file)
         else:
             control_file = os.path.join(BOT_DIR, ".resume_scans")
+            # Set active marker
+            with open(scans_active_file, "w") as f:
+                f.write("active")
 
         with open(control_file, "w") as f:
             f.write(action)
@@ -169,11 +177,12 @@ class BotManagerHandler(BaseHTTPRequestHandler):
 
     def _handle_status(self):
         global _bot_process, _bot_start_time
-        scans_paused = os.path.exists(os.path.join(BOT_DIR, ".pause_scans"))
+        # Scans are OFF unless .scans_active file exists
+        scans_active = os.path.exists(os.path.join(BOT_DIR, ".scans_active"))
         if _bot_process and _bot_process.poll() is None:
             self._send_json({
                 "status": "running",
-                "scans_paused": scans_paused,
+                "scans_active": scans_active,
                 "pid": _bot_process.pid,
                 "started_at": _bot_start_time.isoformat() if _bot_start_time else None,
             })
@@ -224,6 +233,11 @@ class BotManagerHandler(BaseHTTPRequestHandler):
 
         pid = _bot_process.pid
         log.info(f"Stopping bot (PID: {pid})...")
+
+        # Clean up scan active marker
+        scans_active_file = os.path.join(BOT_DIR, ".scans_active")
+        if os.path.exists(scans_active_file):
+            os.remove(scans_active_file)
 
         # Write stop file for graceful shutdown (works on Windows)
         stop_file = os.path.join(BOT_DIR, ".bot_stop")
