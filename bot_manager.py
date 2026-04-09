@@ -219,9 +219,9 @@ class BotManagerHandler(BaseHTTPRequestHandler):
             stderr=subprocess.STDOUT,
         )
 
-        # Wait a few seconds to see if bot crashes immediately
+        # Wait for bot to connect to IB (takes ~5-7s)
         import time
-        time.sleep(3)
+        time.sleep(8)
 
         if _bot_process.poll() is not None:
             # Bot died within 3 seconds — read last lines of log for error

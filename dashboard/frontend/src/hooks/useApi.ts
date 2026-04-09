@@ -43,7 +43,7 @@ export async function apiPost(endpoint: string, body?: any) {
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
-    throw new Error(err.detail || `HTTP ${res.status}`);
+    throw new Error(err.detail || err.error || err.message || `HTTP ${res.status}`);
   }
   return res.json();
 }
@@ -56,7 +56,7 @@ export async function apiPut(endpoint: string, body: any) {
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
-    throw new Error(err.detail || `HTTP ${res.status}`);
+    throw new Error(err.detail || err.error || err.message || `HTTP ${res.status}`);
   }
   return res.json();
 }
@@ -65,7 +65,7 @@ export async function apiDelete(endpoint: string) {
   const res = await fetch(`${API_BASE}${endpoint}`, { method: 'DELETE' });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
-    throw new Error(err.detail || `HTTP ${res.status}`);
+    throw new Error(err.detail || err.error || err.message || `HTTP ${res.status}`);
   }
   return res.json();
 }

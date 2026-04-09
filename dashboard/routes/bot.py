@@ -18,15 +18,19 @@ router = APIRouter(tags=["bot"])
 SIDECAR_URL = os.getenv("BOT_SIDECAR_URL", "http://host.docker.internal:9000")
 
 
-async def _sidecar_call(method: str, path: str) -> dict:
+async def _sidecar_call(method: str, path: str, json_body: dict = None) -> dict:
     """Call the bot_manager sidecar on the host."""
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             if method == "GET":
                 resp = await client.get(f"{SIDECAR_URL}{path}")
             else:
-                resp = await client.post(f"{SIDECAR_URL}{path}")
-            return resp.json()
+                resp = await client.post(f"{SIDECAR_URL}{path}", json=json_body)
+            data = resp.json()
+            if resp.status_code >= 400:
+                error_msg = data.get("error", f"Sidecar returned {resp.status_code}")
+                raise HTTPException(resp.status_code, error_msg)
+            return data
     except httpx.ConnectError:
         raise HTTPException(503, "Bot manager sidecar is not running. "
                             "Start it with: python start_dashboard.py")
