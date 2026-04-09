@@ -64,7 +64,7 @@ def insert_trade(trade: dict, account: str) -> int | None:
             ict_sl=float(trade["ict_sl"]) if trade.get("ict_sl") else None,
             ict_tp=float(trade["ict_tp"]) if trade.get("ict_tp") else None,
             entry_time=trade.get("entry_time", datetime.now(timezone.utc)),
-            entry_enrichment=entry_enrichment,
+            entry_enrichment=_sanitize_for_json(entry_enrichment),
         )
         session.add(row)
         session.commit()
@@ -102,6 +102,22 @@ def update_trade_price(trade_id: int, current_price: float, pnl_pct: float,
         raise
 
 
+def _sanitize_for_json(obj):
+    """Recursively convert datetime objects to ISO strings for JSONB storage."""
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_sanitize_for_json(v) for v in obj]
+    elif isinstance(obj, datetime):
+        return obj.isoformat()
+    elif hasattr(obj, '__float__'):
+        try:
+            return float(obj)
+        except (ValueError, TypeError):
+            return str(obj)
+    return obj
+
+
 @_safe_db
 def close_trade(trade_id: int, exit_price: float, result: str, reason: str,
                 exit_enrichment: dict = None):
@@ -120,6 +136,9 @@ def close_trade(trade_id: int, exit_price: float, result: str, reason: str,
                 pnl_pct = (exit_price - entry) / entry * 100
                 pnl_usd = (exit_price - entry) * 100 * trade.contracts_entered
 
+        # Sanitize enrichment data for JSONB (convert datetimes to strings)
+        safe_enrichment = _sanitize_for_json(exit_enrichment or {})
+
         session.query(Trade).filter(Trade.id == trade_id).update({
             "exit_price": exit_price,
             "current_price": exit_price,
@@ -131,7 +150,7 @@ def close_trade(trade_id: int, exit_price: float, result: str, reason: str,
             "exit_result": result,
             "contracts_open": 0,
             "contracts_closed": trade.contracts_entered if trade else 0,
-            "exit_enrichment": exit_enrichment or {},
+            "exit_enrichment": safe_enrichment,
         })
         session.commit()
         session.close()
