@@ -11,10 +11,19 @@ from db.connection import get_session, db_available
 log = logging.getLogger(__name__)
 
 
+_db_checked = None
+
 def _safe_db(func):
     """Decorator that catches DB errors and logs them without crashing the bot."""
     def wrapper(*args, **kwargs):
-        if not db_available():
+        global _db_checked
+        if _db_checked is None:
+            _db_checked = db_available()
+            if _db_checked:
+                log.info("Database connection verified — DB writes enabled")
+            else:
+                log.info("Database not available — DB writes disabled")
+        if not _db_checked:
             return None
         try:
             return func(*args, **kwargs)

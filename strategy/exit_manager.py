@@ -117,8 +117,11 @@ class ExitManager:
             db_id = insert_trade(trade, config.IB_ACCOUNT or "unknown")
             if db_id:
                 trade["db_id"] = db_id
+                log.info(f"Trade saved to DB: id={db_id} {trade.get('ticker')} {trade['symbol']}")
+            else:
+                log.warning(f"DB insert_trade returned None for {trade.get('ticker')}")
         except Exception as e:
-            log.debug(f"DB insert_trade skipped: {e}")
+            log.warning(f"DB insert_trade failed: {e}")
         log.info(f"Exit manager now tracking: {trade['symbol']}")
 
     def start(self):
@@ -387,8 +390,11 @@ class ExitManager:
                             try:
                                 from db.writer import close_trade as db_close_trade
                                 db_close_trade(trade["db_id"], current_price, result, reason, exit_enrichment)
-                            except Exception:
-                                pass
+                                log.info(f"Trade closed in DB: id={trade['db_id']} {result} ({reason})")
+                            except Exception as e:
+                                log.warning(f"DB close_trade failed for id={trade.get('db_id')}: {e}")
+                        else:
+                            log.warning(f"Trade {trade.get('ticker')} has no db_id — cannot update DB")
                         # ── Option Rolling: open next strike ──
                         if should_roll and not time_exit and not eod_exit:
                             try:

@@ -6,6 +6,7 @@ export function useApi<T>(endpoint: string, interval?: number) {
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
   const fetchData = useCallback(async () => {
     try {
@@ -14,6 +15,7 @@ export function useApi<T>(endpoint: string, interval?: number) {
       const json = await res.json();
       setData(json);
       setError(null);
+      setLastUpdated(new Date());
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -29,7 +31,7 @@ export function useApi<T>(endpoint: string, interval?: number) {
     }
   }, [fetchData, interval]);
 
-  return { data, loading, error, refetch: fetchData };
+  return { data, loading, error, refetch: fetchData, lastUpdated };
 }
 
 export async function apiPost(endpoint: string, body?: any) {

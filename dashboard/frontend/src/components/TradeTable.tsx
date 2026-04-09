@@ -25,7 +25,7 @@ function PnlCell({ value }: { value: number }) {
   return <span className={color}>{value > 0 ? '+' : ''}{value.toFixed(2)}</span>;
 }
 
-export default function TradeTable({ trades, onRefresh }: { trades: Trade[]; onRefresh: () => void }) {
+export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades: Trade[]; onRefresh: () => void; lastUpdated?: Date | null }) {
   const [sorting, setSorting] = useState<SortingState>([{ id: 'entry_time', desc: true }]);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   const [statusFilter, setStatusFilter] = useState<string>('');
@@ -124,6 +124,7 @@ export default function TradeTable({ trades, onRefresh }: { trades: Trade[]; onR
         <button onClick={onRefresh} className="px-3 py-1.5 text-sm bg-[#21262d] border border-[#30363d] text-gray-400 rounded-md hover:text-white">
           Refresh
         </button>
+        {lastUpdated && <span className="text-xs text-gray-500">Updated: {lastUpdated.toLocaleTimeString()}</span>}
         <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}
           className="px-2 py-1.5 text-sm bg-[#21262d] border border-[#30363d] text-gray-300 rounded-md">
           <option value="">All statuses</option>

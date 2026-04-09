@@ -22,7 +22,7 @@ export default function App() {
 
   const { data: botStatus, refetch: refetchBot } = useApi<BotStatus>('/bot/status', 10000);
   const { data: summaryData, refetch: refetchSummary } = useApi<Summary>('/summary', refreshInterval);
-  const { data: tradesData, refetch: refetchTrades } = useApi<{ trades: Trade[] }>('/trades?limit=200', refreshInterval);
+  const { data: tradesData, refetch: refetchTrades, lastUpdated: tradesLastUpdated } = useApi<{ trades: Trade[] }>('/trades?limit=200', refreshInterval);
 
   const trades = tradesData?.trades || [];
   const bot = botStatus || { status: 'unknown', account: null, total_tickers: 0, db: false } as BotStatus;
@@ -86,7 +86,7 @@ export default function App() {
         {tab === 'trades' && (
           <>
             <PnlSummary summary={summaryData || null} />
-            <TradeTable trades={trades} onRefresh={refetchAll} />
+            <TradeTable trades={trades} onRefresh={refetchAll} lastUpdated={tradesLastUpdated} />
           </>
         )}
         {tab === 'threads' && <ThreadsTab />}
