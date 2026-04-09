@@ -227,7 +227,8 @@ class IBClient:
 
     # ── Option Price (IB real-time) ───────────────────────────
     def get_option_price(self, symbol: str, priority: bool = False) -> float:
-        return self._submit_to_ib(self._ib_get_option_price, symbol, priority=priority)
+        timeout = 10 if priority else 30  # faster timeout for monitoring
+        return self._submit_to_ib(self._ib_get_option_price, symbol, priority=priority, timeout=timeout)
 
     def _ib_get_option_price(self, symbol: str) -> float:
         contract = self._occ_to_contract(symbol)
