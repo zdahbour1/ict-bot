@@ -142,6 +142,8 @@ CREATE TABLE IF NOT EXISTS thread_status (
                         CHECK (status IN ('starting', 'running', 'scanning', 'idle', 'error', 'stopped')),
     last_scan_time      TIMESTAMPTZ,
     last_message        TEXT,
+    pid                 INT,                                    -- OS process ID
+    thread_id           BIGINT,                                 -- Python thread ident
     scans_today         INT             DEFAULT 0,
     trades_today        INT             DEFAULT 0,
     alerts_today        INT             DEFAULT 0,

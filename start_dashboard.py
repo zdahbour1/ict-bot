@@ -84,10 +84,32 @@ def shutdown(sig=None, frame=None):
     sys.exit(0)
 
 
+def check_already_running():
+    """Check if the sidecar is already running."""
+    import urllib.request
+    try:
+        resp = urllib.request.urlopen("http://localhost:9000/status", timeout=3)
+        import json
+        status = json.loads(resp.read())
+        bot_status = status.get("status", "unknown")
+        bot_pid = status.get("pid")
+        print("ERROR: Bot Manager sidecar is already running!")
+        print()
+        print(f"  Bot status: {bot_status}")
+        if bot_pid:
+            print(f"  Bot PID:    {bot_pid}")
+        print()
+        print("Please run stop_all first to shut down the existing system.")
+        sys.exit(1)
+    except Exception:
+        pass  # Not running — good
+
+
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
+    check_already_running()
     start_docker()
     start_sidecar()
     print_urls()

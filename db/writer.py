@@ -196,13 +196,19 @@ def mark_trade_errored(trade_id: int, error_message: str):
 def update_thread_status(thread_name: str, ticker: str = None, status: str = "idle",
                          message: str = None, scans_today: int = None,
                          trades_today: int = None, alerts_today: int = None,
-                         error_count: int = None):
+                         error_count: int = None,
+                         pid: int = None, thread_id: int = None):
     """Upsert thread status row."""
+    import os, threading as _threading
     from db.models import ThreadStatus
-    from sqlalchemy import text
     session = get_session()
     if not session:
         return
+    # Auto-detect pid and thread_id if not provided
+    if pid is None:
+        pid = os.getpid()
+    if thread_id is None:
+        thread_id = _threading.get_ident()
     try:
         existing = session.query(ThreadStatus).filter(
             ThreadStatus.thread_name == thread_name
@@ -210,6 +216,8 @@ def update_thread_status(thread_name: str, ticker: str = None, status: str = "id
 
         if existing:
             existing.status = status
+            existing.pid = pid
+            existing.thread_id = thread_id
             if ticker:
                 existing.ticker = ticker
             if message is not None:
@@ -229,6 +237,8 @@ def update_thread_status(thread_name: str, ticker: str = None, status: str = "id
                 thread_name=thread_name,
                 ticker=ticker,
                 status=status,
+                pid=pid,
+                thread_id=thread_id,
                 last_message=message,
                 last_scan_time=datetime.now(timezone.utc) if status == "scanning" else None,
                 scans_today=scans_today or 0,

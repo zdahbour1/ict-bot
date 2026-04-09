@@ -63,7 +63,7 @@ export default function ThreadsTab() {
         <table className="w-full text-sm">
           <thead>
             <tr>
-              {['Status', 'Thread Name', 'Ticker', 'Last Scan', 'Scans', 'Trades', 'Alerts', 'Errors', 'Last Message'].map(h => (
+              {['Status', 'Thread Name', 'Ticker', 'PID', 'Thread ID', 'Last Scan', 'Scans', 'Trades', 'Alerts', 'Errors', 'Last Message'].map(h => (
                 <th key={h} className="bg-[#21262d] px-3 py-2.5 text-left text-xs font-semibold text-gray-500 border-b border-[#30363d]">{h}</th>
               ))}
             </tr>
@@ -74,6 +74,8 @@ export default function ThreadsTab() {
                 <td className="px-3 py-2.5 border-b border-[#21262d]"><StatusBadge status={t.status} /></td>
                 <td className="px-3 py-2.5 border-b border-[#21262d] text-xs">{t.thread_name}</td>
                 <td className="px-3 py-2.5 border-b border-[#21262d] font-bold">{t.ticker || '-'}</td>
+                <td className="px-3 py-2.5 border-b border-[#21262d] text-xs font-mono text-gray-400">{t.pid || '-'}</td>
+                <td className="px-3 py-2.5 border-b border-[#21262d] text-xs font-mono text-gray-400">{t.thread_id || '-'}</td>
                 <td className="px-3 py-2.5 border-b border-[#21262d] text-xs text-gray-400">
                   {t.last_scan_time ? new Date(t.last_scan_time).toLocaleTimeString() : '-'}
                 </td>

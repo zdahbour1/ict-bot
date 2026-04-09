@@ -32,6 +32,8 @@ export interface ThreadStatus {
   ticker: string | null;
   status: string;
   last_scan_time: string | null;
+  pid: number | null;
+  thread_id: number | null;
   last_message: string | null;
   scans_today: number;
   trades_today: number;

@@ -106,6 +106,8 @@ class ThreadStatus(Base):
     thread_name = Column(String(30), nullable=False, unique=True)
     ticker = Column(String(10))
     status = Column(String(20), nullable=False, default="idle")
+    pid = Column(Integer)
+    thread_id = Column(Integer)  # Python threading.get_ident()
     last_scan_time = Column(DateTime(timezone=True))
     last_message = Column(Text)
     scans_today = Column(Integer, default=0)

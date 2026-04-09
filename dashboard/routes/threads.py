@@ -17,6 +17,7 @@ def list_threads():
             {
                 "id": t.id, "thread_name": t.thread_name, "ticker": t.ticker,
                 "status": t.status,
+                "pid": t.pid, "thread_id": t.thread_id,
                 "last_scan_time": t.last_scan_time.isoformat() if t.last_scan_time else None,
                 "last_message": t.last_message,
                 "scans_today": t.scans_today, "trades_today": t.trades_today,
