@@ -228,6 +228,21 @@ class ExitManager:
                 log.warning(f"Batch price fetch failed: {e}")
                 batch_prices = {}
 
+            # ── Bulk DB update for all priced trades ──────
+            if batch_prices:
+                for trade in self.open_trades:
+                    price = batch_prices.get(trade["symbol"])
+                    if price and trade.get("db_id"):
+                        entry = trade["entry_price"]
+                        pnl = (price - entry) / entry if entry > 0 else 0
+                        pnl_usd = (price - entry) * 100 * trade["contracts"]
+                        try:
+                            from db.writer import update_trade_price
+                            update_trade_price(trade["db_id"], price, pnl, pnl_usd,
+                                             trade.get("peak_pnl_pct", 0), trade.get("dynamic_sl_pct", -0.6))
+                        except Exception:
+                            pass
+
             still_open = []
             for trade in self.open_trades:
                 try:
