@@ -227,13 +227,61 @@ class IBClient:
 
     # ── Option Price (IB real-time) ───────────────────────────
     def get_option_price(self, symbol: str, priority: bool = False) -> float:
-        timeout = 10 if priority else 30  # faster timeout for monitoring
+        timeout = 10 if priority else 30
         return self._submit_to_ib(self._ib_get_option_price, symbol, priority=priority, timeout=timeout)
+
+    def get_option_prices_batch(self, symbols: list[str]) -> dict[str, float]:
+        """Get prices for multiple options in one IB call. Much faster than sequential."""
+        try:
+            return self._submit_to_ib(self._ib_get_option_prices_batch, symbols, priority=True, timeout=20)
+        except Exception as e:
+            log.warning(f"Batch price fetch failed: {e}")
+            return {}
+
+    def _ib_get_option_prices_batch(self, symbols: list[str]) -> dict[str, float]:
+        """Subscribe to all contracts, sleep once, read all prices."""
+        contracts = []
+        symbol_map = {}
+        for sym in symbols:
+            try:
+                c = self._occ_to_contract(sym)
+                contracts.append(c)
+                symbol_map[c.conId] = sym
+            except Exception:
+                continue
+
+        if not contracts:
+            return {}
+
+        # Subscribe all at once
+        tickers = []
+        for c in contracts:
+            tickers.append(self.ib.reqMktData(c, "", False, False))
+
+        # Single sleep for all
+        self.ib.sleep(2)
+
+        # Read all prices
+        prices = {}
+        for ticker_data, contract in zip(tickers, contracts):
+            sym = symbol_map.get(contract.conId, "")
+            bid = ticker_data.bid if ticker_data.bid and ticker_data.bid > 0 else 0.0
+            ask = ticker_data.ask if ticker_data.ask and ticker_data.ask > 0 else 0.0
+            self.ib.cancelMktData(contract)
+            if bid > 0 and ask > 0:
+                prices[sym] = round((bid + ask) / 2, 2)
+            elif ticker_data.last and ticker_data.last > 0:
+                prices[sym] = float(ticker_data.last)
+            elif ticker_data.close and ticker_data.close > 0:
+                prices[sym] = float(ticker_data.close)
+
+        log.info(f"[IB] Batch prices: {len(prices)}/{len(symbols)} symbols priced")
+        return prices
 
     def _ib_get_option_price(self, symbol: str) -> float:
         contract = self._occ_to_contract(symbol)
         ticker_data = self.ib.reqMktData(contract, "", False, False)
-        self.ib.sleep(2)
+        self.ib.sleep(1.5)
         bid = ticker_data.bid if ticker_data.bid > 0 else 0.0
         ask = ticker_data.ask if ticker_data.ask > 0 else 0.0
         self.ib.cancelMktData(contract)

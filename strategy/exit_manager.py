@@ -220,15 +220,26 @@ class ExitManager:
         now_pt = datetime.now(PT)
 
         with self._lock:
+            # ── Batch fetch all prices in one IB call ─────
+            symbols = [t["symbol"] for t in self.open_trades]
+            try:
+                batch_prices = self.client.get_option_prices_batch(symbols)
+            except Exception as e:
+                log.warning(f"Batch price fetch failed: {e}")
+                batch_prices = {}
+
             still_open = []
             for trade in self.open_trades:
                 try:
-                    try:
-                        current_price = self.client.get_option_price(trade["symbol"], priority=True)
-                    except (TimeoutError, Exception) as price_err:
-                        log.warning(f"Price fetch failed for {trade.get('ticker')} {trade['symbol']}: {price_err}")
-                        still_open.append(trade)
-                        continue
+                    # Use batch price, fall back to individual call
+                    current_price = batch_prices.get(trade["symbol"])
+                    if current_price is None:
+                        try:
+                            current_price = self.client.get_option_price(trade["symbol"], priority=True)
+                        except (TimeoutError, Exception) as price_err:
+                            log.warning(f"Price fetch failed for {trade.get('ticker')} {trade['symbol']}: {price_err}")
+                            still_open.append(trade)
+                            continue
                     entry_price   = trade["entry_price"]
                     pnl_pct       = (current_price - entry_price) / entry_price
 
