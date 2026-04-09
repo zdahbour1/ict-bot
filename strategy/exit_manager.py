@@ -280,8 +280,33 @@ class ExitManager:
             still_open = []
             for trade in self.open_trades:
                 try:
-                    # Use batch price — skip if not available (don't block on individual calls)
+                    # ── Check if bracket order already closed this trade ──
                     current_price = batch_prices.get(trade["symbol"])
+                    if current_price is None and trade.get("ib_tp_order_id"):
+                        # No price AND has brackets — bracket may have fired
+                        # Check IB for the actual fill
+                        try:
+                            fill = self.client.check_recent_fills(trade["symbol"])
+                            if fill and fill.get("side") == "SLD":
+                                log.info(f"[{trade.get('ticker')}] Bracket order filled on IB: {fill}")
+                                exit_price = fill.get("price", trade.get("entry_price", 0))
+                                entry_price = trade["entry_price"]
+                                pnl_pct = (exit_price - entry_price) / entry_price if entry_price > 0 else 0
+                                result = "WIN" if pnl_pct > 0 else "LOSS" if pnl_pct < 0 else "SCRATCH"
+                                reason = "BRACKET TP/SL (IB)"
+                                self._log_result(trade, exit_price, result, reason, {"exit_time": datetime.now(PT)})
+                                if trade.get("db_id"):
+                                    try:
+                                        from db.writer import close_trade as db_close_trade
+                                        db_close_trade(trade["db_id"], exit_price, result, reason, {})
+                                    except Exception:
+                                        pass
+                                continue  # Don't add to still_open
+                        except Exception:
+                            pass
+                        still_open.append(trade)
+                        continue
+
                     if current_price is None:
                         still_open.append(trade)
                         continue
@@ -385,7 +410,19 @@ class ExitManager:
 
                     should_roll = trade.get("_should_roll", False)
 
+                    has_bracket = bool(trade.get("ib_tp_order_id") or trade.get("ib_sl_order_id"))
+
                     if hit_tp or hit_sl or time_exit or eod_exit or should_roll:
+                        # ── If bracket orders handle TP/SL, don't double-sell ──
+                        if has_bracket and (hit_tp or hit_sl) and not time_exit and not eod_exit and not should_roll:
+                            # Bracket will handle this on IB — just log and let IB do it
+                            if hit_tp:
+                                log.info(f"[{trade.get('ticker')}] TP condition met — bracket order handling on IB")
+                            else:
+                                log.info(f"[{trade.get('ticker')}] SL condition met — bracket order handling on IB")
+                            still_open.append(trade)
+                            continue
+
                         if should_roll:
                             result = "WIN"
                             reason = f"ROLL (P&L={pnl_pct:+.0%})"
@@ -405,14 +442,15 @@ class ExitManager:
                             result = "WIN" if pnl_pct > 0 else "LOSS"
                             reason = "EOD EXIT"
 
-                        # Cancel bracket children before manual close
-                        if trade.get("ib_tp_order_id") or trade.get("ib_sl_order_id"):
+                        # Cancel bracket children before manual close (time/EOD/roll)
+                        if has_bracket:
                             try:
                                 tp_id = trade.get("ib_tp_order_id")
                                 sl_id = trade.get("ib_sl_order_id")
                                 ids = [i for i in [tp_id, sl_id] if i]
                                 if ids:
                                     self.client.cancel_bracket_children(*ids)
+                                    log.info(f"[{trade.get('ticker')}] Cancelled bracket orders before {reason}")
                             except Exception:
                                 pass
 
