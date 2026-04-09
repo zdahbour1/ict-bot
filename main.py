@@ -77,13 +77,9 @@ def main():
 
     exit_manager.start()
 
-    # ── Start one scanner per ticker (parallel threads) ───
+    # ── Scanners NOT auto-started — user must click "Start Scans" ──
     scanners = []
-    for i, ticker in enumerate(config.TICKERS):
-        scanner = Scanner(client, exit_manager, ticker=ticker, scan_offset=i * 5)
-        scanner.start()
-        scanners.append(scanner)
-    log.info(f"Launched {len(scanners)} scanner threads: {', '.join(config.TICKERS)}")
+    log.info(f"Bot ready with {len(config.TICKERS)} tickers. Scans NOT started — click 'Start Scans' in dashboard.")
 
     # ── Start webhook server in background thread ──────────
     app = create_app(client, exit_manager)

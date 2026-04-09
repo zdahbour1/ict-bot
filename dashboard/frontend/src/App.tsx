@@ -70,7 +70,9 @@ export default function App() {
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2 text-sm">
             <BotStatusDot status={bot.status} />
-            <span className={bot.status === 'running' ? 'text-gray-200' : 'text-red-400'}>{bot.status}</span>
+            <span className={bot.status === 'running' ? 'text-gray-200' : 'text-red-400'}>
+              {bot.status === 'running' ? (scansPaused ? 'Monitoring' : 'Trading') : bot.status}
+            </span>
             {bot.account && <span className="text-gray-500">| {bot.account}</span>}
             {bot.total_tickers > 0 && <span className="text-gray-500">| {bot.total_tickers} tickers</span>}
           </div>
