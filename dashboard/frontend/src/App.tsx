@@ -18,7 +18,7 @@ function BotStatusDot({ status }: { status: string }) {
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('trades');
-  const [refreshInterval, setRefreshInterval] = useState(60000);
+  const [refreshInterval, setRefreshInterval] = useState(15000);
 
   const { data: botStatus, refetch: refetchBot } = useApi<BotStatus>('/bot/status', 10000);
   const { data: summaryData, refetch: refetchSummary } = useApi<Summary>('/summary', refreshInterval);

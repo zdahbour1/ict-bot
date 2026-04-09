@@ -10,7 +10,8 @@ export function useApi<T>(endpoint: string, interval?: number) {
 
   const fetchData = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}${endpoint}`);
+      const sep = endpoint.includes('?') ? '&' : '?';
+      const res = await fetch(`${API_BASE}${endpoint}${sep}_t=${Date.now()}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
       setData(json);
