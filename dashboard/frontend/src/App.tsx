@@ -27,9 +27,11 @@ export default function App() {
   const trades = tradesData?.trades || [];
   const bot = botStatus || { status: 'unknown', account: null, total_tickers: 0, db: false } as BotStatus;
 
+  const scansPaused = (botStatus as any)?.scans_paused || false;
+
   const handleStartStop = async () => {
     if (bot.status === 'running') {
-      if (confirm('Stop the bot? Open trades will NOT be closed automatically.')) {
+      if (confirm('Stop the bot entirely? This stops IB connection, all monitoring, and all threads.')) {
         await apiPost('/bot/stop');
         refetchBot();
       }
@@ -37,6 +39,15 @@ export default function App() {
       await apiPost('/bot/start');
       refetchBot();
     }
+  };
+
+  const handleScanToggle = async () => {
+    if (scansPaused) {
+      await apiPost('/bot/resume-scans');
+    } else {
+      await apiPost('/bot/pause-scans');
+    }
+    setTimeout(refetchBot, 2000);
   };
 
   const refetchAll = () => { refetchTrades(); refetchSummary(); };
@@ -70,6 +81,16 @@ export default function App() {
             <option value={60000}>1 min</option>
             <option value={300000}>5 min</option>
           </select>
+          {bot.status === 'running' && (
+            <button onClick={handleScanToggle}
+              className={`px-3 py-1.5 text-xs rounded-md font-medium ${
+                scansPaused
+                  ? 'bg-green-600 text-white hover:bg-green-700'
+                  : 'bg-yellow-600 text-white hover:bg-yellow-700'
+              }`}>
+              {scansPaused ? 'Start Scans' : 'Stop Scans'}
+            </button>
+          )}
           <button onClick={handleStartStop}
             className={`px-3 py-1.5 text-xs rounded-md font-medium ${
               bot.status === 'running'

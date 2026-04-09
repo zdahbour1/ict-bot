@@ -95,3 +95,15 @@ async def start_bot():
 async def stop_bot():
     """Stop the bot via the sidecar."""
     return await _sidecar_call("POST", "/stop")
+
+
+@router.post("/bot/pause-scans")
+async def pause_scans():
+    """Pause scanner threads. Exit manager continues monitoring open trades."""
+    return await _sidecar_call("POST", "/pause-scans")
+
+
+@router.post("/bot/resume-scans")
+async def resume_scans():
+    """Resume scanner threads."""
+    return await _sidecar_call("POST", "/resume-scans")

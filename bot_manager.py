@@ -60,14 +60,36 @@ class BotManagerHandler(BaseHTTPRequestHandler):
             self._handle_start()
         elif self.path == "/stop":
             self._handle_stop()
+        elif self.path == "/pause-scans":
+            self._handle_scan_control("pause")
+        elif self.path == "/resume-scans":
+            self._handle_scan_control("resume")
         else:
             self._send_json({"error": "not found"}, 404)
 
+    def _handle_scan_control(self, action: str):
+        global _bot_process
+        if not _bot_process or _bot_process.poll() is not None:
+            self._send_json({"error": "Bot is not running"}, 400)
+            return
+
+        if action == "pause":
+            control_file = os.path.join(BOT_DIR, ".pause_scans")
+        else:
+            control_file = os.path.join(BOT_DIR, ".resume_scans")
+
+        with open(control_file, "w") as f:
+            f.write(action)
+        log.info(f"Scan control: {action}")
+        self._send_json({"status": f"scans_{action}d"})
+
     def _handle_status(self):
         global _bot_process, _bot_start_time
+        scans_paused = os.path.exists(os.path.join(BOT_DIR, ".pause_scans"))
         if _bot_process and _bot_process.poll() is None:
             self._send_json({
                 "status": "running",
+                "scans_paused": scans_paused,
                 "pid": _bot_process.pid,
                 "started_at": _bot_start_time.isoformat() if _bot_start_time else None,
             })

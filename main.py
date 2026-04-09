@@ -96,22 +96,55 @@ def main():
         _running = False
     signal.signal(signal.SIGTERM, _handle_sigterm)
 
-    # ── Stop file for sidecar-initiated shutdown (Windows compat) ──
+    # ── Control files for sidecar communication (Windows compat) ──
     STOP_FILE = os.path.join(os.path.dirname(__file__), ".bot_stop")
-    # Clean up any stale stop file from previous runs
-    if os.path.exists(STOP_FILE):
-        os.remove(STOP_FILE)
+    PAUSE_SCANS_FILE = os.path.join(os.path.dirname(__file__), ".pause_scans")
+    RESUME_SCANS_FILE = os.path.join(os.path.dirname(__file__), ".resume_scans")
+    # Clean up stale control files
+    for f in [STOP_FILE, PAUSE_SCANS_FILE, RESUME_SCANS_FILE]:
+        if os.path.exists(f):
+            os.remove(f)
+
+    _scans_paused = False
 
     # ── Main loop: process IB orders on the main thread ───
     import time
     log.info("Main thread: processing IB order queue...")
     while _running:
         try:
-            # Check for sidecar stop signal (Windows doesn't support SIGTERM properly)
+            # Check for sidecar stop signal
             if os.path.exists(STOP_FILE):
                 log.info("Stop file detected — shutting down gracefully...")
                 os.remove(STOP_FILE)
                 break
+
+            # Check for scan pause/resume signals
+            if os.path.exists(PAUSE_SCANS_FILE):
+                os.remove(PAUSE_SCANS_FILE)
+                if not _scans_paused:
+                    _scans_paused = True
+                    log.info("Pausing all scanner threads...")
+                    for s in scanners:
+                        s.stop()
+                    try:
+                        from db.writer import update_thread_status
+                        for ticker in config.TICKERS:
+                            update_thread_status(f"scanner-{ticker}", ticker, "stopped", "Scans paused by user")
+                    except Exception:
+                        pass
+                    log.info("All scanners paused. Exit manager continues monitoring open trades.")
+
+            if os.path.exists(RESUME_SCANS_FILE):
+                os.remove(RESUME_SCANS_FILE)
+                if _scans_paused:
+                    _scans_paused = False
+                    log.info("Resuming scanner threads...")
+                    scanners.clear()
+                    for i, ticker in enumerate(config.TICKERS):
+                        scanner = Scanner(client, exit_manager, ticker=ticker, scan_offset=i * 2)
+                        scanner.start()
+                        scanners.append(scanner)
+                    log.info(f"Resumed {len(scanners)} scanner threads.")
 
             if hasattr(client, 'process_orders'):
                 client.process_orders()
