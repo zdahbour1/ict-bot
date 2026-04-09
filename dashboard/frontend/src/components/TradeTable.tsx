@@ -61,7 +61,17 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
       cell: ({ row }) => `${row.original.contracts_open} / ${row.original.contracts_entered}`,
     }),
     col.accessor('entry_price', { header: 'Entry', cell: info => `$${info.getValue()?.toFixed(2) || '-'}` }),
-    col.accessor('current_price', { header: 'Current', cell: info => info.getValue() ? `$${info.getValue()!.toFixed(2)}` : '-' }),
+    col.display({
+      id: 'price_now',
+      header: 'Current / Exit',
+      cell: ({ row }) => {
+        const t = row.original;
+        if (t.status === 'closed' && t.exit_price) {
+          return <span className="text-gray-400">${t.exit_price.toFixed(2)}</span>;
+        }
+        return t.current_price ? `$${t.current_price.toFixed(2)}` : '-';
+      },
+    }),
     col.accessor('pnl_pct', { header: 'P&L %', cell: info => <PnlCell value={info.getValue() * 100} /> }),
     col.accessor('pnl_usd', { header: 'P&L $', cell: info => <PnlCell value={info.getValue()} /> }),
     col.accessor('peak_pnl_pct', { header: 'Peak', cell: info => `${(info.getValue() * 100).toFixed(1)}%` }),
