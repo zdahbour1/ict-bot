@@ -1,5 +1,10 @@
+import { useState, useMemo } from 'react';
 import type { ThreadStatus } from '../types';
 import { useApi } from '../hooks/useApi';
+import {
+  useReactTable, getCoreRowModel, getSortedRowModel,
+  flexRender, createColumnHelper, type SortingState,
+} from '@tanstack/react-table';
 
 function StatusBadge({ status }: { status: string }) {
   const colors: Record<string, string> = {
@@ -13,85 +18,174 @@ function StatusBadge({ status }: { status: string }) {
   return <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${colors[status] || 'bg-gray-700 text-gray-400'}`}>{status.toUpperCase()}</span>;
 }
 
+interface ErrorLog {
+  id: number; thread_name: string; ticker: string; error_type: string;
+  message: string; traceback: string | null; created_at: string;
+}
+
+const col = createColumnHelper<ThreadStatus>();
+
 export default function ThreadsTab() {
   const { data, loading, refetch } = useApi<{ threads: ThreadStatus[] }>('/threads', 10000);
   const threads = data?.threads || [];
+  const [sorting, setSorting] = useState<SortingState>([]);
+  const [errorPopup, setErrorPopup] = useState<{ ticker: string; threadName: string } | null>(null);
+  const [errors, setErrors] = useState<ErrorLog[]>([]);
+  const [loadingErrors, setLoadingErrors] = useState(false);
+
+  const active = threads.filter(t => ['running', 'scanning', 'idle'].includes(t.status)).length;
+  const errorCount = threads.filter(t => t.status === 'error').length;
+  const totalScans = threads.reduce((s, t) => s + t.scans_today, 0);
+  const totalTrades = threads.reduce((s, t) => s + t.trades_today, 0);
+
+  const showErrors = async (ticker: string, threadName: string) => {
+    setErrorPopup({ ticker, threadName });
+    setLoadingErrors(true);
+    try {
+      const res = await fetch(`/api/errors?ticker=${ticker}&limit=20`);
+      const data = await res.json();
+      setErrors(data.errors || []);
+    } catch { setErrors([]); }
+    setLoadingErrors(false);
+  };
+
+  const columns = useMemo(() => [
+    col.accessor('status', {
+      header: 'Status',
+      cell: info => <StatusBadge status={info.getValue()} />,
+    }),
+    col.accessor('thread_name', { header: 'Thread', cell: info => <span className="text-xs">{info.getValue()}</span> }),
+    col.accessor('ticker', { header: 'Ticker', cell: info => <strong>{info.getValue() || '-'}</strong> }),
+    col.accessor('pid', { header: 'PID', cell: info => <span className="font-mono text-xs text-gray-400">{info.getValue() || '-'}</span> }),
+    col.accessor('thread_id', { header: 'Thread ID', cell: info => <span className="font-mono text-xs text-gray-400">{info.getValue() || '-'}</span> }),
+    col.accessor('last_scan_time', {
+      header: 'Last Scan',
+      cell: info => <span className="text-xs text-gray-400">{info.getValue() ? new Date(info.getValue()!).toLocaleTimeString() : '-'}</span>,
+    }),
+    col.accessor('scans_today', { header: 'Scans' }),
+    col.accessor('trades_today', { header: 'Trades' }),
+    col.accessor('alerts_today', { header: 'Alerts' }),
+    col.accessor('error_count', {
+      header: 'Errors',
+      cell: info => {
+        const count = info.getValue();
+        const ticker = info.row.original.ticker || '';
+        const threadName = info.row.original.thread_name;
+        if (count > 0) {
+          return (
+            <button onClick={() => showErrors(ticker, threadName)}
+              className="text-red-400 underline cursor-pointer hover:text-red-300 font-semibold">
+              {count}
+            </button>
+          );
+        }
+        return <span>0</span>;
+      },
+    }),
+    col.accessor('last_message', {
+      header: 'Last Message',
+      cell: info => <span className="text-xs text-gray-500 max-w-xs truncate block">{info.getValue() || '-'}</span>,
+    }),
+  ], []);
+
+  const table = useReactTable({
+    data: threads,
+    columns,
+    state: { sorting },
+    onSortingChange: setSorting,
+    getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+  });
 
   if (loading) return <div className="text-gray-500 py-12 text-center">Loading threads...</div>;
 
-  const active = threads.filter(t => ['running', 'scanning', 'idle'].includes(t.status)).length;
-  const errors = threads.filter(t => t.status === 'error').length;
-  const totalScans = threads.reduce((s, t) => s + t.scans_today, 0);
-
   return (
     <div>
-      {/* Controls */}
+      {/* Controls + compact KPIs */}
       <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-4">
           <button onClick={refetch} className="px-3 py-1.5 text-sm bg-[#21262d] border border-[#30363d] text-gray-400 rounded-md hover:text-white">
-            Refresh Now
+            Refresh
           </button>
-          <span className="text-xs text-gray-500">Auto-refreshes every 10s</span>
+          <span className="text-sm text-gray-400">
+            <strong className="text-green-400">{active}</strong> active
+            <span className="text-gray-600 mx-1">|</span>
+            <strong className={errorCount > 0 ? 'text-red-400' : ''}>{errorCount}</strong> errors
+            <span className="text-gray-600 mx-1">|</span>
+            <strong>{totalScans.toLocaleString()}</strong> scans
+            <span className="text-gray-600 mx-1">|</span>
+            <strong>{totalTrades}</strong> trades
+            <span className="text-gray-600 mx-1">|</span>
+            {threads.length} threads
+          </span>
         </div>
-        <span className="text-xs text-gray-500">
-          Last updated: {new Date().toLocaleTimeString()}
-        </span>
+        <span className="text-xs text-gray-500">Auto-refreshes 10s</span>
       </div>
 
-      {/* Summary cards */}
-      <div className="grid grid-cols-4 gap-4 mb-6">
-        <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4">
-          <div className="text-xs text-gray-500 uppercase">Total Threads</div>
-          <div className="text-2xl font-bold mt-1">{threads.length}</div>
-        </div>
-        <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4">
-          <div className="text-xs text-gray-500 uppercase">Active</div>
-          <div className="text-2xl font-bold mt-1 text-green-400">{active}</div>
-        </div>
-        <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4">
-          <div className="text-xs text-gray-500 uppercase">Errors</div>
-          <div className="text-2xl font-bold mt-1 text-red-400">{errors}</div>
-        </div>
-        <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4">
-          <div className="text-xs text-gray-500 uppercase">Total Scans Today</div>
-          <div className="text-2xl font-bold mt-1">{totalScans.toLocaleString()}</div>
-        </div>
-      </div>
-
-      {/* Thread table */}
+      {/* Sortable thread table */}
       <div className="bg-[#161b22] border border-[#30363d] rounded-lg overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
-            <tr>
-              {['Status', 'Thread Name', 'Ticker', 'PID', 'Thread ID', 'Last Scan', 'Scans', 'Trades', 'Alerts', 'Errors', 'Last Message'].map(h => (
-                <th key={h} className="bg-[#21262d] px-3 py-2.5 text-left text-xs font-semibold text-gray-500 border-b border-[#30363d]">{h}</th>
-              ))}
-            </tr>
+            {table.getHeaderGroups().map(hg => (
+              <tr key={hg.id}>
+                {hg.headers.map(h => (
+                  <th key={h.id} onClick={h.column.getToggleSortingHandler()}
+                    className="bg-[#21262d] px-3 py-2 text-left text-xs font-semibold text-gray-500 border-b border-[#30363d] cursor-pointer hover:text-gray-300 whitespace-nowrap select-none">
+                    {flexRender(h.column.columnDef.header, h.getContext())}
+                    {{ asc: ' ▲', desc: ' ▼' }[h.column.getIsSorted() as string] ?? ''}
+                  </th>
+                ))}
+              </tr>
+            ))}
           </thead>
           <tbody>
-            {threads.map(t => (
-              <tr key={t.thread_name} className="hover:bg-[#1c2128]">
-                <td className="px-3 py-2.5 border-b border-[#21262d]"><StatusBadge status={t.status} /></td>
-                <td className="px-3 py-2.5 border-b border-[#21262d] text-xs">{t.thread_name}</td>
-                <td className="px-3 py-2.5 border-b border-[#21262d] font-bold">{t.ticker || '-'}</td>
-                <td className="px-3 py-2.5 border-b border-[#21262d] text-xs font-mono text-gray-400">{t.pid || '-'}</td>
-                <td className="px-3 py-2.5 border-b border-[#21262d] text-xs font-mono text-gray-400">{t.thread_id || '-'}</td>
-                <td className="px-3 py-2.5 border-b border-[#21262d] text-xs text-gray-400">
-                  {t.last_scan_time ? new Date(t.last_scan_time).toLocaleTimeString() : '-'}
-                </td>
-                <td className="px-3 py-2.5 border-b border-[#21262d]">{t.scans_today}</td>
-                <td className="px-3 py-2.5 border-b border-[#21262d]">{t.trades_today}</td>
-                <td className="px-3 py-2.5 border-b border-[#21262d]">{t.alerts_today}</td>
-                <td className="px-3 py-2.5 border-b border-[#21262d]">
-                  <span className={t.error_count > 0 ? 'text-red-400' : ''}>{t.error_count}</span>
-                </td>
-                <td className="px-3 py-2.5 border-b border-[#21262d] text-xs text-gray-500 max-w-xs truncate">{t.last_message || '-'}</td>
+            {table.getRowModel().rows.map(row => (
+              <tr key={row.id} className="hover:bg-[#1c2128]">
+                {row.getVisibleCells().map(cell => (
+                  <td key={cell.id} className="px-3 py-2 border-b border-[#21262d] whitespace-nowrap">
+                    {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                  </td>
+                ))}
               </tr>
             ))}
           </tbody>
         </table>
-        {threads.length === 0 && <div className="text-center py-12 text-gray-500">No threads running</div>}
+        {threads.length === 0 && <div className="text-center py-8 text-gray-500">No threads</div>}
       </div>
+
+      {/* Error Log Popup */}
+      {errorPopup && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => setErrorPopup(null)}>
+          <div className="bg-[#161b22] border border-[#30363d] rounded-xl p-6 w-[700px] max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold">
+                Error Log — <span className="text-red-400">{errorPopup.ticker || errorPopup.threadName}</span>
+              </h3>
+              <button onClick={() => setErrorPopup(null)} className="text-gray-500 hover:text-white text-xl">&times;</button>
+            </div>
+            {loadingErrors ? (
+              <div className="text-gray-500 py-4 text-center">Loading errors...</div>
+            ) : errors.length === 0 ? (
+              <div className="text-gray-500 py-4 text-center">No errors found</div>
+            ) : (
+              <div className="space-y-3">
+                {errors.map(e => (
+                  <div key={e.id} className="bg-[#0d1117] border border-[#21262d] rounded-lg p-3">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-xs font-semibold text-red-400">{e.error_type}</span>
+                      <span className="text-xs text-gray-500">{new Date(e.created_at).toLocaleString()}</span>
+                    </div>
+                    <div className="text-sm text-gray-300 mb-1">{e.message}</div>
+                    {e.traceback && (
+                      <pre className="text-xs text-gray-500 bg-[#161b22] p-2 rounded mt-1 overflow-x-auto max-h-32">{e.traceback}</pre>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

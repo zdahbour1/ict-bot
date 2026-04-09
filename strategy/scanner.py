@@ -356,6 +356,19 @@ class Scanner:
                             self._trades_today += 1
                             self._last_trade_time = datetime.now(PT)
                             log.info(f"[{self.ticker}] Trade #{self._trades_today}/{MAX_TRADES_PER_DAY} today opened.")
+                            # Immediately update DB with new trade count
+                            try:
+                                from db.writer import update_thread_status
+                                update_thread_status(
+                                    f"scanner-{self.ticker}", self.ticker, "idle",
+                                    f"Trade #{self._trades_today} opened",
+                                    scans_today=self._scans_today,
+                                    trades_today=self._trades_today,
+                                    alerts_today=self._alerts_today,
+                                    error_count=self._errors_today,
+                                )
+                            except Exception:
+                                pass
                     except concurrent.futures.TimeoutError:
                         # Order may still fill in background — keep pending flag
                         log.warning(f"[{self.ticker}] Trade entry timed out (30s) — keeping pending, will not enter another.")
@@ -380,7 +393,7 @@ class Scanner:
             from db.writer import update_thread_status
             update_thread_status(
                 f"scanner-{self.ticker}", self.ticker, "idle",
-                f"Scan complete at {now_str} PT — {len(signals) if 'signals' in dir() else 0} signals",
+                f"Scan #{self._scans_today} done at {now_str} PT | {len(signals) if 'signals' in dir() else 0} signals | Next scan ~{(datetime.now(PT) + __import__('datetime').timedelta(seconds=60)).strftime('%H:%M')} PT",
                 scans_today=self._scans_today,
                 trades_today=self._trades_today,
                 alerts_today=self._alerts_today,
