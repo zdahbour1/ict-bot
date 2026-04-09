@@ -4,6 +4,7 @@ Run this file to start the bot:  python main.py
 """
 import logging
 import os
+import signal
 import threading
 import config
 from strategy.exit_manager import ExitManager
@@ -87,11 +88,18 @@ def main():
     )
     flask_thread.start()
 
+    # ── Handle SIGTERM (from sidecar stop) ──────────────
+    _running = True
+    def _handle_sigterm(sig, frame):
+        nonlocal _running
+        log.info("Received SIGTERM — shutting down...")
+        _running = False
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
     # ── Main loop: process IB orders on the main thread ───
-    # IB's event loop must run on the thread that called connect()
     import time
     log.info("Main thread: processing IB order queue...")
-    while True:
+    while _running:
         try:
             if hasattr(client, 'process_orders'):
                 client.process_orders()
@@ -99,15 +107,26 @@ def main():
                 time.sleep(1)
         except KeyboardInterrupt:
             log.info("Shutting down...")
-            try:
-                from db.writer import update_bot_state
-                update_bot_state("stopped")
-            except Exception:
-                pass
+            _shutdown_cleanup()
             break
         except Exception as e:
             log.error(f"Main loop error: {e}")
             time.sleep(1)
+
+    _shutdown_cleanup()
+
+
+def _shutdown_cleanup():
+    """Mark bot and all threads as stopped in DB."""
+    try:
+        from db.writer import update_bot_state, update_thread_status
+        update_bot_state("stopped")
+        # Mark all scanner threads as stopped
+        for ticker in config.TICKERS:
+            update_thread_status(f"scanner-{ticker}", ticker, "stopped", "Bot shut down")
+        log.info("DB updated: bot and threads marked as stopped")
+    except Exception as e:
+        log.debug(f"Shutdown DB cleanup: {e}")
 
 
 if __name__ == "__main__":

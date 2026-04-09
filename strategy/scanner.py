@@ -85,8 +85,10 @@ class Scanner:
         self.ticker          = ticker or config.TICKER
         self._scan_offset    = scan_offset  # stagger scans across tickers
         self._stop           = threading.Event()
+        self._scans_today    = 0
         self._alerts_today   = 0
         self._trades_today   = 0
+        self._errors_today   = 0
         self._last_date      = None
         self._seen_setups    = set()
         self._last_trade_time = None  # PT datetime of last trade entry
@@ -126,8 +128,10 @@ class Scanner:
         today = now_pt.date()
         if self._last_date != today:
             self._last_date       = today
+            self._scans_today     = 0
             self._alerts_today    = 0
             self._trades_today    = 0
+            self._errors_today    = 0
             self._seen_setups     = set()
             self._last_trade_time = None
             log.info(f"New trading day: {today}. Counters reset.")
@@ -188,13 +192,16 @@ class Scanner:
         log.info(f"[{self.ticker}] Running ICT scan at {now_str} PT [{mode}]...")
 
         # ── Update thread status in DB ────────────────────
+        self._scans_today += 1
         try:
             from db.writer import update_thread_status
             update_thread_status(
                 f"scanner-{self.ticker}", self.ticker, "scanning",
                 f"Scanning at {now_str} PT [{mode}]",
-                scans_today=self._alerts_today,
+                scans_today=self._scans_today,
                 trades_today=self._trades_today,
+                alerts_today=self._alerts_today,
+                error_count=self._errors_today,
             )
         except Exception:
             pass
@@ -352,8 +359,10 @@ class Scanner:
                     except concurrent.futures.TimeoutError:
                         # Order may still fill in background — keep pending flag
                         log.warning(f"[{self.ticker}] Trade entry timed out (30s) — keeping pending, will not enter another.")
+                        self._errors_today += 1
                     except Exception as e:
                         self._entry_pending = False
+                        self._errors_today += 1
                         log.error(f"[{self.ticker}] Trade entry failed: {e}", exc_info=True)
             else:
                 # ── Outside trade window: alert only ─────────
@@ -365,3 +374,17 @@ class Scanner:
                 send_signal_email(signal, trade)
             else:
                 log.info(f"Signal detected (no email — no trade placed): {signal['signal_type']} @ ${signal['entry_price']:.2f}")
+
+        # ── Post-scan: update thread status to idle ───────────
+        try:
+            from db.writer import update_thread_status
+            update_thread_status(
+                f"scanner-{self.ticker}", self.ticker, "idle",
+                f"Scan complete at {now_str} PT — {len(signals) if 'signals' in dir() else 0} signals",
+                scans_today=self._scans_today,
+                trades_today=self._trades_today,
+                alerts_today=self._alerts_today,
+                error_count=self._errors_today,
+            )
+        except Exception:
+            pass

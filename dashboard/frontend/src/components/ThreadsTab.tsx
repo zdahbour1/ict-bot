@@ -14,7 +14,7 @@ function StatusBadge({ status }: { status: string }) {
 }
 
 export default function ThreadsTab() {
-  const { data, loading } = useApi<{ threads: ThreadStatus[] }>('/threads', 10000);
+  const { data, loading, refetch } = useApi<{ threads: ThreadStatus[] }>('/threads', 10000);
   const threads = data?.threads || [];
 
   if (loading) return <div className="text-gray-500 py-12 text-center">Loading threads...</div>;
@@ -25,6 +25,19 @@ export default function ThreadsTab() {
 
   return (
     <div>
+      {/* Controls */}
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-3">
+          <button onClick={refetch} className="px-3 py-1.5 text-sm bg-[#21262d] border border-[#30363d] text-gray-400 rounded-md hover:text-white">
+            Refresh Now
+          </button>
+          <span className="text-xs text-gray-500">Auto-refreshes every 10s</span>
+        </div>
+        <span className="text-xs text-gray-500">
+          Last updated: {new Date().toLocaleTimeString()}
+        </span>
+      </div>
+
       {/* Summary cards */}
       <div className="grid grid-cols-4 gap-4 mb-6">
         <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4">
