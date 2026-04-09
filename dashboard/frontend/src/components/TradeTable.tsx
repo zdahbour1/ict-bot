@@ -30,6 +30,13 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [tickerFilter, setTickerFilter] = useState<string>('');
+  const [refreshing, setRefreshing] = useState(false);
+
+  const handleRefresh = () => {
+    setRefreshing(true);
+    onRefresh();
+    setTimeout(() => setRefreshing(false), 500);
+  };
 
   const filteredTrades = useMemo(() => {
     let result = trades;
@@ -121,8 +128,11 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
           className="px-3 py-1.5 text-sm bg-red-600 text-white rounded-md hover:bg-red-700">
           Close All Trades
         </button>
-        <button onClick={onRefresh} className="px-3 py-1.5 text-sm bg-[#21262d] border border-[#30363d] text-gray-400 rounded-md hover:text-white">
-          Refresh
+        <button onClick={handleRefresh}
+          className={`px-3 py-1.5 text-sm border rounded-md transition-colors ${
+            refreshing ? 'bg-blue-600 border-blue-600 text-white' : 'bg-[#21262d] border-[#30363d] text-gray-400 hover:text-white'
+          }`}>
+          {refreshing ? 'Refreshing...' : 'Refresh'}
         </button>
         {lastUpdated && <span className="text-xs text-gray-500">Updated: {lastUpdated.toLocaleTimeString()}</span>}
         <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}
