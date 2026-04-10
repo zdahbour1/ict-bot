@@ -6,8 +6,9 @@ import TradeTable from './components/TradeTable';
 import ThreadsTab from './components/ThreadsTab';
 import TickersTab from './components/TickersTab';
 import SettingsTab from './components/SettingsTab';
+import AnalyticsTab from './components/AnalyticsTab';
 
-type Tab = 'trades' | 'threads' | 'tickers' | 'settings';
+type Tab = 'trades' | 'threads' | 'tickers' | 'settings' | 'analytics';
 
 function BotStatusDot({ status }: { status: string }) {
   const color = status === 'running' ? 'bg-green-400 shadow-[0_0_6px_#3fb950]'
@@ -64,7 +65,7 @@ export default function App() {
         <div className="flex items-center gap-6">
           <span className="text-lg font-bold text-blue-400">ICT Trading Bot</span>
           <div className="flex gap-1">
-            {(['trades', 'threads', 'tickers', 'settings'] as Tab[]).map(t => (
+            {(['trades', 'analytics', 'threads', 'tickers', 'settings'] as Tab[]).map(t => (
               <button key={t} onClick={() => setTab(t)}
                 className={`px-4 py-2 rounded-md text-sm capitalize ${tab === t ? 'bg-[#21262d] text-gray-200' : 'text-gray-500 hover:text-gray-300'}`}>
                 {t}
@@ -120,6 +121,7 @@ export default function App() {
         {tab === 'threads' && <ThreadsTab />}
         {tab === 'tickers' && <TickersTab />}
         {tab === 'settings' && <SettingsTab />}
+        {tab === 'analytics' && <AnalyticsTab />}
       </div>
     </div>
   );
