@@ -58,7 +58,11 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
     col.display({
       id: 'contracts',
       header: 'Contracts',
-      cell: ({ row }) => `${row.original.contracts_open} / ${row.original.contracts_entered}`,
+      cell: ({ row }) => {
+        const t = row.original;
+        if (t.status === 'closed') return `${t.contracts_closed} / ${t.contracts_entered}`;
+        return `${t.contracts_open} / ${t.contracts_entered}`;
+      },
     }),
     col.accessor('entry_price', { header: 'Entry', cell: info => `$${info.getValue()?.toFixed(2) || '-'}` }),
     col.display({
