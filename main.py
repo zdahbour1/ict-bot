@@ -149,15 +149,15 @@ def main():
 
             if os.path.exists(RESUME_SCANS_FILE):
                 os.remove(RESUME_SCANS_FILE)
-                if _scans_paused:
+                if not scanners or _scans_paused:
                     _scans_paused = False
-                    log.info("Resuming scanner threads...")
+                    log.info("Starting scanner threads...")
                     scanners.clear()
                     for i, ticker in enumerate(config.TICKERS):
                         scanner = Scanner(client, exit_manager, ticker=ticker, scan_offset=i * 2)
                         scanner.start()
                         scanners.append(scanner)
-                    log.info(f"Resumed {len(scanners)} scanner threads.")
+                    log.info(f"Started {len(scanners)} scanner threads: {', '.join(config.TICKERS)}")
 
             if hasattr(client, 'process_orders'):
                 client.process_orders()
