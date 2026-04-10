@@ -104,12 +104,21 @@ def main():
     STOP_FILE = os.path.join(os.path.dirname(__file__), ".bot_stop")
     PAUSE_SCANS_FILE = os.path.join(os.path.dirname(__file__), ".pause_scans")
     RESUME_SCANS_FILE = os.path.join(os.path.dirname(__file__), ".resume_scans")
-    # Clean up stale control files
+    SCANS_ACTIVE_FILE = os.path.join(os.path.dirname(__file__), ".scans_active")
+    # Clean up stale control files (but NOT .scans_active — that persists)
     for f in [STOP_FILE, PAUSE_SCANS_FILE, RESUME_SCANS_FILE]:
         if os.path.exists(f):
             os.remove(f)
 
+    # If scans were active when sidecar wrote the file, start them now
     _scans_paused = False
+    if os.path.exists(SCANS_ACTIVE_FILE):
+        log.info("Scans active file found — starting scanners...")
+        for i, ticker in enumerate(config.TICKERS):
+            scanner = Scanner(client, exit_manager, ticker=ticker, scan_offset=i * 2)
+            scanner.start()
+            scanners.append(scanner)
+        log.info(f"Started {len(scanners)} scanner threads: {', '.join(config.TICKERS)}")
 
     # ── Main loop: process IB orders on the main thread ───
     import time
