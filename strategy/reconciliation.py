@@ -15,6 +15,8 @@ def startup_reconciliation(client, exit_manager):
     """
     Run once after IB connects, before scanners start.
     Syncs DB open trades with IB's actual positions.
+    CRITICAL: If we can't get IB positions, we ABORT — never close trades
+    based on incomplete data.
     """
     log.info("=" * 50)
     log.info("Running startup reconciliation...")
@@ -22,7 +24,13 @@ def startup_reconciliation(client, exit_manager):
     try:
         ib_positions = client.get_ib_positions_raw()
     except Exception as e:
-        log.warning(f"Startup reconciliation skipped — can't get IB positions: {e}")
+        log.error(f"Startup reconciliation ABORTED — can't get IB positions: {e}")
+        log.error("Will NOT close any DB trades. Retry on next periodic reconciliation.")
+        try:
+            from db.writer import add_system_log
+            add_system_log("reconciliation", "error", f"Aborted: {e}")
+        except Exception:
+            pass
         return
 
     # Build lookup of IB positions by cleaned symbol
@@ -36,6 +44,24 @@ def startup_reconciliation(client, exit_manager):
     bot_by_symbol = {}
     for t in exit_manager.open_trades:
         bot_by_symbol[t["symbol"]] = t
+
+    # ── SAFETY CHECK: if IB returns 0 positions but we have DB trades,
+    # something is wrong (likely IB data issue). ABORT. ──
+    if len(ib_by_symbol) == 0 and len(bot_by_symbol) > 0:
+        log.warning(f"[RECONCILE] SAFETY: IB returned 0 positions but DB has {len(bot_by_symbol)} open trades. "
+                    f"This is suspicious — ABORTING reconciliation to protect open trades.")
+        try:
+            from db.writer import add_system_log
+            add_system_log("reconciliation", "warn",
+                          f"Aborted: IB returned 0 positions but DB has {len(bot_by_symbol)} trades")
+        except Exception:
+            pass
+        log.info("Reconciliation complete: ABORTED (safety check)")
+        log.info("=" * 50)
+        exit_manager._save_trades()
+        return
+
+    log.info(f"[RECONCILE] IB has {len(ib_by_symbol)} positions, DB has {len(bot_by_symbol)} open trades")
 
     # ── 1. DB trades with no IB position → closed while bot was down ──
     for sym, trade in list(bot_by_symbol.items()):
@@ -143,10 +169,12 @@ def periodic_reconciliation(client, exit_manager):
     """
     Lighter version of reconciliation for periodic checks.
     Detects phantom trades (in bot but not on IB).
+    ABORTS if can't get IB positions — never closes trades on incomplete data.
     """
     try:
         ib_positions = client.get_ib_positions_raw()
-    except Exception:
+    except Exception as e:
+        log.debug(f"Periodic reconciliation skipped — IB positions unavailable: {e}")
         return
 
     ib_symbols = set()

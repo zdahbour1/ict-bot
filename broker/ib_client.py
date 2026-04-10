@@ -511,12 +511,9 @@ class IBClient:
 
     # ── IB Reconciliation ─────────────────────────────────────
     def get_ib_positions_raw(self) -> list:
-        """Get raw IB positions for reconciliation. Thread-safe."""
-        try:
-            return self._submit_to_ib(self._ib_get_positions_raw)
-        except Exception as e:
-            log.warning(f"Reconciliation position fetch failed: {e}")
-            return []
+        """Get raw IB positions for reconciliation. Thread-safe.
+        RAISES on failure — caller must handle. Never returns empty on timeout."""
+        return self._submit_to_ib(self._ib_get_positions_raw, timeout=45)
 
     def _ib_get_positions_raw(self) -> list:
         """Returns detailed position info for reconciliation."""
