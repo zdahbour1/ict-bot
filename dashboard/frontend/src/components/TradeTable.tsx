@@ -30,6 +30,7 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [tickerFilter, setTickerFilter] = useState<string>('');
+  const [periodFilter, setPeriodFilter] = useState<string>('today');
   const [refreshing, setRefreshing] = useState(false);
 
   const handleRefresh = () => {
@@ -40,10 +41,24 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
 
   const filteredTrades = useMemo(() => {
     let result = trades;
+
+    // Date period filter
+    if (periodFilter) {
+      const now = new Date();
+      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      let cutoff: Date | null = null;
+      if (periodFilter === 'today') cutoff = today;
+      else if (periodFilter === 'week') { cutoff = new Date(today); cutoff.setDate(cutoff.getDate() - 7); }
+      else if (periodFilter === 'month') { cutoff = new Date(today); cutoff.setDate(cutoff.getDate() - 30); }
+      if (cutoff) {
+        result = result.filter(t => t.entry_time && new Date(t.entry_time) >= cutoff!);
+      }
+    }
+
     if (statusFilter) result = result.filter(t => t.status === statusFilter);
     if (tickerFilter) result = result.filter(t => t.ticker === tickerFilter);
     return result;
-  }, [trades, statusFilter, tickerFilter]);
+  }, [trades, statusFilter, tickerFilter, periodFilter]);
 
   const tickers = useMemo(() => [...new Set(trades.map(t => t.ticker))].sort(), [trades]);
 
@@ -173,6 +188,13 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
           {refreshing ? 'Refreshing...' : 'Refresh'}
         </button>
         {lastUpdated && <span className="text-xs text-gray-500">Updated: {lastUpdated.toLocaleTimeString()}</span>}
+        <select value={periodFilter} onChange={e => setPeriodFilter(e.target.value)}
+          className="px-2 py-1.5 text-sm bg-[#21262d] border border-[#30363d] text-gray-300 rounded-md">
+          <option value="today">Today</option>
+          <option value="week">Last 7 Days</option>
+          <option value="month">Last 30 Days</option>
+          <option value="">All Time</option>
+        </select>
         <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}
           className="px-2 py-1.5 text-sm bg-[#21262d] border border-[#30363d] text-gray-300 rounded-md">
           <option value="">All statuses</option>
