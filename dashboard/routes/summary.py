@@ -117,8 +117,13 @@ def get_analytics(date: Optional[str] = None):
         if date:
             q = q.filter(func.date(Trade.entry_time) == date)
         else:
-            today = datetime.now(timezone.utc).date()
-            q = q.filter(func.date(Trade.entry_time) == today)
+            # Default to most recent trading day with data
+            latest = session.query(func.max(func.date(Trade.entry_time))).scalar()
+            if latest:
+                q = q.filter(func.date(Trade.entry_time) == latest)
+                date = str(latest)
+            else:
+                date = str(datetime.now(timezone.utc).date())
 
         trades = q.all()
         closed = [t for t in trades if t.status == "closed"]
@@ -243,6 +248,14 @@ def get_analytics(date: Optional[str] = None):
             "total_trades": len(trades),
             "total_closed": len(closed),
             "total_open": len(open_trades),
+            "date": date,
+            "available_dates": _get_trading_dates(session),
         }
     finally:
         session.close()
+
+
+def _get_trading_dates(session) -> list[str]:
+    """Get list of dates that have trade data."""
+    rows = session.query(func.date(Trade.entry_time)).distinct().order_by(func.date(Trade.entry_time).desc()).all()
+    return [str(r[0]) for r in rows if r[0]]

@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { useApi } from '../hooks/useApi';
 import {
   BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
@@ -31,7 +32,9 @@ function StatCard({ label, value, sub, color }: { label: string; value: string; 
 }
 
 export default function AnalyticsTab() {
-  const { data, loading, refetch } = useApi<any>('/analytics', 60000);
+  const [selectedDate, setSelectedDate] = useState<string>('');
+  const endpoint = selectedDate ? `/analytics?date=${selectedDate}` : '/analytics';
+  const { data, loading, refetch } = useApi<any>(endpoint, 60000);
 
   if (loading) return <div className="text-gray-500 py-12 text-center">Loading analytics...</div>;
   if (!data) return <div className="text-gray-500 py-12 text-center">No data available</div>;
@@ -47,9 +50,18 @@ export default function AnalyticsTab() {
   return (
     <div>
       <div className="flex items-center justify-between mb-4">
-        <span className="text-sm text-gray-400">
-          {data.total_trades} trades ({data.total_closed} closed, {data.total_open} open) | Avg hold: {data.avg_hold_minutes} min
-        </span>
+        <div className="flex items-center gap-3">
+          <select value={selectedDate} onChange={e => setSelectedDate(e.target.value)}
+            className="px-2 py-1.5 text-sm bg-[#21262d] border border-[#30363d] text-gray-300 rounded-md">
+            <option value="">Latest ({data.date})</option>
+            {(data.available_dates || []).map((d: string) => (
+              <option key={d} value={d}>{d}</option>
+            ))}
+          </select>
+          <span className="text-sm text-gray-400">
+            {data.total_trades} trades ({data.total_closed} closed, {data.total_open} open) | Avg hold: {data.avg_hold_minutes} min
+          </span>
+        </div>
         <button onClick={refetch} className="px-3 py-1.5 text-sm bg-[#21262d] border border-[#30363d] text-gray-400 rounded-md hover:text-white">
           Refresh
         </button>
