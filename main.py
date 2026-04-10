@@ -92,82 +92,107 @@ def main():
     )
     flask_thread.start()
 
-    # ── Handle SIGTERM (from sidecar stop) ──────────────
-    _running = True
-    def _handle_sigterm(sig, frame):
-        nonlocal _running
-        log.info("Received SIGTERM — shutting down...")
-        _running = False
-    signal.signal(signal.SIGTERM, _handle_sigterm)
+    # ── Mark IB connected in DB ─────────────────────────
+    try:
+        from db.writer import set_ib_connected, set_bot_error, add_system_log
+        set_ib_connected(True)
+        set_bot_error(None)  # clear any previous error
+        add_system_log("bot", "info", "Bot started, IB connected", {"pid": os.getpid(), "account": config.IB_ACCOUNT})
+    except Exception:
+        pass
 
-    # ── Control files for sidecar communication (Windows compat) ──
-    STOP_FILE = os.path.join(os.path.dirname(__file__), ".bot_stop")
-    PAUSE_SCANS_FILE = os.path.join(os.path.dirname(__file__), ".pause_scans")
-    RESUME_SCANS_FILE = os.path.join(os.path.dirname(__file__), ".resume_scans")
-    SCANS_ACTIVE_FILE = os.path.join(os.path.dirname(__file__), ".scans_active")
-    # Clean up stale control files (but NOT .scans_active — that persists)
-    for f in [STOP_FILE, PAUSE_SCANS_FILE, RESUME_SCANS_FILE]:
-        if os.path.exists(f):
-            os.remove(f)
+    # ── Check DB for scan state (restore on restart) ──
+    try:
+        from db.writer import get_bot_state
+        state = get_bot_state()
+        if state and state.get("scans_active"):
+            log.info("DB shows scans_active=True — starting scanners...")
+            for i, ticker in enumerate(config.TICKERS):
+                scanner = Scanner(client, exit_manager, ticker=ticker, scan_offset=i * 2)
+                scanner.start()
+                scanners.append(scanner)
+            log.info(f"Started {len(scanners)} scanner threads: {', '.join(config.TICKERS)}")
+            add_system_log("scanner", "info", f"Scanners started ({len(scanners)} tickers)")
+        else:
+            log.info("Scans not active — waiting for 'Start Scans' command.")
+    except Exception as e:
+        log.warning(f"Could not check scan state: {e}")
 
-    # If scans were active when sidecar wrote the file, start them now
-    _scans_paused = False
-    if os.path.exists(SCANS_ACTIVE_FILE):
-        log.info("Scans active file found — starting scanners...")
-        for i, ticker in enumerate(config.TICKERS):
-            scanner = Scanner(client, exit_manager, ticker=ticker, scan_offset=i * 2)
-            scanner.start()
-            scanners.append(scanner)
-        log.info(f"Started {len(scanners)} scanner threads: {', '.join(config.TICKERS)}")
-
-    # ── Main loop: process IB orders on the main thread ───
+    # ── Main loop: read state from DB, process IB orders ──
     import time
-    log.info("Main thread: processing IB order queue...")
-    while _running:
+    _last_state_check = 0
+    STATE_CHECK_INTERVAL = 2  # check DB every 2 seconds
+
+    log.info("Main thread: processing IB order queue (state managed via DB)...")
+    while True:
         try:
-            # Check for sidecar stop signal
-            if os.path.exists(STOP_FILE):
-                log.info("Stop file detected — shutting down gracefully...")
-                os.remove(STOP_FILE)
-                break
+            now = time.time()
 
-            # Check for scan pause/resume signals
-            if os.path.exists(PAUSE_SCANS_FILE):
-                os.remove(PAUSE_SCANS_FILE)
-                if not _scans_paused:
-                    _scans_paused = True
-                    log.info("Pausing all scanner threads...")
-                    for s in scanners:
-                        s.stop()
-                    try:
-                        from db.writer import update_thread_status
-                        for ticker in config.TICKERS:
-                            update_thread_status(f"scanner-{ticker}", ticker, "stopped", "Scans paused by user")
-                    except Exception:
-                        pass
-                    log.info("All scanners paused. Exit manager continues monitoring open trades.")
+            # ── Periodic state check from DB ──────────
+            if now - _last_state_check >= STATE_CHECK_INTERVAL:
+                _last_state_check = now
+                try:
+                    from db.writer import get_bot_state
+                    state = get_bot_state()
+                    if state:
+                        # Stop requested?
+                        if state.get("stop_requested"):
+                            log.info("Stop requested via DB — shutting down...")
+                            from db.writer import set_stop_requested
+                            set_stop_requested(False)
+                            break
 
-            if os.path.exists(RESUME_SCANS_FILE):
-                os.remove(RESUME_SCANS_FILE)
-                if not scanners or _scans_paused:
-                    _scans_paused = False
-                    log.info("Starting scanner threads...")
-                    scanners.clear()
-                    for i, ticker in enumerate(config.TICKERS):
-                        scanner = Scanner(client, exit_manager, ticker=ticker, scan_offset=i * 2)
-                        scanner.start()
-                        scanners.append(scanner)
-                    log.info(f"Started {len(scanners)} scanner threads: {', '.join(config.TICKERS)}")
+                        # Scan state changed?
+                        db_scans = state.get("scans_active", False)
+                        currently_scanning = len(scanners) > 0
 
+                        if db_scans and not currently_scanning:
+                            # Start scanners
+                            log.info("DB: scans_active=True — starting scanners...")
+                            scanners.clear()
+                            for i, ticker in enumerate(config.TICKERS):
+                                scanner = Scanner(client, exit_manager, ticker=ticker, scan_offset=i * 2)
+                                scanner.start()
+                                scanners.append(scanner)
+                            log.info(f"Started {len(scanners)} scanner threads")
+                            try:
+                                add_system_log("scanner", "info", f"Scanners started ({len(scanners)} tickers)")
+                            except Exception:
+                                pass
+
+                        elif not db_scans and currently_scanning:
+                            # Stop scanners
+                            log.info("DB: scans_active=False — stopping scanners...")
+                            for s in scanners:
+                                s.stop()
+                            try:
+                                from db.writer import update_thread_status
+                                for ticker in config.TICKERS:
+                                    update_thread_status(f"scanner-{ticker}", ticker, "stopped", "Scans stopped by user")
+                                add_system_log("scanner", "info", "Scanners stopped by user")
+                            except Exception:
+                                pass
+                            scanners.clear()
+                            log.info("All scanners stopped.")
+                except Exception as e:
+                    log.debug(f"State check error: {e}")
+
+            # ── Process IB orders ─────────────────────
             if hasattr(client, 'process_orders'):
                 client.process_orders()
             else:
-                time.sleep(1)
+                time.sleep(0.5)
+
         except KeyboardInterrupt:
-            log.info("Shutting down...")
+            log.info("Shutting down (KeyboardInterrupt)...")
             break
         except Exception as e:
             log.error(f"Main loop error: {e}")
+            try:
+                set_bot_error(str(e))
+                add_system_log("bot", "error", f"Main loop error: {e}")
+            except Exception:
+                pass
             time.sleep(1)
 
     _shutdown_cleanup()
@@ -176,11 +201,13 @@ def main():
 def _shutdown_cleanup():
     """Mark bot and all threads as stopped in DB."""
     try:
-        from db.writer import update_bot_state, update_thread_status
+        from db.writer import update_bot_state, update_thread_status, set_ib_connected, set_stop_requested, add_system_log
         update_bot_state("stopped")
-        # Mark all scanner threads as stopped
+        set_ib_connected(False)
+        set_stop_requested(False)
         for ticker in config.TICKERS:
             update_thread_status(f"scanner-{ticker}", ticker, "stopped", "Bot shut down")
+        add_system_log("bot", "info", "Bot shut down gracefully")
         log.info("DB updated: bot and threads marked as stopped")
     except Exception as e:
         log.debug(f"Shutdown DB cleanup: {e}")

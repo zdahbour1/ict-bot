@@ -67,3 +67,38 @@ def list_errors(
         return {"errors": result, "total": len(result)}
     finally:
         session.close()
+
+
+@router.get("/system-log")
+def get_system_log(
+    component: Optional[str] = None,
+    level: Optional[str] = None,
+    limit: int = Query(100, ge=1, le=1000),
+):
+    """Get system log entries, most recent first."""
+    from db.models import SystemLog
+    session = get_session()
+    if not session:
+        raise HTTPException(503, "Database not available")
+    try:
+        q = session.query(SystemLog)
+        if component:
+            q = q.filter(SystemLog.component == component)
+        if level:
+            q = q.filter(SystemLog.level == level)
+        logs = q.order_by(SystemLog.created_at.desc()).limit(limit).all()
+        result = [
+            {
+                "id": l.id,
+                "component": l.component,
+                "level": l.level,
+                "message": l.message,
+                "details": l.details or {},
+                "created_at": l.created_at.isoformat() if l.created_at else None,
+            }
+            for l in logs
+        ]
+        session.close()
+        return {"logs": result, "total": len(result)}
+    finally:
+        session.close()

@@ -126,9 +126,24 @@ class BotState(Base):
     account = Column(String(20))
     pid = Column(Integer)
     total_tickers = Column(Integer, default=0)
+    scans_active = Column(Boolean, default=False)
+    stop_requested = Column(Boolean, default=False)
+    ib_connected = Column(Boolean, default=False)
+    last_error = Column(Text)
     started_at = Column(DateTime(timezone=True))
     stopped_at = Column(DateTime(timezone=True))
     updated_at = Column(DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow)
+
+
+class SystemLog(Base):
+    __tablename__ = "system_log"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    component = Column(String(30), nullable=False)
+    level = Column(String(10), nullable=False, default="info")
+    message = Column(Text, nullable=False)
+    details = Column(JSONB, default={})
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
 
 
 class Error(Base):

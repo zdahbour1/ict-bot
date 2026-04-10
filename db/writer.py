@@ -395,3 +395,127 @@ def complete_command(command_id: int, error: str = None):
         session.rollback()
         session.close()
         raise
+
+
+# ══════════════════════════════════════════════════════════
+# System State Management (DB as single source of truth)
+# ══════════════════════════════════════════════════════════
+
+@_safe_db
+def get_bot_state() -> dict | None:
+    """Read current bot state from DB."""
+    from db.models import BotState
+    session = get_session()
+    if not session:
+        return None
+    try:
+        state = session.query(BotState).filter(BotState.id == 1).first()
+        if not state:
+            return None
+        result = {
+            "status": state.status,
+            "scans_active": state.scans_active,
+            "stop_requested": state.stop_requested,
+            "ib_connected": state.ib_connected,
+            "pid": state.pid,
+            "account": state.account,
+            "total_tickers": state.total_tickers,
+            "last_error": state.last_error,
+        }
+        session.close()
+        return result
+    except Exception:
+        session.close()
+        return None
+
+
+@_safe_db
+def set_scans_active(active: bool):
+    """Set scan state in DB."""
+    from db.models import BotState
+    session = get_session()
+    if not session:
+        return
+    try:
+        session.query(BotState).filter(BotState.id == 1).update({"scans_active": active})
+        session.commit()
+        session.close()
+        log.info(f"DB: scans_active = {active}")
+    except Exception:
+        session.rollback()
+        session.close()
+        raise
+
+
+@_safe_db
+def set_stop_requested(requested: bool):
+    """Set stop request in DB."""
+    from db.models import BotState
+    session = get_session()
+    if not session:
+        return
+    try:
+        session.query(BotState).filter(BotState.id == 1).update({"stop_requested": requested})
+        session.commit()
+        session.close()
+    except Exception:
+        session.rollback()
+        session.close()
+        raise
+
+
+@_safe_db
+def set_ib_connected(connected: bool):
+    """Set IB connection state in DB."""
+    from db.models import BotState
+    session = get_session()
+    if not session:
+        return
+    try:
+        session.query(BotState).filter(BotState.id == 1).update({"ib_connected": connected})
+        session.commit()
+        session.close()
+    except Exception:
+        session.rollback()
+        session.close()
+        raise
+
+
+@_safe_db
+def set_bot_error(error_msg: str | None):
+    """Set or clear the last error in DB."""
+    from db.models import BotState
+    session = get_session()
+    if not session:
+        return
+    try:
+        session.query(BotState).filter(BotState.id == 1).update({"last_error": error_msg})
+        session.commit()
+        session.close()
+    except Exception:
+        session.rollback()
+        session.close()
+        raise
+
+
+@_safe_db
+def add_system_log(component: str, level: str, message: str, details: dict = None):
+    """Add an entry to the system_log table."""
+    from db.models import SystemLog
+    session = get_session()
+    if not session:
+        return
+    try:
+        row = SystemLog(
+            component=component,
+            level=level,
+            message=message[:2000],
+            details=details or {},
+        )
+        session.add(row)
+        session.commit()
+        session.close()
+    except Exception:
+        session.rollback()
+        session.close()
+        raise
