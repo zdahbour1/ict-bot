@@ -53,8 +53,28 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
       cell: info => <Badge text={info.getValue().toUpperCase()} variant={info.getValue()} />,
     }),
     col.accessor('ticker', { header: 'Ticker', cell: info => <strong>{info.getValue()}</strong> }),
-    col.accessor('direction', { header: 'Dir' }),
-    col.accessor('symbol', { header: 'Symbol', cell: info => <span className="text-xs text-gray-400">{info.getValue()}</span> }),
+    col.accessor('direction', {
+      header: 'Type',
+      cell: info => {
+        const dir = info.getValue();
+        const isCall = dir === 'LONG';
+        return <span className={isCall ? 'text-green-400' : 'text-red-400'}>{isCall ? 'Call' : 'Put'}</span>;
+      },
+    }),
+    col.accessor('symbol', {
+      header: 'Expiry / Strike',
+      cell: info => {
+        const sym = info.getValue();
+        // Parse OCC: TICKER YYMMDD C/P SSSSSSSS
+        const match = sym.match(/^[A-Z]+(\d{6})[CP](\d{8})$/);
+        if (!match) return <span className="text-xs text-gray-400">{sym}</span>;
+        const expStr = match[1]; // YYMMDD
+        const strike = parseInt(match[2]) / 1000;
+        const expDate = new Date(2000 + parseInt(expStr.slice(0,2)), parseInt(expStr.slice(2,4)) - 1, parseInt(expStr.slice(4,6)));
+        const expFmt = expDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        return <span className="text-xs">{expFmt} <span className="text-gray-400">${strike}</span></span>;
+      },
+    }),
     col.display({
       id: 'contracts',
       header: 'Contracts',
