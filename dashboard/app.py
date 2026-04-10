@@ -119,7 +119,7 @@ app.add_middleware(
 socket_app = socketio.ASGIApp(sio, app)
 
 # Import and include route modules
-from dashboard.routes import trades, tickers, settings, threads, bot, summary
+from dashboard.routes import trades, tickers, settings, threads, bot, summary, analytics
 
 app.include_router(trades.router, prefix="/api")
 app.include_router(tickers.router, prefix="/api")
@@ -127,6 +127,7 @@ app.include_router(settings.router, prefix="/api")
 app.include_router(threads.router, prefix="/api")
 app.include_router(bot.router, prefix="/api")
 app.include_router(summary.router, prefix="/api")
+app.include_router(analytics.router, prefix="/api")
 
 
 @app.get("/api/health")
