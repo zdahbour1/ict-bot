@@ -19,6 +19,7 @@ from strategy.ict_long import run_strategy
 from strategy.ict_short import run_strategy_short
 from strategy.option_selector import select_and_enter, select_and_enter_put
 from strategy.indicators import compute_snapshot
+from strategy.error_handler import handle_error, safe_call
 from alerts.emailer import send_signal_email
 import config
 
@@ -209,8 +210,8 @@ class Scanner:
                 alerts_today=self._alerts_today,
                 error_count=self._errors_today,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            handle_error(f"scanner-{self.ticker}", "update_thread_status", e)
 
         # ── News filter ───────────────────────────────────
         near_news, news_label = _is_near_news(now_pt)
@@ -340,22 +341,23 @@ class Scanner:
                             trade["ict_tp"]    = signal["tp"]
 
                             # ── Entry-time enrichment ─────────
-                            try:
-                                trade["entry_indicators"] = compute_snapshot(bars_1m)
-                            except Exception:
-                                trade["entry_indicators"] = {}
-                            try:
-                                trade["entry_stock_price"] = self.client.get_realtime_equity_price(self.ticker)
-                            except Exception:
-                                trade["entry_stock_price"] = None
-                            try:
-                                trade["entry_greeks"] = self.client.get_option_greeks(trade["symbol"])
-                            except Exception:
-                                trade["entry_greeks"] = {}
-                            try:
-                                trade["entry_vix"] = self.client.get_vix()
-                            except Exception:
-                                trade["entry_vix"] = None
+                            ctx = {"ticker": self.ticker, "symbol": trade.get("symbol")}
+                            trade["entry_indicators"] = safe_call(
+                                compute_snapshot, bars_1m,
+                                component=f"scanner-{self.ticker}", operation="compute_snapshot",
+                                default={}, context=ctx)
+                            trade["entry_stock_price"] = safe_call(
+                                self.client.get_realtime_equity_price, self.ticker,
+                                component=f"scanner-{self.ticker}", operation="get_equity_price",
+                                default=None, context=ctx)
+                            trade["entry_greeks"] = safe_call(
+                                self.client.get_option_greeks, trade["symbol"],
+                                component=f"scanner-{self.ticker}", operation="get_greeks",
+                                default={}, context=ctx)
+                            trade["entry_vix"] = safe_call(
+                                self.client.get_vix,
+                                component=f"scanner-{self.ticker}", operation="get_vix",
+                                default=None, context=ctx)
 
                             self.exit_manager.add_trade(trade)
                             self._seen_setups.add(setup_id)  # only block after actual entry
@@ -373,29 +375,26 @@ class Scanner:
                                     alerts_today=self._alerts_today,
                                     error_count=self._errors_today,
                                 )
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                handle_error(f"scanner-{self.ticker}", "post_trade_thread_update", e)
                     except concurrent.futures.TimeoutError:
                         # Order may still fill in background — keep pending flag
                         log.warning(f"[{self.ticker}] Trade entry timed out (30s) — keeping pending, will not enter another.")
                         self._errors_today += 1
+                        handle_error(f"scanner-{self.ticker}", "trade_entry_timeout",
+                                    TimeoutError("Trade entry timed out after 30s"),
+                                    context={"ticker": self.ticker}, critical=True)
                         try:
                             from db.writer import log_error
                             log_error(f"scanner-{self.ticker}", self.ticker, None,
                                      "trade_entry_timeout", "Trade entry timed out after 30s")
-                        except Exception:
-                            pass
+                        except Exception as e2:
+                            handle_error(f"scanner-{self.ticker}", "log_timeout_error", e2)
                     except Exception as e:
                         self._entry_pending = False
                         self._errors_today += 1
-                        log.error(f"[{self.ticker}] Trade entry failed: {e}", exc_info=True)
-                        try:
-                            from db.writer import log_error
-                            import traceback
-                            log_error(f"scanner-{self.ticker}", self.ticker, None,
-                                     "trade_entry_failed", str(e), traceback.format_exc())
-                        except Exception:
-                            pass
+                        handle_error(f"scanner-{self.ticker}", "trade_entry", e,
+                                    context={"ticker": self.ticker}, critical=True)
             else:
                 # ── Outside trade window: alert only ─────────
                 log.info("Signal outside trade window — sending alert-only email, no trade placed.")
@@ -418,5 +417,5 @@ class Scanner:
                 alerts_today=self._alerts_today,
                 error_count=self._errors_today,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            handle_error(f"scanner-{self.ticker}", "post_scan_thread_update", e)
