@@ -68,12 +68,19 @@ def main():
     # ── Start exit monitor (shared, thread-safe) ──────────
     exit_manager = ExitManager(client)
 
-    # ── Startup reconciliation: sync DB with IB positions ─
+    # ── Startup reconciliation: run directly on main thread (not via queue) ─
+    # NOTE: This runs BEFORE the main loop, so we call IB directly instead
+    # of going through the worker queue (which nobody is processing yet).
     try:
-        from strategy.reconciliation import startup_reconciliation
-        startup_reconciliation(client, exit_manager)
+        from strategy.reconciliation import startup_reconciliation_direct
+        startup_reconciliation_direct(client, exit_manager)
     except Exception as e:
         log.warning(f"Startup reconciliation failed: {e}")
+        try:
+            from strategy.error_handler import handle_error
+            handle_error("bot", "startup_reconciliation", e, critical=True)
+        except Exception:
+            pass
 
     exit_manager.start()
 

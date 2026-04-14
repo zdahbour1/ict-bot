@@ -11,12 +11,34 @@ log = logging.getLogger(__name__)
 PT = pytz.timezone("America/Los_Angeles")
 
 
+def startup_reconciliation_direct(client, exit_manager):
+    """
+    Run once on the MAIN THREAD after IB connects, before main loop starts.
+    Calls IB directly (not via worker queue) because the queue processor
+    isn't running yet.
+    """
+    log.info("=" * 50)
+    log.info("Running startup reconciliation (direct mode)...")
+
+    try:
+        # Call IB directly on main thread — no queue needed
+        ib_positions = client._ib_get_positions_raw()
+    except Exception as e:
+        log.error(f"Startup reconciliation ABORTED — can't get IB positions: {e}")
+        log.error("Will NOT close any DB trades. Retry on next periodic reconciliation.")
+        try:
+            from db.writer import add_system_log
+            add_system_log("reconciliation", "error", f"Aborted (direct): {e}")
+        except Exception as e:
+            pass
+        return
+
+    _reconcile(client, exit_manager, ib_positions)
+
+
 def startup_reconciliation(client, exit_manager):
     """
-    Run once after IB connects, before scanners start.
-    Syncs DB open trades with IB's actual positions.
-    CRITICAL: If we can't get IB positions, we ABORT — never close trades
-    based on incomplete data.
+    Run via worker queue (for periodic reconciliation when main loop is active).
     """
     log.info("=" * 50)
     log.info("Running startup reconciliation...")
@@ -32,6 +54,12 @@ def startup_reconciliation(client, exit_manager):
         except Exception as e:
             pass
         return
+
+    _reconcile(client, exit_manager, ib_positions)
+
+
+def _reconcile(client, exit_manager, ib_positions):
+    """Core reconciliation logic — shared by direct and queued modes."""
 
     # Build lookup of IB positions by conId (primary) and symbol (fallback)
     ib_by_con_id = {}
