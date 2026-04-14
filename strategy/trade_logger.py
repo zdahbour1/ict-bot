@@ -27,22 +27,22 @@ def collect_exit_enrichment(client, trade: dict) -> dict:
         from data.ib_provider import get_bars_1m_ib
         exit_bars = get_bars_1m_ib(client, ticker, days_back=2)
         enrichment["exit_indicators"] = compute_snapshot(exit_bars)
-    except Exception:
+    except Exception as e:
         enrichment["exit_indicators"] = {}
 
     try:
         enrichment["exit_stock_price"] = client.get_realtime_equity_price(ticker)
-    except Exception:
+    except Exception as e:
         enrichment["exit_stock_price"] = None
 
     try:
         enrichment["exit_greeks"] = client.get_option_greeks(trade["symbol"])
-    except Exception:
+    except Exception as e:
         enrichment["exit_greeks"] = {}
 
     try:
         enrichment["exit_vix"] = client.get_vix()
-    except Exception:
+    except Exception as e:
         enrichment["exit_vix"] = None
 
     return enrichment

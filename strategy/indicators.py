@@ -78,7 +78,8 @@ def vwap(bars: pd.DataFrame) -> float | None:
         vwap_series = cum_tp_vol / cum_vol
         val = vwap_series.iloc[-1]
         return round(float(val), 4) if not np.isnan(val) else None
-    except Exception:
+    except Exception as e:
+        logging.getLogger(__name__).debug(f"VWAP calculation failed: {e}")
         return None
 
 

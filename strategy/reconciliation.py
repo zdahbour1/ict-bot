@@ -29,7 +29,7 @@ def startup_reconciliation(client, exit_manager):
         try:
             from db.writer import add_system_log
             add_system_log("reconciliation", "error", f"Aborted: {e}")
-        except Exception:
+        except Exception as e:
             pass
         return
 
@@ -56,7 +56,7 @@ def startup_reconciliation(client, exit_manager):
             from db.writer import add_system_log
             add_system_log("reconciliation", "warn",
                           f"Aborted: IB returned 0 positions but bot has {len(bot_trades)} trades")
-        except Exception:
+        except Exception as e:
             pass
         log.info("Reconciliation complete: ABORTED (safety check)")
         log.info("=" * 50)
@@ -96,7 +96,7 @@ def startup_reconciliation(client, exit_manager):
             if fill and fill.get("price"):
                 exit_price = fill["price"]
                 log.info(f"[RECONCILE] Found IB fill: ${exit_price:.2f}")
-        except Exception:
+        except Exception as e:
             pass
 
         entry_price = trade.get("entry_price", 0)
@@ -108,7 +108,7 @@ def startup_reconciliation(client, exit_manager):
             try:
                 from db.writer import close_trade
                 close_trade(trade["db_id"], exit_price, result, "BRACKET/CLOSED (BOT OFFLINE)", {})
-            except Exception:
+            except Exception as e:
                 pass
 
         # Remove from open trades
@@ -219,7 +219,7 @@ def periodic_reconciliation(client, exit_manager):
                             fill = client.check_recent_fills(sym)
                             if fill and fill.get("price"):
                                 exit_price = fill["price"]
-                        except Exception:
+                        except Exception as e:
                             pass
 
                         entry = trade.get("entry_price", 0)
@@ -227,7 +227,7 @@ def periodic_reconciliation(client, exit_manager):
                         result = "WIN" if pnl > 0 else "LOSS" if pnl < 0 else "SCRATCH"
                         close_trade(trade["db_id"], exit_price, result,
                                    "BRACKET/CLOSED (RECONCILE)", {})
-                    except Exception:
+                    except Exception as e:
                         pass
 
         if removed:
@@ -240,7 +240,7 @@ def _check_brackets_exist(client, symbol: str) -> bool:
     try:
         open_orders = client._submit_to_ib(_get_open_orders_for_symbol, client.ib, symbol)
         return len(open_orders) > 0
-    except Exception:
+    except Exception as e:
         return False
 
 

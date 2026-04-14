@@ -77,7 +77,7 @@ def insert_trade(trade: dict, account: str) -> int | None:
         session.close()
         log.debug(f"DB: inserted trade {trade_id} for {trade.get('ticker')}")
         return trade_id
-    except Exception:
+    except Exception as e:
         session.rollback()
         session.close()
         raise
@@ -101,7 +101,7 @@ def update_trade_price(trade_id: int, current_price: float, pnl_pct: float,
         })
         session.commit()
         session.close()
-    except Exception:
+    except Exception as e:
         session.rollback()
         session.close()
         raise
@@ -160,7 +160,7 @@ def close_trade(trade_id: int, exit_price: float, result: str, reason: str,
         session.commit()
         session.close()
         log.debug(f"DB: closed trade {trade_id} — {result} ({reason})")
-    except Exception:
+    except Exception as e:
         session.rollback()
         session.close()
         raise
@@ -199,7 +199,7 @@ def record_partial_close(trade_id: int, contracts: int, close_price: float,
 
         session.commit()
         session.close()
-    except Exception:
+    except Exception as e:
         session.rollback()
         session.close()
         raise
@@ -219,7 +219,7 @@ def mark_trade_errored(trade_id: int, error_message: str):
         })
         session.commit()
         session.close()
-    except Exception:
+    except Exception as e:
         session.rollback()
         session.close()
         raise
@@ -283,7 +283,7 @@ def update_thread_status(thread_name: str, ticker: str = None, status: str = "id
 
         session.commit()
         session.close()
-    except Exception:
+    except Exception as e:
         session.rollback()
         session.close()
         raise
@@ -319,7 +319,7 @@ def update_bot_state(status: str, account: str = None, pid: int = None,
             session.add(state)
         session.commit()
         session.close()
-    except Exception:
+    except Exception as e:
         session.rollback()
         session.close()
         raise
@@ -345,7 +345,7 @@ def log_error(thread_name: str = None, ticker: str = None, trade_id: int = None,
         session.add(row)
         session.commit()
         session.close()
-    except Exception:
+    except Exception as e:
         session.rollback()
         session.close()
         raise
@@ -375,7 +375,7 @@ def check_pending_commands() -> list:
         session.commit()
         session.close()
         return result
-    except Exception:
+    except Exception as e:
         session.rollback()
         session.close()
         raise
@@ -396,7 +396,7 @@ def complete_command(command_id: int, error: str = None):
         })
         session.commit()
         session.close()
-    except Exception:
+    except Exception as e:
         session.rollback()
         session.close()
         raise
@@ -429,7 +429,7 @@ def get_bot_state() -> dict | None:
         }
         session.close()
         return result
-    except Exception:
+    except Exception as e:
         session.close()
         return None
 
@@ -446,7 +446,7 @@ def set_scans_active(active: bool):
         session.commit()
         session.close()
         log.info(f"DB: scans_active = {active}")
-    except Exception:
+    except Exception as e:
         session.rollback()
         session.close()
         raise
@@ -463,7 +463,7 @@ def set_stop_requested(requested: bool):
         session.query(BotState).filter(BotState.id == 1).update({"stop_requested": requested})
         session.commit()
         session.close()
-    except Exception:
+    except Exception as e:
         session.rollback()
         session.close()
         raise
@@ -480,7 +480,7 @@ def set_ib_connected(connected: bool):
         session.query(BotState).filter(BotState.id == 1).update({"ib_connected": connected})
         session.commit()
         session.close()
-    except Exception:
+    except Exception as e:
         session.rollback()
         session.close()
         raise
@@ -497,7 +497,7 @@ def set_bot_error(error_msg: str | None):
         session.query(BotState).filter(BotState.id == 1).update({"last_error": error_msg})
         session.commit()
         session.close()
-    except Exception:
+    except Exception as e:
         session.rollback()
         session.close()
         raise
@@ -520,7 +520,7 @@ def add_system_log(component: str, level: str, message: str, details: dict = Non
         session.add(row)
         session.commit()
         session.close()
-    except Exception:
+    except Exception as e:
         session.rollback()
         session.close()
         raise

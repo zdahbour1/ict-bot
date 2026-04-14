@@ -188,7 +188,7 @@ class IBClient:
         """Validate an option contract exists on IB. Thread-safe."""
         try:
             return self._submit_to_ib(self._ib_validate_contract, occ_symbol)
-        except Exception:
+        except Exception as e:
             return False
 
     def _ib_validate_contract(self, occ_symbol: str) -> bool:
@@ -247,7 +247,7 @@ class IBClient:
                 c = self._occ_to_contract(sym)
                 contracts.append(c)
                 symbol_map[c.conId] = sym
-            except Exception:
+            except Exception as e:
                 continue
 
         if not contracts:
@@ -553,7 +553,7 @@ class IBClient:
         """Check if a symbol was recently filled on IB. Thread-safe."""
         try:
             return self._submit_to_ib(self._ib_check_fills, symbol)
-        except Exception:
+        except Exception as e:
             return None
 
     def _ib_check_fills(self, symbol: str) -> dict | None:

@@ -62,7 +62,7 @@ def main():
         from db.writer import update_bot_state
         update_bot_state("running", account=config.IB_ACCOUNT, pid=os.getpid(),
                          total_tickers=len(config.TICKERS))
-    except Exception:
+    except Exception as e:
         pass
 
     # ── Start exit monitor (shared, thread-safe) ──────────
@@ -104,7 +104,7 @@ def main():
         set_ib_connected(True)
         set_bot_error(None)  # clear any previous error
         add_system_log("bot", "info", "Bot started, IB connected", {"pid": os.getpid(), "account": config.IB_ACCOUNT})
-    except Exception:
+    except Exception as e:
         pass
 
     # ── Reset scan state on startup — user must explicitly start scans ──
@@ -113,7 +113,7 @@ def main():
         set_scans_active(False)
         set_stop_requested(False)
         log.info("Scans not active — user must click 'Start Scans' in dashboard.")
-    except Exception:
+    except Exception as e:
         pass
 
     # ── Main loop: read state from DB, process IB orders ──
@@ -155,7 +155,7 @@ def main():
                             log.info(f"Started {len(scanners)} scanner threads")
                             try:
                                 add_system_log("scanner", "info", f"Scanners started ({len(scanners)} tickers)")
-                            except Exception:
+                            except Exception as e:
                                 pass
 
                         elif not db_scans and currently_scanning:
@@ -168,7 +168,7 @@ def main():
                                 for ticker in config.TICKERS:
                                     update_thread_status(f"scanner-{ticker}", ticker, "stopped", "Scans stopped by user")
                                 add_system_log("scanner", "info", "Scanners stopped by user")
-                            except Exception:
+                            except Exception as e:
                                 pass
                             scanners.clear()
                             log.info("All scanners stopped.")
@@ -189,7 +189,7 @@ def main():
             try:
                 set_bot_error(str(e))
                 add_system_log("bot", "error", f"Main loop error: {e}")
-            except Exception:
+            except Exception as e:
                 pass
             time.sleep(1)
 
