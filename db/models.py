@@ -34,6 +34,10 @@ class Trade(Base):
     current_price = Column(Numeric(10, 4))
     ib_fill_price = Column(Numeric(10, 4))
     ib_order_id = Column(Integer)
+    ib_perm_id = Column(Integer)       # IB permanent order ID (survives restarts)
+    ib_tp_perm_id = Column(Integer)    # TP bracket leg permanent ID
+    ib_sl_perm_id = Column(Integer)    # SL bracket leg permanent ID
+    ib_con_id = Column(Integer)        # IB contract ID (unique per option)
 
     pnl_pct = Column(Numeric(8, 4), default=0)
     pnl_usd = Column(Numeric(12, 4), default=0)

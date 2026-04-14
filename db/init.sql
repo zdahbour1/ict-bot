@@ -37,6 +37,10 @@ CREATE TABLE IF NOT EXISTS trades (
     current_price       NUMERIC(10,4),                          -- updated every 5s
     ib_fill_price       NUMERIC(10,4),                          -- actual IB execution price
     ib_order_id         INT,
+    ib_perm_id          INT,                                    -- IB permanent order ID (survives restarts)
+    ib_tp_perm_id       INT,                                    -- TP bracket leg permanent ID
+    ib_sl_perm_id       INT,                                    -- SL bracket leg permanent ID
+    ib_con_id           INT,                                    -- IB contract ID (unique per option)
 
     -- P&L (live, updated every 5s)
     pnl_pct             NUMERIC(8,4)    DEFAULT 0,

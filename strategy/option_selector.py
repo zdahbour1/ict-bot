@@ -73,11 +73,15 @@ def select_and_enter(client, ticker: str = "QQQ") -> dict | None:
         "entry_time":   now_pt,
     }
 
-    # Store bracket order IDs for later SL updates
+    # Store IB IDs for reconciliation and bracket management
     if isinstance(order_result, dict):
         trade["ib_order_id"] = order_result.get("order_id")
+        trade["ib_perm_id"] = order_result.get("perm_id")
+        trade["ib_con_id"] = order_result.get("con_id")
         trade["ib_tp_order_id"] = order_result.get("tp_order_id")
+        trade["ib_tp_perm_id"] = order_result.get("tp_perm_id")
         trade["ib_sl_order_id"] = order_result.get("sl_order_id")
+        trade["ib_sl_perm_id"] = order_result.get("sl_perm_id")
 
     log.info(
         f"[{ticker}] Trade opened: {option_symbol} | "
@@ -145,8 +149,12 @@ def select_and_enter_put(client, ticker: str = "QQQ") -> dict | None:
 
     if isinstance(order_result, dict):
         trade["ib_order_id"] = order_result.get("order_id")
+        trade["ib_perm_id"] = order_result.get("perm_id")
+        trade["ib_con_id"] = order_result.get("con_id")
         trade["ib_tp_order_id"] = order_result.get("tp_order_id")
+        trade["ib_tp_perm_id"] = order_result.get("tp_perm_id")
         trade["ib_sl_order_id"] = order_result.get("sl_order_id")
+        trade["ib_sl_perm_id"] = order_result.get("sl_perm_id")
 
     log.info(
         f"[{ticker}] PUT trade opened: {option_symbol} | "

@@ -33,27 +33,29 @@ def startup_reconciliation(client, exit_manager):
             pass
         return
 
-    # Build lookup of IB positions by cleaned symbol
+    # Build lookup of IB positions by conId (primary) and symbol (fallback)
+    ib_by_con_id = {}
     ib_by_symbol = {}
     for p in ib_positions:
+        con_id = p.get("conId")
         sym = p.get("symbol", "").replace(" ", "")
-        if sym and abs(p.get("qty", 0)) > 0:
-            ib_by_symbol[sym] = p
+        if abs(p.get("qty", 0)) > 0:
+            if con_id:
+                ib_by_con_id[con_id] = p
+            if sym:
+                ib_by_symbol[sym] = p
 
-    # Build lookup of bot's open trades
-    bot_by_symbol = {}
-    for t in exit_manager.open_trades:
-        bot_by_symbol[t["symbol"]] = t
+    # Build lookup of bot's open trades by conId (primary) and symbol (fallback)
+    bot_trades = list(exit_manager.open_trades)
 
-    # ── SAFETY CHECK: if IB returns 0 positions but we have DB trades,
-    # something is wrong (likely IB data issue). ABORT. ──
-    if len(ib_by_symbol) == 0 and len(bot_by_symbol) > 0:
-        log.warning(f"[RECONCILE] SAFETY: IB returned 0 positions but DB has {len(bot_by_symbol)} open trades. "
-                    f"This is suspicious — ABORTING reconciliation to protect open trades.")
+    # ── SAFETY CHECK: if IB returns 0 positions but we have DB trades, ABORT ──
+    if len(ib_by_con_id) == 0 and len(ib_by_symbol) == 0 and len(bot_trades) > 0:
+        log.warning(f"[RECONCILE] SAFETY: IB returned 0 positions but bot has {len(bot_trades)} open trades. "
+                    f"ABORTING reconciliation to protect open trades.")
         try:
             from db.writer import add_system_log
             add_system_log("reconciliation", "warn",
-                          f"Aborted: IB returned 0 positions but DB has {len(bot_by_symbol)} trades")
+                          f"Aborted: IB returned 0 positions but bot has {len(bot_trades)} trades")
         except Exception:
             pass
         log.info("Reconciliation complete: ABORTED (safety check)")
@@ -61,92 +63,106 @@ def startup_reconciliation(client, exit_manager):
         exit_manager._save_trades()
         return
 
-    log.info(f"[RECONCILE] IB has {len(ib_by_symbol)} positions, DB has {len(bot_by_symbol)} open trades")
+    log.info(f"[RECONCILE] IB: {len(ib_by_con_id)} positions (by conId), "
+             f"{len(ib_by_symbol)} (by symbol). Bot: {len(bot_trades)} open trades")
 
     # ── 1. DB trades with no IB position → closed while bot was down ──
-    for sym, trade in list(bot_by_symbol.items()):
-        if sym not in ib_by_symbol:
-            ticker = trade.get("ticker", "UNK")
-            log.info(f"[RECONCILE] {ticker} {sym} — in DB but not on IB → marking closed")
+    for trade in list(bot_trades):
+        sym = trade["symbol"]
+        con_id = trade.get("ib_con_id")
+        ticker = trade.get("ticker", "UNK")
 
-            # Check IB fills for exit price
-            exit_price = trade.get("entry_price", 0)
+        # Match by conId first (exact), then by symbol (fallback)
+        matched = False
+        if con_id and con_id in ib_by_con_id:
+            matched = True
+        elif sym in ib_by_symbol:
+            matched = True
+
+        if matched:
+            continue  # Position exists on IB — will handle in step 3
+
+        # Not found on IB
+        if not con_id:
+            log.warning(f"[RECONCILE] {ticker} {sym} — no conId stored, cannot verify. Keeping open.")
+            continue
+
+        log.info(f"[RECONCILE] {ticker} {sym} (conId={con_id}) — not on IB → marking closed")
+
+        # Check IB fills for exit price
+        exit_price = trade.get("entry_price", 0)
+        try:
+            fill = client.check_recent_fills(sym)
+            if fill and fill.get("price"):
+                exit_price = fill["price"]
+                log.info(f"[RECONCILE] Found IB fill: ${exit_price:.2f}")
+        except Exception:
+            pass
+
+        entry_price = trade.get("entry_price", 0)
+        pnl_pct = (exit_price - entry_price) / entry_price if entry_price > 0 else 0
+        result = "WIN" if pnl_pct > 0 else "LOSS" if pnl_pct < 0 else "SCRATCH"
+
+        # Update DB
+        if trade.get("db_id"):
             try:
-                fill = client.check_recent_fills(sym)
-                if fill and fill.get("price"):
-                    exit_price = fill["price"]
-                    log.info(f"[RECONCILE] Found IB fill: ${exit_price:.2f}")
+                from db.writer import close_trade
+                close_trade(trade["db_id"], exit_price, result, "BRACKET/CLOSED (BOT OFFLINE)", {})
             except Exception:
                 pass
 
-            entry_price = trade.get("entry_price", 0)
-            pnl_pct = (exit_price - entry_price) / entry_price if entry_price > 0 else 0
-            result = "WIN" if pnl_pct > 0 else "LOSS" if pnl_pct < 0 else "SCRATCH"
-
-            # Update DB
-            if trade.get("db_id"):
-                try:
-                    from db.writer import close_trade
-                    close_trade(trade["db_id"], exit_price, result, "BRACKET/CLOSED (BOT OFFLINE)", {})
-                except Exception:
-                    pass
-
-            # Remove from open trades
-            exit_manager.open_trades.remove(trade)
-            log.info(f"[RECONCILE] {ticker} closed — {result} P&L={pnl_pct:+.1%}")
+        # Remove from open trades
+        exit_manager.open_trades.remove(trade)
+        log.info(f"[RECONCILE] {ticker} closed — {result} P&L={pnl_pct:+.1%}")
 
     # ── 2. IB positions with no DB trade → orphans to adopt ──
-    for sym, pos in ib_by_symbol.items():
-        if sym not in bot_by_symbol:
-            ticker = pos.get("ticker", "UNK")
-            qty = int(abs(pos["qty"]))
-            avg_cost = pos.get("avg_cost", 0)
-            right = pos.get("right", "C")
-            direction = "SHORT" if right == "P" else "LONG"
+    bot_con_ids = {t.get("ib_con_id") for t in exit_manager.open_trades if t.get("ib_con_id")}
+    bot_symbols = {t["symbol"] for t in exit_manager.open_trades}
 
-            log.info(f"[RECONCILE] {ticker} {sym} — on IB but not in DB → adopting")
+    for pos in ib_positions:
+        con_id = pos.get("conId")
+        sym = pos.get("symbol", "").replace(" ", "")
+        if abs(pos.get("qty", 0)) == 0:
+            continue
+        # Skip if already tracked (by conId or symbol)
+        if con_id in bot_con_ids or sym in bot_symbols:
+            continue
 
-            trade = {
-                "ticker": ticker,
-                "symbol": sym,
-                "contracts": qty,
-                "entry_price": avg_cost,
-                "profit_target": avg_cost * (1 + config.PROFIT_TARGET),
-                "stop_loss": avg_cost * (1 - config.STOP_LOSS),
-                "entry_time": datetime.now(PT),
-                "direction": direction,
-                "_adopted": True,
-                "peak_pnl_pct": 0.0,
-                "dynamic_sl_pct": -config.STOP_LOSS,
-            }
+        ticker = pos.get("ticker", "UNK")
+        qty = int(abs(pos["qty"]))
+        avg_cost = pos.get("avg_cost", 0)
+        right = pos.get("right", "C")
+        direction = "SHORT" if right == "P" else "LONG"
 
-            # Add to exit manager
-            exit_manager.add_trade(trade)
+        log.info(f"[RECONCILE] {ticker} {sym} (conId={con_id}) — on IB but not in DB → adopting")
 
-            # Check if bracket orders exist on IB for this position
-            has_brackets = _check_brackets_exist(client, sym)
-            if not has_brackets and config.USE_BRACKET_ORDERS:
-                # Create bracket orders
-                try:
-                    tp_price = round(avg_cost * (1 + config.PROFIT_TARGET), 2)
-                    sl_price = round(avg_cost * (1 - config.STOP_LOSS), 2)
-                    log.info(f"[RECONCILE] Creating bracket orders for {sym}: TP=${tp_price} SL=${sl_price}")
-                    # Note: can't create brackets for existing positions easily with IB
-                    # Would need to place separate TP limit + SL stop orders
-                    # For now, just log — the exit manager will handle it
-                    log.info(f"[RECONCILE] Adopted {ticker} — exit manager will monitor")
-                except Exception as e:
-                    log.warning(f"[RECONCILE] Failed to create brackets for {sym}: {e}")
+        trade = {
+            "ticker": ticker,
+            "symbol": sym,
+            "contracts": qty,
+            "entry_price": avg_cost,
+            "profit_target": avg_cost * (1 + config.PROFIT_TARGET),
+            "stop_loss": avg_cost * (1 - config.STOP_LOSS),
+            "entry_time": datetime.now(PT),
+            "direction": direction,
+            "ib_con_id": con_id,
+            "_adopted": True,
+            "peak_pnl_pct": 0.0,
+            "dynamic_sl_pct": -config.STOP_LOSS,
+        }
 
-            log.info(f"[RECONCILE] Adopted {ticker} {sym}: {qty}x @ ${avg_cost:.2f} {direction}")
+        # Add to exit manager
+        exit_manager.add_trade(trade)
+        log.info(f"[RECONCILE] Adopted {ticker} {sym} (conId={con_id}): {qty}x @ ${avg_cost:.2f} {direction}")
 
-    # ── 3. Matched trades — verify brackets, update counts ──
+    # ── 3. Matched trades — verify quantities ──
     matched = 0
-    for sym in bot_by_symbol:
-        if sym in ib_by_symbol:
+    for trade in exit_manager.open_trades:
+        con_id = trade.get("ib_con_id")
+        sym = trade["symbol"]
+        ib_pos = ib_by_con_id.get(con_id) if con_id else ib_by_symbol.get(sym)
+        if ib_pos:
             matched += 1
-            trade = bot_by_symbol[sym]
-            ib_pos = ib_by_symbol[sym]
             ib_qty = int(abs(ib_pos.get("qty", 0)))
             bot_qty = trade.get("contracts", 0)
 
@@ -155,11 +171,12 @@ def startup_reconciliation(client, exit_manager):
                            f"bot={bot_qty} IB={ib_qty}")
                 trade["contracts"] = ib_qty
 
-    orphans = len(ib_by_symbol) - matched
-    phantoms = len(bot_by_symbol) - matched
+            # Backfill conId if missing
+            if not trade.get("ib_con_id") and ib_pos.get("conId"):
+                trade["ib_con_id"] = ib_pos["conId"]
+                log.info(f"[RECONCILE] Backfilled conId={ib_pos['conId']} for {trade.get('ticker')}")
 
-    log.info(f"Reconciliation complete: {matched} matched, "
-             f"{orphans} adopted, {phantoms} closed")
+    log.info(f"Reconciliation complete: {matched} matched")
     log.info("=" * 50)
 
     exit_manager._save_trades()

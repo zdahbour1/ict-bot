@@ -391,13 +391,17 @@ class IBClient:
             else:
                 log.warning(f"[IB] Order {trade.order.orderId} not filled after 17s — status: {trade.orderStatus.status}")
 
+        perm_id = trade.order.permId
+        con_id = contract.conId
         log.info(f"[IB] {action} {desc.upper()}: {contracts}x {option_symbol} — "
-                 f"orderId={trade.order.orderId} status={status} "
-                 f"avgFillPrice=${fill_price:.2f}")
+                 f"orderId={trade.order.orderId} permId={perm_id} conId={con_id} "
+                 f"status={status} fill=${fill_price:.2f}")
         return {
             "symbol": option_symbol,
             "contracts": contracts,
             "order_id": trade.order.orderId,
+            "perm_id": perm_id,
+            "con_id": con_id,
             "status": status,
             "fill_price": fill_price,
         }
@@ -459,16 +463,26 @@ class IBClient:
         fill_price = parent_trade.orderStatus.avgFillPrice
         status = parent_trade.orderStatus.status
 
+        perm_id = parent_trade.order.permId
+        tp_perm_id = tp_trade.order.permId
+        sl_perm_id = sl_trade.order.permId
+        con_id = contract.conId
+
         log.info(f"[IB] BRACKET {action}: {contracts}x {option_symbol} — "
-                 f"parent={parent.orderId} status={status} fill=${fill_price:.2f} "
-                 f"TP={tp_order.orderId}@${tp_price:.2f} SL={sl_order.orderId}@${sl_price:.2f}")
+                 f"parent={parent.orderId} permId={perm_id} conId={con_id} "
+                 f"status={status} fill=${fill_price:.2f} "
+                 f"TP={tp_order.orderId}(perm={tp_perm_id}) SL={sl_order.orderId}(perm={sl_perm_id})")
 
         return {
             "symbol": option_symbol,
             "contracts": contracts,
             "order_id": parent.orderId,
+            "perm_id": perm_id,
+            "con_id": con_id,
             "tp_order_id": tp_order.orderId,
+            "tp_perm_id": tp_perm_id,
             "sl_order_id": sl_order.orderId,
+            "sl_perm_id": sl_perm_id,
             "status": status,
             "fill_price": fill_price,
         }
