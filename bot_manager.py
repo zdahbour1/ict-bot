@@ -60,10 +60,6 @@ class BotManagerHandler(BaseHTTPRequestHandler):
             self._handle_start()
         elif self.path == "/stop":
             self._handle_stop()
-        elif self.path == "/pause-scans":
-            self._handle_scan_control("pause")
-        elif self.path == "/resume-scans":
-            self._handle_scan_control("resume")
         elif self.path == "/close-trade":
             self._handle_close_trade()
         else:
@@ -173,36 +169,13 @@ class BotManagerHandler(BaseHTTPRequestHandler):
 
     def _handle_scan_control(self, action: str):
         global _bot_process
-        if not _bot_process or _bot_process.poll() is not None:
-            self._send_json({"error": "Bot is not running"}, 400)
-            return
-
-        scans_active_file = os.path.join(BOT_DIR, ".scans_active")
-
-        if action == "pause":
-            control_file = os.path.join(BOT_DIR, ".pause_scans")
-            # Remove active marker
-            if os.path.exists(scans_active_file):
-                os.remove(scans_active_file)
-        else:
-            control_file = os.path.join(BOT_DIR, ".resume_scans")
-            # Set active marker
-            with open(scans_active_file, "w") as f:
-                f.write("active")
-
-        with open(control_file, "w") as f:
-            f.write(action)
-        log.info(f"Scan control: {action}")
-        self._send_json({"status": f"scans_{action}d"})
-
     def _handle_status(self):
         global _bot_process, _bot_start_time
-        # Scans are OFF unless .scans_active file exists
-        scans_active = os.path.exists(os.path.join(BOT_DIR, ".scans_active"))
+        # Sidecar only knows if process is alive — DB has the real state
         if _bot_process and _bot_process.poll() is None:
             self._send_json({
                 "status": "running",
-                "scans_active": scans_active,
+                "scans_active": False,  # DB has the real state
                 "pid": _bot_process.pid,
                 "started_at": _bot_start_time.isoformat() if _bot_start_time else None,
             })
@@ -280,11 +253,6 @@ class BotManagerHandler(BaseHTTPRequestHandler):
 
         pid = _bot_process.pid
         log.info(f"Stopping bot (PID: {pid})...")
-
-        # Clean up scan active marker
-        scans_active_file = os.path.join(BOT_DIR, ".scans_active")
-        if os.path.exists(scans_active_file):
-            os.remove(scans_active_file)
 
         # Write stop file for graceful shutdown (works on Windows)
         stop_file = os.path.join(BOT_DIR, ".bot_stop")

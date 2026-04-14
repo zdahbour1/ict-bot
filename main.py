@@ -92,6 +92,12 @@ def main():
     )
     flask_thread.start()
 
+    # ── Clean up any stale control files from old file-based system ──
+    for f in [".bot_stop", ".pause_scans", ".resume_scans", ".scans_active"]:
+        path = os.path.join(os.path.dirname(__file__), f)
+        if os.path.exists(path):
+            os.remove(path)
+
     # ── Mark IB connected in DB ─────────────────────────
     try:
         from db.writer import set_ib_connected, set_bot_error, add_system_log
@@ -101,22 +107,14 @@ def main():
     except Exception:
         pass
 
-    # ── Check DB for scan state (restore on restart) ──
+    # ── Reset scan state on startup — user must explicitly start scans ──
     try:
-        from db.writer import get_bot_state
-        state = get_bot_state()
-        if state and state.get("scans_active"):
-            log.info("DB shows scans_active=True — starting scanners...")
-            for i, ticker in enumerate(config.TICKERS):
-                scanner = Scanner(client, exit_manager, ticker=ticker, scan_offset=i * 2)
-                scanner.start()
-                scanners.append(scanner)
-            log.info(f"Started {len(scanners)} scanner threads: {', '.join(config.TICKERS)}")
-            add_system_log("scanner", "info", f"Scanners started ({len(scanners)} tickers)")
-        else:
-            log.info("Scans not active — waiting for 'Start Scans' command.")
-    except Exception as e:
-        log.warning(f"Could not check scan state: {e}")
+        from db.writer import set_scans_active, set_stop_requested
+        set_scans_active(False)
+        set_stop_requested(False)
+        log.info("Scans not active — user must click 'Start Scans' in dashboard.")
+    except Exception:
+        pass
 
     # ── Main loop: read state from DB, process IB orders ──
     import time
