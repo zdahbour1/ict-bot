@@ -378,18 +378,55 @@ class Scanner:
                             except Exception as e:
                                 handle_error(f"scanner-{self.ticker}", "post_trade_thread_update", e)
                     except concurrent.futures.TimeoutError:
-                        # Order may still fill in background — keep pending flag
-                        log.warning(f"[{self.ticker}] Trade entry timed out (30s) — keeping pending, will not enter another.")
+                        # CRITICAL: Order may have been placed on IB but we timed out
+                        # waiting for the result. We MUST check if the order filled.
+                        log.warning(f"[{self.ticker}] Trade entry timed out (30s) — checking for orphaned IB order...")
                         self._errors_today += 1
+
+                        # Wait a bit more for the future to complete
+                        orphan_trade = None
+                        try:
+                            orphan_trade = future.result(timeout=5)  # Give 5 more seconds
+                        except (concurrent.futures.TimeoutError, Exception):
+                            pass
+
+                        if orphan_trade:
+                            # The order DID fill — we must track it
+                            log.warning(f"[{self.ticker}] Timeout recovery: trade completed after timeout! Adopting.")
+                            orphan_trade["signal"] = signal.get("signal_type", "UNKNOWN")
+                            orphan_trade["ict_entry"] = signal.get("entry_price")
+                            orphan_trade["ict_sl"] = signal.get("sl")
+                            orphan_trade["ict_tp"] = signal.get("tp")
+                            self.exit_manager.add_trade(orphan_trade)
+                            self._trades_today += 1
+                            self._last_trade_time = datetime.now(PT)
+                            log.info(f"[{self.ticker}] Orphaned trade adopted: {orphan_trade['symbol']}")
+                            handle_error(f"scanner-{self.ticker}", "trade_entry_timeout_recovered",
+                                        TimeoutError("Trade entry timed out but was recovered"),
+                                        context={"ticker": self.ticker, "symbol": orphan_trade.get("symbol")})
+                        else:
+                            # Order might still be pending on IB — check recent fills
+                            log.warning(f"[{self.ticker}] Could not recover trade — checking IB for fills...")
+                            try:
+                                fill = self.client.check_recent_fills(self.ticker)
+                                if fill:
+                                    log.error(f"[{self.ticker}] FOUND ORPHANED IB FILL: {fill}")
+                                    handle_error(f"scanner-{self.ticker}", "orphaned_ib_fill",
+                                                RuntimeError(f"Trade filled on IB but not tracked: {fill}"),
+                                                context={"ticker": self.ticker, "fill": str(fill)},
+                                                critical=True)
+                                    # The reconciliation will pick this up on next cycle
+                                else:
+                                    log.info(f"[{self.ticker}] No IB fills found — order may not have been placed.")
+                                    self._entry_pending = False  # Safe to clear since nothing filled
+                            except Exception as e3:
+                                handle_error(f"scanner-{self.ticker}", "check_orphan_fills", e3,
+                                            context={"ticker": self.ticker})
+
                         handle_error(f"scanner-{self.ticker}", "trade_entry_timeout",
                                     TimeoutError("Trade entry timed out after 30s"),
-                                    context={"ticker": self.ticker}, critical=True)
-                        try:
-                            from db.writer import log_error
-                            log_error(f"scanner-{self.ticker}", self.ticker, None,
-                                     "trade_entry_timeout", "Trade entry timed out after 30s")
-                        except Exception as e2:
-                            handle_error(f"scanner-{self.ticker}", "log_timeout_error", e2)
+                                    context={"ticker": self.ticker, "recovered": orphan_trade is not None},
+                                    critical=True)
                     except Exception as e:
                         self._entry_pending = False
                         self._errors_today += 1

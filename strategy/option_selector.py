@@ -52,11 +52,26 @@ def select_and_enter(client, ticker: str = "QQQ") -> dict | None:
     else:
         order_result = client.buy_call(option_symbol, contracts)
 
+    # ── Verify order result ─────────────────────────────────
+    if order_result is None:
+        log.error(f"[{ticker}] Order placement returned None — trade NOT opened")
+        return None
+
+    if not isinstance(order_result, dict):
+        log.error(f"[{ticker}] Order placement returned unexpected type: {type(order_result)}")
+        return None
+
+    order_status = order_result.get("status", "unknown")
+    if order_status not in ("Filled", "Submitted", "PreSubmitted"):
+        if not order_result.get("dry_run"):
+            log.warning(f"[{ticker}] Order status '{order_status}' — may not have filled. "
+                       f"Will track with pre-order quote as entry.")
+
     # ── Extract fill price ────────────────────────────────
-    if isinstance(order_result, dict) and order_result.get("fill_price", 0) > 0:
-        entry_price = order_result["fill_price"]
+    fill_price = order_result.get("fill_price", 0)
+    if fill_price and fill_price > 0:
+        entry_price = fill_price
         log.info(f"[{ticker}] Actual IB fill price: ${entry_price:.2f} (quote was ${pre_quote:.2f})")
-        # Recalculate TP/SL based on actual fill
         tp_price = round(entry_price * (1 + config.PROFIT_TARGET), 2)
         sl_price = round(entry_price * (1 - config.STOP_LOSS), 2)
     else:
@@ -127,8 +142,23 @@ def select_and_enter_put(client, ticker: str = "QQQ") -> dict | None:
     else:
         order_result = client.buy_put(option_symbol, contracts)
 
-    if isinstance(order_result, dict) and order_result.get("fill_price", 0) > 0:
-        entry_price = order_result["fill_price"]
+    # ── Verify order result ─────────────────────────────────
+    if order_result is None:
+        log.error(f"[{ticker}] PUT order placement returned None — trade NOT opened")
+        return None
+
+    if not isinstance(order_result, dict):
+        log.error(f"[{ticker}] PUT order placement returned unexpected type: {type(order_result)}")
+        return None
+
+    order_status = order_result.get("status", "unknown")
+    if order_status not in ("Filled", "Submitted", "PreSubmitted"):
+        if not order_result.get("dry_run"):
+            log.warning(f"[{ticker}] PUT order status '{order_status}' — may not have filled.")
+
+    fill_price = order_result.get("fill_price", 0)
+    if fill_price and fill_price > 0:
+        entry_price = fill_price
         log.info(f"[{ticker}] Actual IB fill price: ${entry_price:.2f} (quote was ${pre_quote:.2f})")
         tp_price = round(entry_price * (1 + config.PROFIT_TARGET), 2)
         sl_price = round(entry_price * (1 - config.STOP_LOSS), 2)
