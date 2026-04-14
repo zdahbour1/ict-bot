@@ -11,6 +11,12 @@ Responsibilities:
 
 The exit manager is the SINGLE AUTHORITY for closing trades.
 Bracket orders on IB are safety nets only.
+
+ERROR HANDLING RULES:
+- Every exception is captured with context (trade, symbol, operation)
+- Errors are logged to both Python logger and system_log DB table
+- No bare except/pass — every error is visible
+- Trade-level errors don't crash the monitoring loop
 """
 import logging
 import re
@@ -26,6 +32,7 @@ from strategy.exit_conditions import evaluate_exit, update_trailing_stop
 from strategy.exit_executor import execute_exit, execute_roll, cancel_bracket_orders, verify_position_exists
 from strategy.trade_logger import log_trade_result, close_trade_in_db, collect_exit_enrichment
 from strategy.reconciliation import periodic_reconciliation
+from strategy.error_handler import handle_error, safe_call
 import config
 
 log = logging.getLogger(__name__)
@@ -56,7 +63,9 @@ def _deserialize_trade(t: dict) -> dict:
             else:
                 dt = dt.astimezone(PT)
             t["entry_time"] = dt
-        except Exception:
+        except Exception as e:
+            handle_error("exit_manager", "deserialize_trade", e,
+                        {"symbol": t.get("symbol"), "entry_time_raw": entry})
             t["entry_time"] = datetime.now(PT)
     return t
 
@@ -92,7 +101,7 @@ class ExitManager:
             if self.open_trades:
                 log.info(f"Resumed {len(self.open_trades)} open trade(s) from previous session")
         except Exception as e:
-            log.warning(f"Could not load open trades: {e}")
+            handle_error("exit_manager", "load_trades", e, critical=True)
             self.open_trades = []
 
     def _save_trades(self):
@@ -100,14 +109,14 @@ class ExitManager:
             with open(TRADES_FILE, "w") as f:
                 json.dump([_serialize_trade(t) for t in self.open_trades], f, indent=2)
         except Exception as e:
-            log.warning(f"Could not save open trades: {e}")
+            handle_error("exit_manager", "save_trades", e, critical=True)
 
     def _clear_trades(self):
         try:
             if os.path.exists(TRADES_FILE):
                 os.remove(TRADES_FILE)
-        except Exception:
-            pass
+        except Exception as e:
+            handle_error("exit_manager", "clear_trades", e)
 
     # ── Trade management ──────────────────────────────────
     def add_trade(self, trade: dict):
@@ -116,6 +125,8 @@ class ExitManager:
         with self._lock:
             self.open_trades.append(trade)
             self._save_trades()
+
+        # Write to DB — this MUST succeed for trade integrity
         try:
             from db.writer import insert_trade
             db_id = insert_trade(trade, config.IB_ACCOUNT or "unknown")
@@ -123,9 +134,14 @@ class ExitManager:
                 trade["db_id"] = db_id
                 log.info(f"Trade saved to DB: id={db_id} {trade.get('ticker')} {trade['symbol']}")
             else:
-                log.warning(f"DB insert_trade returned None for {trade.get('ticker')}")
+                handle_error("exit_manager", "add_trade_db", RuntimeError("insert_trade returned None"),
+                           context={"ticker": trade.get("ticker"), "symbol": trade.get("symbol")},
+                           critical=True)
         except Exception as e:
-            log.warning(f"DB insert_trade failed: {e}")
+            handle_error("exit_manager", "add_trade_db", e,
+                        context={"ticker": trade.get("ticker"), "symbol": trade.get("symbol")},
+                        critical=True)
+
         log.info(f"Exit manager now tracking: {trade['symbol']}")
 
     def start(self):
@@ -141,11 +157,19 @@ class ExitManager:
         reconcile_counter = 0
         reconcile_interval = config.RECONCILIATION_INTERVAL_MIN * 60 // config.MONITOR_INTERVAL
         while not self._stop_event.is_set():
-            self._check_exits()
+            try:
+                self._check_exits()
+            except Exception as e:
+                handle_error("exit_manager", "check_exits_loop", e, critical=True)
+
             reconcile_counter += 1
             if reconcile_counter >= reconcile_interval:
                 reconcile_counter = 0
-                periodic_reconciliation(self.client, self)
+                try:
+                    periodic_reconciliation(self.client, self)
+                except Exception as e:
+                    handle_error("exit_manager", "periodic_reconciliation", e)
+
             time.sleep(config.MONITOR_INTERVAL)
 
     def _check_exits(self):
@@ -168,7 +192,8 @@ class ExitManager:
             try:
                 batch_prices = self.client.get_option_prices_batch(symbols)
             except Exception as e:
-                log.warning(f"Batch price fetch failed: {e}")
+                handle_error("exit_manager", "batch_price_fetch", e,
+                           context={"symbol_count": len(symbols)})
                 batch_prices = {}
 
             # ── Bulk DB update for priced trades ──────────
@@ -183,8 +208,9 @@ class ExitManager:
                             from db.writer import update_trade_price
                             update_trade_price(trade["db_id"], price, pnl, pnl_usd,
                                              trade.get("peak_pnl_pct", 0), trade.get("dynamic_sl_pct", -0.6))
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            handle_error("exit_manager", "update_trade_price", e,
+                                       context={"db_id": trade.get("db_id"), "ticker": trade.get("ticker")})
 
             # ── Process each trade ────────────────────────
             still_open = []
@@ -210,8 +236,10 @@ class ExitManager:
                         try:
                             self.client.update_bracket_sl(trade["ib_sl_order_id"], new_sl_price)
                             log.info(f"[{trade.get('ticker')}] Bracket SL → ${new_sl_price:.2f}")
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            handle_error("exit_manager", "update_bracket_sl", e,
+                                       context={"ticker": trade.get("ticker"),
+                                                "sl_order_id": trade.get("ib_sl_order_id")})
 
                     log.info(
                         f"Monitoring {trade['symbol']} | "
@@ -237,14 +265,25 @@ class ExitManager:
                             log.info(f"[{trade.get('ticker')}] Position confirmed closed on IB")
 
                         # Collect enrichment and log
-                        exit_enrichment = collect_exit_enrichment(self.client, trade)
+                        exit_enrichment = safe_call(
+                            collect_exit_enrichment, self.client, trade,
+                            component="exit_manager", operation="collect_exit_enrichment",
+                            default={}, context={"ticker": trade.get("ticker")}
+                        )
                         log_trade_result(trade, current_price, result, reason, exit_enrichment)
                         close_trade_in_db(trade, current_price, result, reason, exit_enrichment)
-                        send_trade_result_email(trade, result, current_price)
+
+                        safe_call(send_trade_result_email, trade, result, current_price,
+                                 component="exit_manager", operation="send_trade_result_email",
+                                 context={"ticker": trade.get("ticker")})
 
                         # Roll if needed
                         if should_roll:
-                            rolled = execute_roll(self.client, trade, pnl_pct)
+                            rolled = safe_call(
+                                execute_roll, self.client, trade, pnl_pct,
+                                component="exit_manager", operation="execute_roll",
+                                context={"ticker": trade.get("ticker")}
+                            )
                             if rolled:
                                 self.add_trade(rolled)
 
@@ -253,7 +292,10 @@ class ExitManager:
                         still_open.append(trade)
 
                 except Exception as e:
-                    log.error(f"Error monitoring {trade.get('symbol', '?')}: {e}")
+                    handle_error("exit_manager", "monitor_trade", e,
+                               context={"symbol": trade.get("symbol", "?"),
+                                        "ticker": trade.get("ticker", "?")},
+                               critical=True)
                     still_open.append(trade)
 
             self.open_trades = still_open
@@ -285,8 +327,15 @@ class ExitManager:
                         log.info(f"UI command executed: close {contracts}x {target['symbol']}")
                         complete_command(cmd["id"])
                     else:
-                        complete_command(cmd["id"], error="Trade not found in open trades")
+                        error_msg = f"Trade {cmd['trade_id']} not found in open trades"
+                        log.warning(f"UI command failed: {error_msg}")
+                        complete_command(cmd["id"], error=error_msg)
                 except Exception as e:
-                    complete_command(cmd["id"], error=str(e))
-        except Exception:
-            pass
+                    handle_error("exit_manager", "process_ui_command", e,
+                               context={"command_id": cmd.get("id"), "trade_id": cmd.get("trade_id")})
+                    try:
+                        complete_command(cmd["id"], error=str(e))
+                    except Exception as e2:
+                        handle_error("exit_manager", "complete_command_error", e2)
+        except Exception as e:
+            handle_error("exit_manager", "check_pending_commands", e)
