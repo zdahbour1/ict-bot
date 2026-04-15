@@ -47,28 +47,26 @@ class IBConnection:
         self._last_errors = {}
         self._last_errors_lock = threading.Lock()
 
-    def connect(self):
-        """Connect this IB instance. Call before start_event_loop()."""
-        log.info(f"[{self.label}] Connecting to IB at {config.IB_HOST}:{config.IB_PORT} "
-                 f"(clientId={self.client_id})...")
-        self.ib.connect(
-            host=config.IB_HOST,
-            port=config.IB_PORT,
-            clientId=self.client_id,
-            readonly=config.DRY_RUN,
-        )
-        self.ib.errorEvent += self._on_ib_error
-        self._connected = True
-        accounts = self.ib.managedAccounts()
-        log.info(f"[{self.label}] Connected to IB — clientId={self.client_id}, accounts={accounts}")
+    def start(self):
+        """Start the connection thread: connects to IB AND runs event loop.
 
-    def start_event_loop(self):
-        """Start the IB event loop + queue processing on a dedicated thread."""
+        CRITICAL: ib_async ties the asyncio event loop to the thread that
+        calls ib.connect(). Both connect() and the event loop (ib.sleep)
+        MUST run on the same thread. That's why we do both in _loop().
+        """
+        self._ready_event = threading.Event()
+        self._connect_error = None
         self._thread = threading.Thread(
             target=self._loop, daemon=True, name=f"ib-{self.label}"
         )
         self._thread.start()
-        log.info(f"[{self.label}] Event loop thread started")
+
+        # Wait for connection to establish (or fail)
+        if not self._ready_event.wait(timeout=30):
+            raise RuntimeError(f"[{self.label}] Connection timed out after 30s")
+        if self._connect_error:
+            raise self._connect_error
+        log.info(f"[{self.label}] Connection thread started and connected")
 
     def stop(self):
         """Stop the event loop and disconnect."""
@@ -84,7 +82,35 @@ class IBConnection:
         return self._connected and self.ib.isConnected()
 
     def _loop(self):
-        """Main loop: process queue items + pump IB events."""
+        """Connect to IB, then process queue + pump events.
+
+        Both connect and event processing happen on THIS thread so the
+        asyncio event loop stays on the same thread throughout.
+        """
+        # Step 1: Connect on this thread
+        try:
+            log.info(f"[{self.label}] Connecting to IB at {config.IB_HOST}:{config.IB_PORT} "
+                     f"(clientId={self.client_id})...")
+            self.ib.connect(
+                host=config.IB_HOST,
+                port=config.IB_PORT,
+                clientId=self.client_id,
+                readonly=config.DRY_RUN,
+            )
+            self.ib.errorEvent += self._on_ib_error
+            self._connected = True
+            accounts = self.ib.managedAccounts()
+            log.info(f"[{self.label}] Connected — clientId={self.client_id}, accounts={accounts}")
+        except Exception as e:
+            log.error(f"[{self.label}] Connection failed: {e}")
+            self._connect_error = e
+            self._ready_event.set()
+            return
+
+        # Signal that connection is ready
+        self._ready_event.set()
+
+        # Step 2: Event loop — process queue items + pump IB events
         while not self._stop_event.is_set():
             try:
                 self._process_queue()
@@ -204,18 +230,16 @@ class IBConnectionPool:
         idx = hash(ticker) % len(self.scanner_conns)
         return self.scanner_conns[idx]
 
-    def connect_all(self):
-        """Connect all IB instances sequentially (IB may reject concurrent connects)."""
-        for conn in self.all_connections:
-            conn.connect()
-        log.info(f"IBConnectionPool: {len(self.all_connections)} connections established "
-                 f"(1 exit + {len(self.scanner_conns)} scanner)")
+    def start_all(self):
+        """Start all connections (connect + event loop on same thread each).
 
-    def start_all_loops(self):
-        """Start event loop threads for each connection."""
+        Connections are started sequentially to avoid overwhelming IB.
+        Each connection blocks until connected before starting the next.
+        """
         for conn in self.all_connections:
-            conn.start_event_loop()
-        log.info(f"IBConnectionPool: {len(self.all_connections)} event loops running")
+            conn.start()  # Blocks until connected
+        log.info(f"IBConnectionPool: {len(self.all_connections)} connections active "
+                 f"(1 exit + {len(self.scanner_conns)} scanner)")
 
     def stop_all(self):
         """Stop all connections."""

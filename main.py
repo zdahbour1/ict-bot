@@ -53,8 +53,7 @@ def main():
         num_scanner_conns = max(1, min(4, (len(config.TICKERS) + 8) // 9))
         log.info(f"Creating IB connection pool: 1 exit + {num_scanner_conns} scanner connections")
         pool = IBConnectionPool(num_scanner_connections=num_scanner_conns)
-        pool.connect_all()
-        pool.start_all_loops()
+        pool.start_all()  # Each connection: connect + event loop on same thread
 
         # Exit manager gets a dedicated IBClient on the exit connection
         client = IBClient(pool.exit_conn, pool.contract_cache, pool.cache_lock)
