@@ -57,7 +57,55 @@ UPDATE trades SET status = 'closed', exit_price = :price, ... WHERE id = :trade_
 COMMIT;
 ```
 
-Status: **Tracked — implement alongside ARCH-001**
+Status: **Implemented** — close_trade uses SELECT FOR UPDATE, update_trade_price uses GREATEST
+
+### ARCH-003: Refactor into Clean, Small, Reusable Components
+**Principle**: Each module has a single responsibility, is independently testable, and communicates only through the DB. No module should be >200 lines. No duplicated logic.
+
+**Current code smells**:
+1. `ib_client.py` (~750 lines) — mixes connection management, order placement, market data, position queries, contract validation, error handling. Should be split into focused modules.
+2. `trade_entry_manager.py` (~275 lines) — has timeout recovery, orphan adoption, enrichment, thread status updates all in one class. Entry orchestration and IB recovery should be separate.
+3. `scanner.py` (~280 lines) — cleaner after ENH-006 refactor, but still handles data fetching, window checks, news filtering, signal logging, and email sending.
+4. `exit_manager.py` (~270 lines) — improved with ARCH-001 but still mixes monitoring loop, exit evaluation, price updates, UI commands, reconciliation scheduling, and heartbeat.
+5. Multiple files handle OCC symbol parsing independently (exit_manager._is_expired, TradeTable.tsx regex, reconciliation symbol matching).
+6. Config values scattered — some from config.py, some from DB settings, some hardcoded.
+
+**Proposed module structure** (refactor plan):
+
+```
+broker/
+  ib_pool.py          — Connection pool (exists, clean)
+  ib_client.py        — Split into:
+    ib_orders.py      — Order placement (bracket, simple, cancel)
+    ib_market_data.py — Price fetching, Greeks, VIX, batch pricing
+    ib_positions.py   — Position queries, fills checking
+    ib_contracts.py   — Contract validation, ATM lookup, OCC parsing
+    ib_client.py      — Thin facade combining above modules
+
+strategy/
+  signal_engine.py    — Signal detection (exists, clean)
+  trade_entry.py      — Entry orchestration (rename from trade_entry_manager)
+  exit_manager.py     — Monitoring loop + DB cache only
+  exit_conditions.py  — Exit logic (exists, clean)
+  exit_executor.py    — IB close operations (exists, improved)
+  trade_logger.py     — CSV + DB logging (exists)
+  reconciliation.py   — Two-pass sync (exists, improved)
+
+utils/
+  occ_parser.py       — Shared OCC symbol parsing/formatting
+  time_windows.py     — Market hours, trade windows, news filters
+  enrichment.py       — Trade enrichment (Greeks, indicators, VIX)
+```
+
+**Rules for refactoring**:
+- Each module <200 lines
+- No circular imports
+- All DB access goes through db/writer.py (single point of truth)
+- All IB access goes through ib_client.py facade
+- Shared utilities in utils/ (OCC parsing, time windows)
+- Each module independently testable
+
+Status: **Planned — implement after ARCH-001/002 testing is stable**
 
 ### BUG-038: QQQ 634 Call closed 3 times — negative position (-6 contracts)
 The QQQ 634 call was rolled (ENH-007 rolling logic), but after rolling, the old
