@@ -201,6 +201,42 @@ def get_analytics(
         """), params))
         streak_data = _serialize(streaks)[0] if streaks else {"max_win_streak": 0, "max_loss_streak": 0}
 
+        # ── P&L by day of week ──
+        pnl_by_day_of_week = _serialize(_rows_to_dicts(conn.execute(text(f"""
+            SELECT day_name, day_num,
+                   SUM(trades)::int AS trades,
+                   SUM(wins)::int AS wins,
+                   SUM(losses)::int AS losses,
+                   ROUND(SUM(total_pnl)::numeric, 2) AS pnl,
+                   ROUND(AVG(win_rate)::numeric, 1) AS win_rate
+            FROM v_pnl_by_day_of_week WHERE {date_filter}
+            GROUP BY day_name, day_num ORDER BY day_num
+        """), params)))
+
+        # ── P&L by signal type ──
+        pnl_by_signal_type = _serialize(_rows_to_dicts(conn.execute(text(f"""
+            SELECT signal_type,
+                   SUM(trades)::int AS trades,
+                   SUM(wins)::int AS wins,
+                   SUM(losses)::int AS losses,
+                   ROUND(SUM(total_pnl)::numeric, 2) AS pnl,
+                   ROUND(AVG(win_rate)::numeric, 1) AS win_rate
+            FROM v_pnl_by_signal_type WHERE {date_filter}
+            GROUP BY signal_type ORDER BY trades DESC
+        """), params)))
+
+        # ── Hold time distribution (bucketed into 5-min intervals) ──
+        hold_time_dist = _serialize(_rows_to_dicts(conn.execute(text(f"""
+            SELECT
+                FLOOR(hold_minutes / 5) * 5 AS bucket,
+                COUNT(*)::int AS trades,
+                ROUND(SUM(pnl_usd)::numeric, 2) AS pnl,
+                COUNT(*) FILTER (WHERE exit_result = 'WIN')::int AS wins
+            FROM v_trades_analytics
+            WHERE {date_filter} AND status = 'closed' AND hold_minutes IS NOT NULL
+            GROUP BY bucket ORDER BY bucket
+        """), params)))
+
         session.close()
         return {
             "start": start,
@@ -218,6 +254,9 @@ def get_analytics(
             "best_trade": best_trade,
             "worst_trade": worst_trade,
             "cumulative_pnl": cumulative,
+            "pnl_by_day_of_week": pnl_by_day_of_week,
+            "pnl_by_signal_type": pnl_by_signal_type,
+            "hold_time_dist": hold_time_dist,
         }
     finally:
         session.close()
@@ -232,6 +271,8 @@ def drilldown(
     hour_type: Optional[str] = "entry",  # "entry" or "exit"
     contract_type: Optional[str] = None,  # "Call" or "Put"
     exit_reason: Optional[str] = None,
+    day_of_week: Optional[int] = None,  # 1=Mon, 7=Sun (ISO day)
+    signal_type: Optional[str] = None,
 ):
     """Drill down into individual trades for a specific chart bar."""
     session = get_session()
@@ -264,6 +305,12 @@ def drilldown(
         if exit_reason:
             conditions.append("exit_reason = :exit_reason")
             params["exit_reason"] = exit_reason
+        if day_of_week is not None:
+            conditions.append("EXTRACT(ISODOW FROM entry_time_pt)::int = :day_of_week")
+            params["day_of_week"] = day_of_week
+        if signal_type:
+            conditions.append("COALESCE(signal_type, 'unknown') = :signal_type")
+            params["signal_type"] = signal_type
 
         where = " AND ".join(conditions)
 

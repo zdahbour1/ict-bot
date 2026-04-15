@@ -170,6 +170,47 @@ FROM v_trades_analytics
 GROUP BY trade_date, account;
 
 
+-- ── P&L by day of week (PT) ──
+DROP VIEW IF EXISTS v_pnl_by_day_of_week CASCADE;
+CREATE OR REPLACE VIEW v_pnl_by_day_of_week AS
+SELECT
+    trade_date,
+    EXTRACT(ISODOW FROM entry_time_pt)::int AS day_num,  -- 1=Mon, 7=Sun
+    to_char(entry_time_pt, 'Dy') AS day_name,
+    COUNT(*) AS trades,
+    COUNT(*) FILTER (WHERE exit_result = 'WIN') AS wins,
+    COUNT(*) FILTER (WHERE exit_result = 'LOSS') AS losses,
+    ROUND(COALESCE(SUM(pnl_usd), 0)::numeric, 2) AS total_pnl,
+    ROUND(AVG(pnl_usd)::numeric, 2) AS avg_pnl,
+    ROUND(
+        COUNT(*) FILTER (WHERE exit_result = 'WIN')::numeric /
+        NULLIF(COUNT(*) FILTER (WHERE status = 'closed'), 0) * 100,
+    1) AS win_rate
+FROM v_trades_analytics
+WHERE status = 'closed'
+GROUP BY trade_date, day_num, day_name;
+
+
+-- ── P&L by signal type ──
+DROP VIEW IF EXISTS v_pnl_by_signal_type CASCADE;
+CREATE OR REPLACE VIEW v_pnl_by_signal_type AS
+SELECT
+    trade_date,
+    COALESCE(signal_type, 'unknown') AS signal_type,
+    COUNT(*) AS trades,
+    COUNT(*) FILTER (WHERE exit_result = 'WIN') AS wins,
+    COUNT(*) FILTER (WHERE exit_result = 'LOSS') AS losses,
+    ROUND(COALESCE(SUM(pnl_usd), 0)::numeric, 2) AS total_pnl,
+    ROUND(AVG(pnl_usd)::numeric, 2) AS avg_pnl,
+    ROUND(
+        COUNT(*) FILTER (WHERE exit_result = 'WIN')::numeric /
+        NULLIF(COUNT(*) FILTER (WHERE status = 'closed'), 0) * 100,
+    1) AS win_rate
+FROM v_trades_analytics
+WHERE status = 'closed'
+GROUP BY trade_date, signal_type;
+
+
 -- ══════════════════════════════════════════════════════════════
 -- DONE — All views use Pacific Time consistently
 -- ══════════════════════════════════════════════════════════════

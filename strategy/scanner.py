@@ -2,6 +2,10 @@
 Live Scanner — runs every minute during market hours (6:30 AM - 1:00 PM PT).
 - Inside 07:00–09:00 PT  → signal email + trade entry
 - Outside that window    → signal email only (alert, no trade placed)
+
+Architecture: Scanner is a thin orchestrator that delegates to:
+  - SignalEngine: pure signal detection (no side effects)
+  - TradeEntryManager: trade entry decisions and execution
 """
 import logging
 import threading
@@ -9,17 +13,14 @@ import time
 from datetime import datetime, date
 import pytz
 import pandas as pd
-import numpy as np
 
 from data.provider import get_bars_1m
 from data.ib_provider import get_bars_1m_ib
 from data.aggregator import aggregate
 from strategy.levels import get_all_levels
-from strategy.ict_long import run_strategy
-from strategy.ict_short import run_strategy_short
-from strategy.option_selector import select_and_enter, select_and_enter_put
-from strategy.indicators import compute_snapshot
-from strategy.error_handler import handle_error, safe_call
+from strategy.signal_engine import SignalEngine
+from strategy.trade_entry_manager import TradeEntryManager
+from strategy.error_handler import handle_error
 from alerts.emailer import send_signal_email
 import config
 
@@ -67,9 +68,9 @@ def _get_ema_bias(bars_1h: pd.DataFrame, now_pt: datetime) -> str:
     """Returns BULLISH, BEARISH, or NEUTRAL based on 1H 20 EMA."""
     if bars_1h.empty or len(bars_1h) < config.EMA_PERIOD_1H:
         return "NEUTRAL"
-    ema    = bars_1h["close"].ewm(span=config.EMA_PERIOD_1H, adjust=False).mean()
+    ema = bars_1h["close"].ewm(span=config.EMA_PERIOD_1H, adjust=False).mean()
     last_close = bars_1h["close"].iloc[-1]
-    last_ema   = ema.iloc[-1]
+    last_ema = ema.iloc[-1]
     if last_close > last_ema:
         return "BULLISH"
     elif last_close < last_ema:
@@ -77,24 +78,27 @@ def _get_ema_bias(bars_1h: pd.DataFrame, now_pt: datetime) -> str:
     return "NEUTRAL"
 
 
-MAX_TRADES_PER_DAY  = 8    # max trades per day
-
 class Scanner:
+    """
+    Thin orchestrator: fetch data → detect signals → attempt trades.
+
+    Delegates signal detection to SignalEngine (pure, no side effects)
+    and trade entry to TradeEntryManager (handles limits, cooldowns, IB).
+    """
+
     def __init__(self, client, exit_manager, ticker=None, scan_offset=0):
-        self.client          = client
-        self.exit_manager    = exit_manager
-        self.ticker          = ticker or config.TICKER
-        self._scan_offset    = scan_offset  # stagger scans across tickers
-        self._stop           = threading.Event()
-        self._scans_today    = 0
-        self._alerts_today   = 0
-        self._trades_today   = 0
-        self._errors_today   = 0
-        self._last_date      = None
-        self._seen_setups    = set()
-        self._last_trade_time = None  # PT datetime of last trade entry
-        self._last_exit_time  = None  # PT datetime of last trade exit (for cooldown)
-        self._entry_pending  = False  # True while an order is being placed
+        self.client = client
+        self.exit_manager = exit_manager
+        self.ticker = ticker or config.TICKER
+        self._scan_offset = scan_offset
+
+        # Delegate signal detection and trade entry
+        self.signal_engine = SignalEngine(self.ticker)
+        self.trade_manager = TradeEntryManager(client, exit_manager, self.ticker)
+
+        self._stop = threading.Event()
+        self._scans_today = 0
+        self._last_date = None
 
     def start(self):
         thread = threading.Thread(target=self._loop, daemon=True, name=f"scanner-{self.ticker}")
@@ -105,7 +109,6 @@ class Scanner:
         self._stop.set()
 
     def _loop(self):
-        # Stagger start to avoid all tickers hitting yfinance at once
         if self._scan_offset > 0:
             time.sleep(self._scan_offset)
         while not self._stop.is_set():
@@ -118,28 +121,21 @@ class Scanner:
     def _check_windows(self):
         """
         Returns (in_market, in_trade_window, is_weekend).
-        in_market       = True if within 6:30 AM – 1:00 PM PT (Mon–Fri)
-        in_trade_window = True if within trade window (Mon–Fri)
-        is_weekend      = True if Saturday or Sunday
-        Scanner runs 24/7 — emails only sent when in_market is True.
         """
         now_pt = datetime.now(PT)
 
         # Reset daily counters at midnight
         today = now_pt.date()
         if self._last_date != today:
-            self._last_date       = today
-            self._scans_today     = 0
-            self._alerts_today    = 0
-            self._trades_today    = 0
-            self._errors_today    = 0
-            self._seen_setups     = set()
-            self._last_trade_time = None
+            self._last_date = today
+            self._scans_today = 0
+            self.signal_engine.reset_daily()
+            self.trade_manager.reset_daily()
             log.info(f"New trading day: {today}. Counters reset.")
 
-        hour      = now_pt.hour
-        minute    = now_pt.minute
-        is_weekend = now_pt.weekday() >= 5  # 5=Saturday, 6=Sunday
+        hour = now_pt.hour
+        minute = now_pt.minute
+        is_weekend = now_pt.weekday() >= 5
 
         in_market = (
             not is_weekend and
@@ -157,34 +153,18 @@ class Scanner:
         return in_market, in_trade_window, is_weekend
 
     def _scan(self):
-        # Clear pending flag if trade is now tracked, or after 2 min timeout
-        if self._entry_pending:
-            ticker_in_open = any(
-                t.get("ticker") == self.ticker for t in self.exit_manager.open_trades
-            )
-            if ticker_in_open:
-                self._entry_pending = False  # trade confirmed in exit manager
-            elif self._last_trade_time:
-                # Auto-clear if pending for more than 2 minutes (entry probably failed)
-                elapsed = (datetime.now(PT) - self._last_trade_time).total_seconds()
-                if elapsed > 120:
-                    log.warning(f"[{self.ticker}] Entry pending flag stuck for {elapsed:.0f}s — clearing")
-                    self._entry_pending = False
+        # ── Housekeeping: check pending state and trade closures ──
+        self.trade_manager.check_pending_state()
 
-        # Reset seen setups when a trade just closed (transition from in-trade to no-trade)
-        ticker_has_trade = any(
-            t.get("ticker") == self.ticker for t in self.exit_manager.open_trades
-        )
-        if getattr(self, '_was_in_trade', False) and not ticker_has_trade:
-            self._last_exit_time = datetime.now(PT)
-            log.info(f"[{self.ticker}] Trade closed — cooldown {config.COOLDOWN_MINUTES} min before next entry.")
-            self._seen_setups = set()
-            self._entry_pending = False
-        self._was_in_trade = ticker_has_trade
+        # Detect trade closures → set cooldown, clear signal engine setups
+        was_in_trade = self.trade_manager._was_in_trade
+        self.trade_manager.check_trade_closed()
+        if was_in_trade and not self.trade_manager._was_in_trade:
+            self.signal_engine.clear_seen_setups()
 
         in_market, in_trade_window, is_weekend = self._check_windows()
 
-        now_pt  = datetime.now(PT)
+        now_pt = datetime.now(PT)
         now_str = now_pt.strftime('%H:%M')
 
         if is_weekend:
@@ -206,9 +186,9 @@ class Scanner:
                 f"scanner-{self.ticker}", self.ticker, "scanning",
                 f"Scanning at {now_str} PT [{mode}]",
                 scans_today=self._scans_today,
-                trades_today=self._trades_today,
-                alerts_today=self._alerts_today,
-                error_count=self._errors_today,
+                trades_today=self.trade_manager.trades_today,
+                alerts_today=self.signal_engine.alerts_today,
+                error_count=self.trade_manager.errors_today,
             )
         except Exception as e:
             handle_error(f"scanner-{self.ticker}", "update_thread_status", e)
@@ -235,237 +215,63 @@ class Scanner:
             log.warning("Not enough bars after aggregation.")
             return
 
-        # Scan last 120 bars (2 hours) for setups
-        bars_scan = bars_1m.iloc[-120:]
-
         # ── Compute significant levels ───────────────────
         levels = get_all_levels(bars_1m, bars_1h, bars_4h)
         if not levels:
             log.warning("No levels computed. Skipping.")
             return
 
-        # ── EMA trend bias ────────────────────────────────
-        ema_bias = _get_ema_bias(bars_1h, datetime.now(PT))
-        log.info(f"1H EMA bias: {ema_bias}")
-
-        # ── Run ICT long + short strategies ─────────────
-        signals_long  = run_strategy(
-            bars_scan, bars_1h, bars_4h, levels,
-            alerts_today=self._alerts_today
-        )
-        signals_short = run_strategy_short(
-            bars_scan, bars_1h, bars_4h, levels,
-            alerts_today=self._alerts_today,
-            max_alerts=config.MAX_ALERTS_PER_DAY
-        )
-
-        # EMA filter removed — all signals allowed in both directions
+        # ── EMA trend bias (informational) ────────────────
+        ema_bias = _get_ema_bias(bars_1h, now_pt)
         log.info(f"EMA bias: {ema_bias} (informational only — not filtering signals)")
-        signals = signals_long + signals_short
 
-        # ── Deduplicate signals by (signal_type, entry_price) ─
-        # Keeps only the first signal per unique type+entry combo
-        # prevents duplicate emails when same setup fires from
-        # slightly different SL levels
-        seen_combos = {}
-        deduped = []
-        for sig in signals:
-            key = (sig["signal_type"], round(sig["entry_price"], 2))
-            if key not in seen_combos:
-                seen_combos[key] = True
-                deduped.append(sig)
-            else:
-                log.info(f"DUPLICATE SIGNAL filtered: {sig['signal_type']} @ ${sig['entry_price']:.2f} — already queued.")
-        signals = deduped
+        # ── Detect signals (pure, no side effects) ────────
+        signals = self.signal_engine.detect(bars_1m, bars_1h, bars_4h, levels)
 
         # ── Process signals ──────────────────────────────
         for signal in signals:
-            setup_id = signal["setup_id"]
-            if setup_id in self._seen_setups:
-                continue  # already traded this setup
-
-            signal["ticker"] = self.ticker
-
             log.info(
                 f"{'='*55}\n"
-                f"[{self.ticker}] ICT SIGNAL: {signal['signal_type']} [{mode}]\n"
-                f"Entry:  ${signal['entry_price']:.2f}\n"
-                f"SL:     ${signal['sl']:.2f}\n"
-                f"TP:     ${signal['tp']:.2f}\n"
-                f"Raided: {signal['raid']['raided_level']} "
-                f"@ ${signal['raid']['raided_price']:.2f}\n"
+                f"[{self.ticker}] ICT SIGNAL: {signal.signal_type} [{mode}]\n"
+                f"Entry:  ${signal.entry_price:.2f}\n"
+                f"SL:     ${signal.sl:.2f}\n"
+                f"TP:     ${signal.tp:.2f}\n"
+                f"Raided: {signal.details.get('raid', {}).get('raided_level', 'N/A')} "
+                f"@ ${signal.details.get('raid', {}).get('raided_price', 0):.2f}\n"
                 f"{'='*55}"
             )
 
             trade = None
 
             if in_trade_window:
-                # ── Check: already in a trade for THIS ticker? ─
-                ticker_has_open = any(
-                    t.get("ticker") == self.ticker for t in self.exit_manager.open_trades
-                )
-                if ticker_has_open or self._entry_pending:
-                    log.info(f"[{self.ticker}] Already has an open trade — skipping entry.")
-                    signal["alert_only"] = True
-
-                else:
-                    # ── Check: daily trade limit ──────────────
-                    if self._trades_today >= MAX_TRADES_PER_DAY:
-                        log.info(f"Max trades per day ({MAX_TRADES_PER_DAY}) reached — skipping entry.")
-                        continue
-
-                    # ── Check: cooldown after last trade exit ──
-                    if self._last_exit_time is not None:
-                        mins_since_exit = (datetime.now(PT) - self._last_exit_time).total_seconds() / 60
-                        if mins_since_exit < config.COOLDOWN_MINUTES:
-                            remaining = config.COOLDOWN_MINUTES - mins_since_exit
-                            log.info(f"[{self.ticker}] Cooldown active — {remaining:.1f} min remaining before next entry.")
-                            continue
-
-                    # ── Enter the trade (with timeout) ────────
-                    try:
-                        import concurrent.futures
-                        self._entry_pending = True
-                        direction = signal.get("direction", "LONG")
-                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                            if direction == "SHORT":
-                                future = pool.submit(select_and_enter_put, self.client, self.ticker)
-                            else:
-                                future = pool.submit(select_and_enter, self.client, self.ticker)
-                            trade = future.result(timeout=30)  # 30s max for option entry
-
-                        if trade:
-                            # ── Validate trade has IB order confirmation ──
-                            if not config.DRY_RUN and not trade.get("ib_order_id") and not trade.get("ib_perm_id"):
-                                log.error(f"[{self.ticker}] Trade dict has no IB order/perm ID — "
-                                          f"refusing to track. Order may not have been placed.")
-                                handle_error(f"scanner-{self.ticker}", "trade_no_ib_id",
-                                             RuntimeError("Trade returned without IB order identifiers"),
-                                             context={"ticker": self.ticker,
-                                                      "trade_keys": list(trade.keys()),
-                                                      "status": trade.get("status")},
-                                             critical=True)
-                                self._entry_pending = False
-                                continue
-
-                            trade["signal"]    = signal["signal_type"]
-                            trade["ict_entry"] = signal["entry_price"]
-                            trade["ict_sl"]    = signal["sl"]
-                            trade["ict_tp"]    = signal["tp"]
-
-                            # ── Entry-time enrichment ─────────
-                            ctx = {"ticker": self.ticker, "symbol": trade.get("symbol")}
-                            trade["entry_indicators"] = safe_call(
-                                compute_snapshot, bars_1m,
-                                component=f"scanner-{self.ticker}", operation="compute_snapshot",
-                                default={}, context=ctx)
-                            trade["entry_stock_price"] = safe_call(
-                                self.client.get_realtime_equity_price, self.ticker,
-                                component=f"scanner-{self.ticker}", operation="get_equity_price",
-                                default=None, context=ctx)
-                            trade["entry_greeks"] = safe_call(
-                                self.client.get_option_greeks, trade["symbol"],
-                                component=f"scanner-{self.ticker}", operation="get_greeks",
-                                default={}, context=ctx)
-                            trade["entry_vix"] = safe_call(
-                                self.client.get_vix,
-                                component=f"scanner-{self.ticker}", operation="get_vix",
-                                default=None, context=ctx)
-
-                            self.exit_manager.add_trade(trade)
-                            self._seen_setups.add(setup_id)  # only block after actual entry
-                            self._trades_today += 1
-                            self._last_trade_time = datetime.now(PT)
-                            log.info(f"[{self.ticker}] Trade #{self._trades_today}/{MAX_TRADES_PER_DAY} today opened.")
-                            # Immediately update DB with new trade count
-                            try:
-                                from db.writer import update_thread_status
-                                update_thread_status(
-                                    f"scanner-{self.ticker}", self.ticker, "idle",
-                                    f"Trade #{self._trades_today} opened",
-                                    scans_today=self._scans_today,
-                                    trades_today=self._trades_today,
-                                    alerts_today=self._alerts_today,
-                                    error_count=self._errors_today,
-                                )
-                            except Exception as e:
-                                handle_error(f"scanner-{self.ticker}", "post_trade_thread_update", e)
-                    except concurrent.futures.TimeoutError:
-                        # CRITICAL: Order may have been placed on IB but we timed out
-                        # waiting for the result. We MUST check if the order filled.
-                        log.warning(f"[{self.ticker}] Trade entry timed out (30s) — checking for orphaned IB order...")
-                        self._errors_today += 1
-
-                        # Wait a bit more for the future to complete
-                        orphan_trade = None
-                        try:
-                            orphan_trade = future.result(timeout=5)  # Give 5 more seconds
-                        except (concurrent.futures.TimeoutError, Exception):
-                            pass
-
-                        if orphan_trade:
-                            # The order DID fill — we must track it
-                            log.warning(f"[{self.ticker}] Timeout recovery: trade completed after timeout! Adopting.")
-                            orphan_trade["signal"] = signal.get("signal_type", "UNKNOWN")
-                            orphan_trade["ict_entry"] = signal.get("entry_price")
-                            orphan_trade["ict_sl"] = signal.get("sl")
-                            orphan_trade["ict_tp"] = signal.get("tp")
-                            self.exit_manager.add_trade(orphan_trade)
-                            self._trades_today += 1
-                            self._last_trade_time = datetime.now(PT)
-                            log.info(f"[{self.ticker}] Orphaned trade adopted: {orphan_trade['symbol']}")
-                            handle_error(f"scanner-{self.ticker}", "trade_entry_timeout_recovered",
-                                        TimeoutError("Trade entry timed out but was recovered"),
-                                        context={"ticker": self.ticker, "symbol": orphan_trade.get("symbol")})
-                        else:
-                            # Order might still be pending on IB — check recent fills
-                            log.warning(f"[{self.ticker}] Could not recover trade — checking IB for fills...")
-                            try:
-                                fill = self.client.check_recent_fills(self.ticker)
-                                if fill:
-                                    log.error(f"[{self.ticker}] FOUND ORPHANED IB FILL: {fill}")
-                                    handle_error(f"scanner-{self.ticker}", "orphaned_ib_fill",
-                                                RuntimeError(f"Trade filled on IB but not tracked: {fill}"),
-                                                context={"ticker": self.ticker, "fill": str(fill)},
-                                                critical=True)
-                                    # The reconciliation will pick this up on next cycle
-                                else:
-                                    log.info(f"[{self.ticker}] No IB fills found — order may not have been placed.")
-                                    self._entry_pending = False  # Safe to clear since nothing filled
-                            except Exception as e3:
-                                handle_error(f"scanner-{self.ticker}", "check_orphan_fills", e3,
-                                            context={"ticker": self.ticker})
-
-                        handle_error(f"scanner-{self.ticker}", "trade_entry_timeout",
-                                    TimeoutError("Trade entry timed out after 30s"),
-                                    context={"ticker": self.ticker, "recovered": orphan_trade is not None},
-                                    critical=True)
-                    except Exception as e:
-                        self._entry_pending = False
-                        self._errors_today += 1
-                        handle_error(f"scanner-{self.ticker}", "trade_entry", e,
-                                    context={"ticker": self.ticker}, critical=True)
+                # Attempt trade entry via TradeEntryManager
+                trade = self.trade_manager.enter(signal, bars_1m=bars_1m)
+                if trade:
+                    self.signal_engine.mark_used(signal.setup_id)
             else:
-                # ── Outside trade window: alert only ─────────
-                log.info("Signal outside trade window — sending alert-only email, no trade placed.")
-                signal["alert_only"] = True  # flag for emailer to note in subject
+                log.info("Signal outside trade window — alert only, no trade placed.")
 
-            # ── Send email only if a trade was actually opened ───────────
+            # ── Send email if a trade was opened ─────────
             if trade and in_market:
-                send_signal_email(signal, trade)
-            else:
-                log.info(f"Signal detected (no email — no trade placed): {signal['signal_type']} @ ${signal['entry_price']:.2f}")
+                # Convert Signal back to raw dict for emailer compatibility
+                raw_signal = signal.details.get("_raw", {})
+                raw_signal["ticker"] = self.ticker
+                send_signal_email(raw_signal, trade)
+            elif signals:
+                log.info(f"Signal detected (no email — no trade placed): "
+                         f"{signal.signal_type} @ ${signal.entry_price:.2f}")
 
-        # ── Post-scan: update thread status to idle ───────────
+        # ── Post-scan: update thread status to idle ───────
         try:
             from db.writer import update_thread_status
+            next_scan = (datetime.now(PT) + __import__('datetime').timedelta(seconds=60)).strftime('%H:%M')
             update_thread_status(
                 f"scanner-{self.ticker}", self.ticker, "idle",
-                f"Scan #{self._scans_today} done at {now_str} PT | {len(signals) if 'signals' in dir() else 0} signals | Next scan ~{(datetime.now(PT) + __import__('datetime').timedelta(seconds=60)).strftime('%H:%M')} PT",
+                f"Scan #{self._scans_today} done at {now_str} PT | {len(signals)} signals | Next ~{next_scan} PT",
                 scans_today=self._scans_today,
-                trades_today=self._trades_today,
-                alerts_today=self._alerts_today,
-                error_count=self._errors_today,
+                trades_today=self.trade_manager.trades_today,
+                alerts_today=self.signal_engine.alerts_today,
+                error_count=self.trade_manager.errors_today,
             )
         except Exception as e:
             handle_error(f"scanner-{self.ticker}", "post_scan_thread_update", e)

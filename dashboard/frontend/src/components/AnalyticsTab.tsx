@@ -306,6 +306,80 @@ export default function AnalyticsTab() {
         </ResponsiveContainer>
       </ChartCard>
 
+      {/* Row 5: Day of Week + Signal Type */}
+      <div className="grid grid-cols-2 gap-4 mb-4 mt-4">
+        <ChartCard title="P&L by Day of Week (click to drill down)">
+          <ResponsiveContainer width="100%" height={200}>
+            <BarChart data={(data.pnl_by_day_of_week || []).map((d: any) => ({
+              ...d, pnl: Number(d.pnl), trades: Number(d.trades), win_rate: Number(d.win_rate || 0),
+            }))}
+              onClick={(e: any) => {
+                const d = data.pnl_by_day_of_week?.[e?.activeTooltipIndex];
+                if (d) fetchDrilldown({ day_of_week: d.day_num }, `${d.day_name} Trades`);
+              }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#21262d" />
+              <XAxis dataKey="day_name" tick={{ fill: '#8b949e', fontSize: 11 }} />
+              <YAxis yAxisId="pnl" tick={{ fill: '#8b949e', fontSize: 11 }} tickFormatter={v => `$${v}`} />
+              <YAxis yAxisId="wr" orientation="right" tick={{ fill: '#8b949e', fontSize: 10 }} tickFormatter={v => `${v}%`} domain={[0, 100]} />
+              <Tooltip contentStyle={{ background: '#161b22', border: '1px solid #30363d', color: '#e1e4e8' }}
+                formatter={(v: any, name: any) => [name === 'win_rate' ? `${Number(v).toFixed(1)}%` : `$${Number(v).toFixed(0)}`, name === 'win_rate' ? 'Win Rate' : 'P&L']} />
+              <Bar yAxisId="pnl" dataKey="pnl" name="P&L" cursor="pointer">
+                {(data.pnl_by_day_of_week || []).map((e: any, i: number) => (
+                  <Cell key={i} fill={Number(e.pnl) >= 0 ? COLORS.green : COLORS.red} />
+                ))}
+              </Bar>
+              <Line yAxisId="wr" type="monotone" dataKey="win_rate" name="Win Rate" stroke={COLORS.yellow} strokeWidth={2} dot={{ r: 3 }} />
+            </BarChart>
+          </ResponsiveContainer>
+        </ChartCard>
+
+        <ChartCard title="P&L by Signal Type (click to drill down)">
+          <ResponsiveContainer width="100%" height={200}>
+            <BarChart data={(data.pnl_by_signal_type || []).map((d: any) => ({
+              ...d, pnl: Number(d.pnl), trades: Number(d.trades), win_rate: Number(d.win_rate || 0),
+            }))}
+              onClick={(e: any) => {
+                const d = data.pnl_by_signal_type?.[e?.activeTooltipIndex];
+                if (d) fetchDrilldown({ signal_type: d.signal_type }, `Signal: ${d.signal_type}`);
+              }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#21262d" />
+              <XAxis dataKey="signal_type" tick={{ fill: '#8b949e', fontSize: 10 }} />
+              <YAxis yAxisId="pnl" tick={{ fill: '#8b949e', fontSize: 11 }} tickFormatter={v => `$${v}`} />
+              <YAxis yAxisId="wr" orientation="right" tick={{ fill: '#8b949e', fontSize: 10 }} tickFormatter={v => `${v}%`} domain={[0, 100]} />
+              <Tooltip contentStyle={{ background: '#161b22', border: '1px solid #30363d', color: '#e1e4e8' }}
+                formatter={(v: any, name: any) => [name === 'win_rate' ? `${Number(v).toFixed(1)}%` : `$${Number(v).toFixed(0)}`, name === 'win_rate' ? 'Win Rate' : 'P&L']} />
+              <Bar yAxisId="pnl" dataKey="pnl" name="P&L" cursor="pointer">
+                {(data.pnl_by_signal_type || []).map((e: any, i: number) => (
+                  <Cell key={i} fill={Number(e.pnl) >= 0 ? COLORS.green : COLORS.red} />
+                ))}
+              </Bar>
+              <Line yAxisId="wr" type="monotone" dataKey="win_rate" name="Win Rate" stroke={COLORS.yellow} strokeWidth={2} dot={{ r: 3 }} />
+            </BarChart>
+          </ResponsiveContainer>
+        </ChartCard>
+      </div>
+
+      {/* Row 6: Hold Time Distribution */}
+      <ChartCard title="Hold Time Distribution (minutes)" className="mb-4">
+        <ResponsiveContainer width="100%" height={180}>
+          <BarChart data={(data.hold_time_dist || []).map((d: any) => ({
+            bucket: `${Number(d.bucket)}-${Number(d.bucket) + 5}m`,
+            trades: Number(d.trades),
+            pnl: Number(d.pnl),
+            wins: Number(d.wins),
+          }))}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#21262d" />
+            <XAxis dataKey="bucket" tick={{ fill: '#8b949e', fontSize: 10 }} />
+            <YAxis yAxisId="trades" tick={{ fill: '#8b949e', fontSize: 11 }} />
+            <YAxis yAxisId="pnl" orientation="right" tick={{ fill: '#8b949e', fontSize: 11 }} tickFormatter={v => `$${v}`} />
+            <Tooltip contentStyle={{ background: '#161b22', border: '1px solid #30363d', color: '#e1e4e8' }}
+              formatter={(v: any, name: any) => [name === 'pnl' ? `$${Number(v).toFixed(0)}` : v, name === 'pnl' ? 'P&L' : 'Trades']} />
+            <Bar yAxisId="trades" dataKey="trades" fill={COLORS.blue} name="Trades" />
+            <Line yAxisId="pnl" type="monotone" dataKey="pnl" stroke={COLORS.green} strokeWidth={2} dot={{ r: 2 }} name="P&L" />
+          </BarChart>
+        </ResponsiveContainer>
+      </ChartCard>
+
       {/* Drilldown Modal */}
       {drilldown && (
         <DrilldownModal trades={drilldown.trades} title={drilldown.title} onClose={() => setDrilldown(null)} />
