@@ -179,6 +179,9 @@ class TradeEntryManager:
 
         The ThreadPoolExecutor stays alive during the entire recovery window
         so the future can still deliver a result after the initial timeout.
+
+        Timeout is 60s (not 30s) because with 17+ tickers placing orders
+        simultaneously, the IB worker queue can back up significantly.
         """
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         try:
@@ -188,17 +191,17 @@ class TradeEntryManager:
                 future = pool.submit(select_and_enter, self.client, self.ticker)
 
             try:
-                return future.result(timeout=30)
+                return future.result(timeout=60)
             except concurrent.futures.TimeoutError:
                 # Order may have been placed on IB but we timed out waiting.
-                # Give 5 more seconds before giving up.
-                log.warning(f"[{self.ticker}] Trade entry timed out (30s) — "
-                            f"waiting 5 more seconds for recovery...")
+                # Give 10 more seconds before giving up.
+                log.warning(f"[{self.ticker}] Trade entry timed out (60s) — "
+                            f"waiting 10 more seconds for recovery...")
                 self._errors_today += 1
 
                 orphan_trade = None
                 try:
-                    orphan_trade = future.result(timeout=5)
+                    orphan_trade = future.result(timeout=10)
                 except (concurrent.futures.TimeoutError, Exception):
                     pass
 
@@ -211,33 +214,70 @@ class TradeEntryManager:
                                           "symbol": orphan_trade.get("symbol")})
                     return orphan_trade
                 else:
-                    # Could not recover — check IB for orphaned fills
-                    self._check_orphaned_fills()
+                    # Could not recover from future — check IB for orphaned fills
+                    adopted = self._check_orphaned_fills()
+                    if adopted:
+                        # Successfully adopted from IB fill data
+                        return adopted
                     handle_error(f"scanner-{self.ticker}", "trade_entry_timeout",
-                                 TimeoutError("Trade entry timed out after 35s"),
+                                 TimeoutError("Trade entry timed out after 70s"),
                                  context={"ticker": self.ticker, "recovered": False},
                                  critical=True)
                     raise concurrent.futures.TimeoutError()
         finally:
             pool.shutdown(wait=False)
 
-    def _check_orphaned_fills(self):
-        """Check IB for fills that occurred but weren't tracked."""
+    def _check_orphaned_fills(self) -> dict | None:
+        """Check IB for fills that occurred but weren't tracked.
+
+        If an orphaned fill is found, build a trade dict and adopt it
+        immediately instead of waiting for reconciliation.
+        """
         try:
             fill = self.client.check_recent_fills(self.ticker)
             if fill:
-                log.error(f"[{self.ticker}] FOUND ORPHANED IB FILL: {fill}")
-                handle_error(f"scanner-{self.ticker}", "orphaned_ib_fill",
-                             RuntimeError(f"Trade filled on IB but not tracked: {fill}"),
-                             context={"ticker": self.ticker, "fill": str(fill)},
-                             critical=True)
-                # Reconciliation will pick this up on next cycle
+                log.warning(f"[{self.ticker}] FOUND ORPHANED IB FILL — adopting: {fill}")
+
+                # Build trade dict from fill data
+                fill_price = fill.get("price", 0)
+                symbol = fill.get("symbol", "").strip()
+                qty = int(abs(fill.get("qty", 0)))
+                side = fill.get("side", "BOT")
+                direction = "LONG" if side == "BOT" else "SHORT"
+
+                trade = {
+                    "ticker": self.ticker,
+                    "symbol": symbol,
+                    "contracts": qty,
+                    "entry_price": fill_price,
+                    "profit_target": round(fill_price * (1 + config.PROFIT_TARGET), 2),
+                    "stop_loss": round(fill_price * (1 - config.STOP_LOSS), 2),
+                    "entry_time": datetime.now(PT),
+                    "direction": direction,
+                    "ib_order_id": fill.get("order_id"),
+                    "_adopted_from_fill": True,
+                }
+
+                # Register with exit manager (writes to DB)
+                self.exit_manager.add_trade(trade)
+                self._trades_today += 1
+                self._last_trade_time = datetime.now(PT)
+                log.info(f"[{self.ticker}] Orphaned trade adopted: {symbol} "
+                         f"{qty}x @ ${fill_price:.2f} ({direction})")
+
+                handle_error(f"scanner-{self.ticker}", "orphaned_ib_fill_adopted",
+                             RuntimeError(f"Trade filled on IB after timeout — adopted: {symbol}"),
+                             context={"ticker": self.ticker, "fill": str(fill),
+                                      "adopted": True})
+                return trade
             else:
                 log.info(f"[{self.ticker}] No IB fills found — order may not have been placed.")
                 self._entry_pending = False
+                return None
         except Exception as e:
             handle_error(f"scanner-{self.ticker}", "check_orphan_fills", e,
                          context={"ticker": self.ticker})
+            return None
 
     def _enrich_trade(self, trade: dict, bars_1m: pd.DataFrame = None):
         """Add entry-time enrichment data (indicators, Greeks, VIX)."""
