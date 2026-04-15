@@ -1,6 +1,6 @@
 # ICT Trading Bot — Backlog
 
-## Last Updated: 2026-04-14
+## Last Updated: 2026-04-15
 
 ---
 
@@ -45,22 +45,42 @@ Dashboard usable on phone/tablet.
 - **AUDIT-003**: Reconciliation reliability — conId matching, safety checks, direct IB calls on startup
 - **AUDIT-004**: Syntax and import verification — all 72 Python files compile, 30 modules import
 
-### Bug Fixes
-- **BUG-022**: Double-sell (bracket + exit manager) — exit flow cancels brackets first, verifies position
-- **BUG-027**: Reconciliation false closes — safety check, conId matching, raises on timeout
-- **BUG-028**: Scanners auto-start on restart — bot resets scans_active=false on startup
-- **Phantom trades** (Meta/Microsoft): option_selector now blocks trade return on failed IB status (Cancelled/Inactive)
-- **Missing DB records** (Google): reconciliation verifies adopted orphans get db_id, retries if missing
-- **IB error capture**: registered errorEvent handler, captures rejection reasons per order
-- 28+ additional bug fixes (BUG-001 through BUG-028)
+### Bug Fixes (BUG-001 through BUG-031)
+
+| Bug | Description | Root Cause | Fix | Status |
+|-----|-------------|------------|-----|--------|
+| BUG-001–021 | Various early bugs | Multiple | Multiple | Fixed |
+| BUG-022 | Double-sell (bracket + exit manager) | Exit manager and IB bracket both closing the same position | Exit flow: cancel brackets → verify position → sell | Fixed, verified live |
+| BUG-027 | Reconciliation false closes | `get_ib_positions_raw` returned `[]` on timeout instead of raising | Raises on failure, safety check aborts on 0 positions with DB trades | Fixed, verified live |
+| BUG-028 | Scanners auto-start on restart | `scans_active=true` left in DB from previous session | Bot resets `scans_active=false` on every startup | Fixed, verified live |
+| BUG-029 | Phantom DB trades (Meta/Microsoft) | `option_selector.py` returned trade dict even when IB order status was Cancelled/Inactive — only logged a warning | Gate on order status: FAILED_STATUSES return `None`, only proceed for Filled/Submitted/PreSubmitted | Fixed |
+| BUG-030 | Missing DB records (Google) | Trade filled on IB but `insert_trade()` failed silently during reconciliation adoption | Reconciliation verifies adopted orphans have `db_id`, retries `insert_trade()` if missing | Fixed |
+| BUG-031 | IB error reasons silently lost | Zero `errorEvent` handlers registered — IB rejection codes (201, 202, 203) never captured | Registered `_on_ib_error` callback, stores per-order errors in `_last_errors`, attaches to order result dict | Fixed |
+| **REG-001** | **IB event loop blocked by DB writes (REGRESSION from ENH-003)** | `_on_ib_error` callback called `handle_error()` which (after ENH-003) does 2 DB writes per call. Ran on IB main thread, blocking event loop. Cascading timeouts. | `_on_ib_error` now only logs to Python logger — zero DB calls on IB thread | Fixed |
+| **REG-002** | **6x IB calls per contract lookup (REGRESSION from ENH-009)** | SPY fix added multi-exchange loop in `_occ_to_contract` — tries 6 exchanges for every contract lookup, even when SMART works fine | Try SMART first, only fall back to other exchanges if SMART fails (one at a time) | Fixed |
+| **REG-003** | **Timeout recovery completely broken (REGRESSION from ENH-006)** | ENH-006 refactor moved timeout handling into `TradeEntryManager._handle_timeout()` but `ThreadPoolExecutor` was already closed. The 5-second recovery window that saves orphaned trades was replaced with `pass`. Trades filling on IB between 30-35s were never tracked. | Keep `ThreadPoolExecutor` alive during full 35s window. `finally` block shuts it down after recovery attempt | Fixed |
+| **REG-004** | **Exit manager heartbeat too frequent (REGRESSION from ENH-002)** | `update_thread_status()` DB write every 5s inside exit manager monitor loop — unnecessary DB load | Heartbeat every 30s (6 cycles) instead of every 5s | Fixed |
+| **REG-005** | **Stale bot state after crash** | Bot process crashed but DB still showed `status='running'`, `ib_connected=true`. Dashboard "Stop Bot" didn't work because sidecar was also dead | Manual DB cleanup; sidecar must be running for dashboard bot control to work | Fixed (manual cleanup) |
+
+### Lessons Learned from Regressions
+
+> **REG-001 through REG-005 were all introduced in the same session (2026-04-14/15).** Root causes:
+>
+> 1. **Calling blocking code on the IB event loop thread** — The IB error callback MUST be non-blocking. Any DB write, network call, or lock acquisition on the IB thread can cascade into system-wide timeouts.
+>
+> 2. **Refactoring scope too large without incremental testing** — ENH-006 moved timeout recovery logic between methods without verifying that the `future` variable was still in scope. A smaller refactor with per-step testing would have caught this.
+>
+> 3. **Loop amplification** — Adding a 6-exchange loop to a function called in a hot path (every price lookup, every order) multiplied IB calls by 6x. Performance impact was not considered.
+>
+> 4. **No integration test after multi-file changes** — 7 files changed in one commit. Each change was individually sound but the interaction between them (error handler writing to DB + error callback on IB thread) created the blocking cascade.
 
 ### Enhancements
-- **ENH-002**: Heartbeat monitoring — exit manager (5s), bot main (30s), scanner (60s) heartbeats to thread_status
-- **ENH-003**: Error pipeline — connected log_error() to populate errors table for dashboard popup
-- **ENH-004**: System status — stale/dead detection in ThreadsTab, system log viewer panel with level filtering
-- **ENH-005**: Analytics v2 — 3 new charts (P&L by day of week, P&L by signal type, hold time distribution), 2 new SQL views, drilldown support
-- **ENH-006**: Separate signal engine from trade management — new signal_engine.py (pure detection) + trade_entry_manager.py (orchestration), scanner reduced from 472 to 265 lines
-- **ENH-009**: SPY option chain fix — prefer 0DTE chain, try multiple exchanges (SMART/AMEX/CBOE/PSE/BATS/ISE), stock qualification guard
+- **ENH-002**: Heartbeat monitoring — exit manager (30s), bot main (30s), scanner (60s) heartbeats to thread_status
+- **ENH-003**: Error pipeline — connected `log_error()` to populate errors table for dashboard popup (was empty because only `system_log` was written)
+- **ENH-004**: System status — stale/dead detection in ThreadsTab (>2m=STALE, >5m=DEAD), system log viewer panel with level filtering, health dot indicators
+- **ENH-005**: Analytics v2 — 3 new charts (P&L by day of week, P&L by signal type, hold time distribution), 2 new SQL views (`v_pnl_by_day_of_week`, `v_pnl_by_signal_type`), drilldown support for day_of_week and signal_type
+- **ENH-006**: Separate signal engine from trade management — `signal_engine.py` (pure detection, Signal dataclass) + `trade_entry_manager.py` (entry gates, order placement, enrichment, timeout recovery)
+- **ENH-009**: SPY option chain fix — prefer chain with 0DTE expiry, try multiple exchanges for option qualification, stock qualification guard
 
 ### Infrastructure
 - Database schema (8 tables + 11 analytics views + system_log)
@@ -68,8 +88,9 @@ Dashboard usable on phone/tablet.
 - FastAPI backend (20+ endpoints)
 - React frontend (6 tabs: Trades, Analytics, Threads, Tickers, Settings)
 - Docker Compose deployment (PostgreSQL, API, Frontend, pgAdmin)
-- Bot manager sidecar
+- Bot manager sidecar (port 9000)
 - IB trade ID integration (permId, conId)
 - DB-based state management (replaced file-based)
 - Batch IB pricing
 - Centralized error handler (handle_error + safe_call)
+- IB errorEvent handler (non-blocking, log-only)
