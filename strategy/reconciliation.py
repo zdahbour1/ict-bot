@@ -111,8 +111,8 @@ def _reconcile(client, exit_manager, ib_positions):
         except Exception as e:
             log.error(f"[RECONCILE] Failed to close db_id={db_id}: {e}")
 
-        # Also remove from exit_manager in-memory if present
-        _remove_from_exit_manager(exit_manager, con_id, symbol)
+        # Cache auto-refreshes from DB — no need to manually remove from exit_manager
+        exit_manager.invalidate_cache()
 
     # ══════════════════════════════════════════════════════════
     # PASS 2: IB → DB (adopt IB positions that have no DB record)
@@ -183,7 +183,7 @@ def _reconcile(client, exit_manager, ib_positions):
                f"IB={total_ib}, DB={total_db}")
     log.info("=" * 50)
 
-    exit_manager._save_trades()
+    exit_manager.invalidate_cache()  # Force refresh from DB on next access
 
 
 # ── Helper functions ──────────────────────────────────────────
@@ -244,17 +244,8 @@ def _get_exit_price(client, ticker, db_trade) -> float:
     return exit_price
 
 
-def _remove_from_exit_manager(exit_manager, con_id, symbol):
-    """Remove a trade from exit_manager's in-memory list."""
-    sym_clean = symbol.replace(" ", "")
-    with exit_manager._lock:
-        for trade in list(exit_manager.open_trades):
-            t_con = trade.get("ib_con_id")
-            t_sym = trade.get("symbol", "").replace(" ", "")
-            if (t_con and t_con == con_id) or t_sym == sym_clean:
-                exit_manager.open_trades.remove(trade)
-                log.info(f"[RECONCILE] Removed from exit_manager memory: {symbol}")
-                break
+    # _remove_from_exit_manager removed — ARCH-001: DB is source of truth.
+    # exit_manager.invalidate_cache() causes it to refresh from DB on next access.
 
 
 def _log_to_db(level, message):

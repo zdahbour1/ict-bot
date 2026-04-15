@@ -1,29 +1,25 @@
 """
 Exit Manager — orchestrates trade monitoring, exit decisions, and position closure.
 
+ARCH-001: The DATABASE is the single source of truth for all trade state.
+The exit_manager reads open trades from DB every cycle (cached 5s).
+No in-memory list or JSON file acts as a parallel source of truth.
+
+ARCH-002: Trade state transitions (open→closed) use row-level locking
+(SELECT FOR UPDATE) in close_trade() to prevent double-close.
+
 Responsibilities:
-- Monitor open trades every 5 seconds (batch IB price fetch)
+- Read open trades from DB every 5 seconds
+- Fetch batch IB prices for all open trades
 - Evaluate exit conditions (TP, SL, trail, time, EOD, roll)
 - Execute exits: cancel brackets → verify position → sell
-- Update DB and CSV for all state changes
+- Update DB for all state changes
 - Process UI commands (close from dashboard)
-- Persist trade state to open_trades.json
-
-The exit manager is the SINGLE AUTHORITY for closing trades.
-Bracket orders on IB are safety nets only.
-
-ERROR HANDLING RULES:
-- Every exception is captured with context (trade, symbol, operation)
-- Errors are logged to both Python logger and system_log DB table
-- No bare except/pass — every error is visible
-- Trade-level errors don't crash the monitoring loop
 """
 import logging
 import re
 import threading
 import time
-import json
-import os
 from datetime import datetime, date
 import pytz
 
@@ -38,39 +34,9 @@ import config
 log = logging.getLogger(__name__)
 PT = pytz.timezone("America/Los_Angeles")
 
-TRADES_FILE = os.path.join(os.path.dirname(__file__), "..", "open_trades.json")
-
-
-def _serialize_trade(trade: dict) -> dict:
-    t = {}
-    for k, v in trade.items():
-        if isinstance(v, datetime):
-            t[k] = v.isoformat()
-        elif isinstance(v, float) and (v != v):
-            t[k] = 0.0
-        else:
-            t[k] = v
-    return t
-
-
-def _deserialize_trade(t: dict) -> dict:
-    entry = t.get("entry_time")
-    if isinstance(entry, str):
-        try:
-            dt = datetime.fromisoformat(entry)
-            if dt.tzinfo is None:
-                dt = PT.localize(dt)
-            else:
-                dt = dt.astimezone(PT)
-            t["entry_time"] = dt
-        except Exception as e:
-            handle_error("exit_manager", "deserialize_trade", e,
-                        {"symbol": t.get("symbol"), "entry_time_raw": entry})
-            t["entry_time"] = datetime.now(PT)
-    return t
-
 
 def _is_expired(symbol: str) -> bool:
+    symbol = symbol.replace(" ", "")
     match = re.match(r'^[A-Z]+(\d{6})[CP]\d+$', symbol)
     if not match:
         return False
@@ -83,66 +49,76 @@ def _is_expired(symbol: str) -> bool:
 
 
 class ExitManager:
+    """
+    Trade monitoring engine. Reads open trades from DB (source of truth).
+
+    The open_trades property returns a cached list from DB, refreshed every 5s.
+    add_trade() writes to DB FIRST — if DB fails, trade is NOT tracked.
+    """
+
     def __init__(self, client):
         self.client = client
-        self.open_trades = []
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
-        self._load_trades()
+        # DB-backed cache
+        self._open_trades_cache = []
+        self._cache_time = 0
+        self._CACHE_TTL = 5  # seconds
+        # Load initial state from DB
+        self._refresh_cache()
+        if self._open_trades_cache:
+            log.info(f"Loaded {len(self._open_trades_cache)} open trade(s) from database")
 
-    # ── Persistent storage ────────────────────────────────
-    def _load_trades(self):
-        if not os.path.exists(TRADES_FILE):
-            return
+    # ── DB-backed trade list (ARCH-001) ──────────────────────
+
+    def _refresh_cache(self):
+        """Refresh open trades cache from database."""
         try:
-            with open(TRADES_FILE, "r") as f:
-                saved = json.load(f)
-            self.open_trades = [_deserialize_trade(t) for t in saved]
-            if self.open_trades:
-                log.info(f"Resumed {len(self.open_trades)} open trade(s) from previous session")
+            from db.writer import get_open_trades_from_db
+            trades = get_open_trades_from_db()
+            if trades is not None:
+                self._open_trades_cache = trades
+                self._cache_time = time.time()
         except Exception as e:
-            handle_error("exit_manager", "load_trades", e, critical=True)
-            self.open_trades = []
+            handle_error("exit_manager", "refresh_cache", e)
 
-    def _save_trades(self):
-        try:
-            with open(TRADES_FILE, "w") as f:
-                json.dump([_serialize_trade(t) for t in self.open_trades], f, indent=2)
-        except Exception as e:
-            handle_error("exit_manager", "save_trades", e, critical=True)
+    @property
+    def open_trades(self) -> list:
+        """Get open trades. Cached from DB, refreshed every 5 seconds."""
+        if time.time() - self._cache_time >= self._CACHE_TTL:
+            self._refresh_cache()
+        return self._open_trades_cache
 
-    def _clear_trades(self):
-        try:
-            if os.path.exists(TRADES_FILE):
-                os.remove(TRADES_FILE)
-        except Exception as e:
-            handle_error("exit_manager", "clear_trades", e)
+    def invalidate_cache(self):
+        """Force cache refresh on next access."""
+        self._cache_time = 0
 
-    # ── Trade management ──────────────────────────────────
+    # ── Trade management (DB-first) ─────��────────────────────
+
     def add_trade(self, trade: dict):
-        trade["peak_pnl_pct"] = 0.0
-        trade["dynamic_sl_pct"] = -config.STOP_LOSS
-        with self._lock:
-            self.open_trades.append(trade)
-            self._save_trades()
+        """
+        Add a new trade. DB-FIRST: writes to DB, then invalidates cache.
+        If DB write fails, trade is NOT tracked (fail-safe).
+        """
+        trade["peak_pnl_pct"] = trade.get("peak_pnl_pct", 0.0)
+        trade["dynamic_sl_pct"] = trade.get("dynamic_sl_pct", -config.STOP_LOSS)
 
-        # Write to DB — this MUST succeed for trade integrity
         try:
             from db.writer import insert_trade
             db_id = insert_trade(trade, config.IB_ACCOUNT or "unknown")
             if db_id:
                 trade["db_id"] = db_id
-                log.info(f"Trade saved to DB: id={db_id} {trade.get('ticker')} {trade['symbol']}")
+                log.info(f"Trade saved to DB: id={db_id} {trade.get('ticker')} {trade.get('symbol')}")
+                self.invalidate_cache()
             else:
-                handle_error("exit_manager", "add_trade_db", RuntimeError("insert_trade returned None"),
-                           context={"ticker": trade.get("ticker"), "symbol": trade.get("symbol")},
-                           critical=True)
+                handle_error("exit_manager", "add_trade_db",
+                             RuntimeError("insert_trade returned None — trade NOT tracked"),
+                             context={"ticker": trade.get("ticker"), "symbol": trade.get("symbol")},
+                             critical=True)
         except Exception as e:
             handle_error("exit_manager", "add_trade_db", e,
-                        context={"ticker": trade.get("ticker"), "symbol": trade.get("symbol")},
-                        critical=True)
-
-        log.info(f"Exit manager now tracking: {trade['symbol']}")
+                         context={"ticker": trade.get("ticker"), "symbol": trade.get("symbol")},
+                         critical=True)
 
     def start(self):
         thread = threading.Thread(target=self._monitor_loop, daemon=True)
@@ -155,6 +131,7 @@ class ExitManager:
     # ── Main monitoring loop ──────────────────────────────
     def _monitor_loop(self):
         reconcile_counter = 0
+        heartbeat_counter = 0
         reconcile_interval = config.RECONCILIATION_INTERVAL_MIN * 60 // config.MONITOR_INTERVAL
         while not self._stop_event.is_set():
             try:
@@ -167,16 +144,14 @@ class ExitManager:
                 reconcile_counter = 0
                 try:
                     periodic_reconciliation(self.client, self)
+                    self.invalidate_cache()  # Reconciliation may have changed DB state
                 except Exception as e:
                     handle_error("exit_manager", "periodic_reconciliation", e)
 
-            # ── Heartbeat: update thread_status every 30s (not every cycle) ──
-            reconcile_counter += 0  # placeholder to keep counter logic aligned
-            if not hasattr(self, '_heartbeat_counter'):
-                self._heartbeat_counter = 0
-            self._heartbeat_counter += 1
-            if self._heartbeat_counter >= 6:  # 6 × 5s = 30s
-                self._heartbeat_counter = 0
+            # Heartbeat every 30s
+            heartbeat_counter += 1
+            if heartbeat_counter >= 6:
+                heartbeat_counter = 0
                 try:
                     from db.writer import update_thread_status
                     update_thread_status(
@@ -184,156 +159,141 @@ class ExitManager:
                         f"Monitoring {len(self.open_trades)} trades",
                     )
                 except Exception:
-                    pass  # Heartbeat failure should never crash the monitor loop
+                    pass
 
             time.sleep(config.MONITOR_INTERVAL)
 
     def _check_exits(self):
         now_pt = datetime.now(PT)
 
-        with self._lock:
-            # ── Remove expired contracts ──────────────────
-            active_trades = []
-            for trade in self.open_trades:
-                if _is_expired(trade["symbol"]):
-                    ticker = trade.get("ticker", "UNK")
-                    log.warning(f"[{ticker}] Contract EXPIRED: {trade['symbol']} — auto-closing")
-                    close_trade_in_db(trade, trade.get("entry_price", 0), "LOSS", "EXPIRED CONTRACT", {})
-                else:
-                    active_trades.append(trade)
-            self.open_trades = active_trades
+        # Read open trades from DB (cached, refreshes every 5s)
+        trades = list(self.open_trades)  # Copy to avoid mutation during iteration
 
-            # ── Batch fetch all prices ────────────────────
-            symbols = [t["symbol"] for t in self.open_trades]
+        if not trades:
+            return
+
+        # ── Remove expired contracts ──────────────────
+        for trade in trades:
+            if _is_expired(trade.get("symbol", "")):
+                ticker = trade.get("ticker", "UNK")
+                log.warning(f"[{ticker}] Contract EXPIRED: {trade['symbol']} — auto-closing")
+                close_trade_in_db(trade, trade.get("entry_price", 0), "LOSS", "EXPIRED CONTRACT", {})
+                self.invalidate_cache()
+
+        # Re-read after expiry closures
+        trades = [t for t in self.open_trades if not _is_expired(t.get("symbol", ""))]
+
+        # ── Batch fetch all prices ────────────────────
+        symbols = [t["symbol"] for t in trades]
+        try:
+            batch_prices = self.client.get_option_prices_batch(symbols)
+        except Exception as e:
+            handle_error("exit_manager", "batch_price_fetch", e,
+                         context={"symbol_count": len(symbols)})
+            batch_prices = {}
+
+        # ── Bulk DB update for priced trades ──────────
+        if batch_prices:
+            for trade in trades:
+                price = batch_prices.get(trade["symbol"])
+                if price and trade.get("db_id"):
+                    entry = trade["entry_price"]
+                    pnl = (price - entry) / entry if entry > 0 else 0
+                    pnl_usd = (price - entry) * 100 * trade.get("contracts", 0)
+                    try:
+                        from db.writer import update_trade_price
+                        update_trade_price(trade["db_id"], price, pnl, pnl_usd,
+                                           trade.get("peak_pnl_pct", 0),
+                                           trade.get("dynamic_sl_pct", -0.6))
+                    except Exception as e:
+                        handle_error("exit_manager", "update_trade_price", e,
+                                     context={"db_id": trade.get("db_id"),
+                                              "ticker": trade.get("ticker")})
+
+        # ── Process each trade ────────────────────────
+        for trade in trades:
             try:
-                batch_prices = self.client.get_option_prices_batch(symbols)
-            except Exception as e:
-                handle_error("exit_manager", "batch_price_fetch", e,
-                           context={"symbol_count": len(symbols)})
-                batch_prices = {}
+                current_price = batch_prices.get(trade["symbol"])
+                if current_price is None:
+                    continue
 
-            # ── Bulk DB update for priced trades ──────────
-            if batch_prices:
-                for trade in self.open_trades:
-                    price = batch_prices.get(trade["symbol"])
-                    if price and trade.get("db_id"):
-                        entry = trade["entry_price"]
-                        pnl = (price - entry) / entry if entry > 0 else 0
-                        pnl_usd = (price - entry) * 100 * trade["contracts"]
-                        try:
-                            from db.writer import update_trade_price
-                            update_trade_price(trade["db_id"], price, pnl, pnl_usd,
-                                             trade.get("peak_pnl_pct", 0), trade.get("dynamic_sl_pct", -0.6))
-                        except Exception as e:
-                            handle_error("exit_manager", "update_trade_price", e,
-                                       context={"db_id": trade.get("db_id"), "ticker": trade.get("ticker")})
+                entry_price = trade["entry_price"]
+                pnl_pct = (current_price - entry_price) / entry_price if entry_price > 0 else 0
 
-            # ── Process each trade ────────────────────────
-            still_open = []
-            for trade in self.open_trades:
-                try:
-                    current_price = batch_prices.get(trade["symbol"])
-                    if current_price is None:
-                        still_open.append(trade)
-                        continue
+                # Update peak (local tracking for this cycle)
+                if pnl_pct > trade.get("peak_pnl_pct", 0):
+                    trade["peak_pnl_pct"] = pnl_pct
 
-                    entry_price = trade["entry_price"]
-                    pnl_pct = (current_price - entry_price) / entry_price
+                # Update trailing stop + bracket SL on IB
+                old_sl = trade.get("dynamic_sl_pct", -config.STOP_LOSS)
+                trade["dynamic_sl_pct"] = update_trailing_stop(trade, pnl_pct)
+                if trade["dynamic_sl_pct"] != old_sl and trade.get("ib_sl_order_id"):
+                    new_sl_price = round(entry_price * (1 + trade["dynamic_sl_pct"]), 2)
+                    try:
+                        self.client.update_bracket_sl(trade["ib_sl_order_id"], new_sl_price)
+                        log.info(f"[{trade.get('ticker')}] Bracket SL → ${new_sl_price:.2f}")
+                    except Exception as e:
+                        handle_error("exit_manager", "update_bracket_sl", e,
+                                     context={"ticker": trade.get("ticker"),
+                                              "sl_order_id": trade.get("ib_sl_order_id")})
 
-                    # Update peak
-                    if pnl_pct > trade["peak_pnl_pct"]:
-                        trade["peak_pnl_pct"] = pnl_pct
+                log.info(
+                    f"Monitoring {trade['symbol']} | "
+                    f"${current_price:.2f} | "
+                    f"P&L:{pnl_pct:+.1%} | "
+                    f"Peak:{trade.get('peak_pnl_pct', 0):+.1%} | "
+                    f"SL:{trade.get('dynamic_sl_pct', 0):+.1%}"
+                )
 
-                    # Update trailing stop + bracket SL on IB
-                    old_sl = trade["dynamic_sl_pct"]
-                    trade["dynamic_sl_pct"] = update_trailing_stop(trade, pnl_pct)
-                    if trade["dynamic_sl_pct"] != old_sl and trade.get("ib_sl_order_id"):
-                        new_sl_price = round(entry_price * (1 + trade["dynamic_sl_pct"]), 2)
-                        try:
-                            self.client.update_bracket_sl(trade["ib_sl_order_id"], new_sl_price)
-                            log.info(f"[{trade.get('ticker')}] Bracket SL → ${new_sl_price:.2f}")
-                        except Exception as e:
-                            handle_error("exit_manager", "update_bracket_sl", e,
-                                       context={"ticker": trade.get("ticker"),
-                                                "sl_order_id": trade.get("ib_sl_order_id")})
+                # ── Evaluate exit conditions ──────────
+                exit_info = evaluate_exit(trade, current_price, now_pt)
 
-                    log.info(
-                        f"Monitoring {trade['symbol']} | "
-                        f"${current_price:.2f} | "
-                        f"P&L:{pnl_pct:+.1%} | "
-                        f"Peak:{trade['peak_pnl_pct']:+.1%} | "
-                        f"SL:{trade['dynamic_sl_pct']:+.1%}"
-                    )
+                if exit_info:
+                    result = exit_info["result"]
+                    reason = exit_info["reason"]
+                    should_roll = exit_info.get("should_roll", False)
 
-                    # ── Evaluate exit conditions ──────────
-                    exit_info = evaluate_exit(trade, current_price, now_pt)
-
-                    if exit_info:
-                        result = exit_info["result"]
-                        reason = exit_info["reason"]
-                        should_roll = exit_info.get("should_roll", False)
-
-                        if should_roll:
-                            # ══ Roll: execute_roll handles the full close→open sequence ══
-                            # Do NOT call execute_exit separately — execute_roll calls it internally
-                            rolled = safe_call(
-                                execute_roll, self.client, trade, pnl_pct,
-                                component="exit_manager", operation="execute_roll",
-                                context={"ticker": trade.get("ticker")}
-                            )
-
-                            # Log and close the OLD trade in DB
-                            exit_enrichment = safe_call(
-                                collect_exit_enrichment, self.client, trade,
-                                component="exit_manager", operation="collect_exit_enrichment",
-                                default={}, context={"ticker": trade.get("ticker")}
-                            )
-                            log_trade_result(trade, current_price, result, reason, exit_enrichment)
-                            close_trade_in_db(trade, current_price, result, reason, exit_enrichment)
-
-                            # Add the NEW rolled trade if successful
-                            if rolled:
-                                self.add_trade(rolled)
-                                log.info(f"[{trade.get('ticker')}] Roll complete: "
-                                         f"closed {trade.get('symbol')} → opened {rolled.get('symbol')}")
-                        else:
-                            # ══ Normal exit: cancel brackets → check position → sell ══
-                            execute_exit(self.client, trade, reason)
-
-                            # Log and close in DB
-                            exit_enrichment = safe_call(
-                                collect_exit_enrichment, self.client, trade,
-                                component="exit_manager", operation="collect_exit_enrichment",
-                                default={}, context={"ticker": trade.get("ticker")}
-                            )
-                            log_trade_result(trade, current_price, result, reason, exit_enrichment)
-                            close_trade_in_db(trade, current_price, result, reason, exit_enrichment)
-
-                            safe_call(send_trade_result_email, trade, result, current_price,
-                                     component="exit_manager", operation="send_trade_result_email",
-                                     context={"ticker": trade.get("ticker")})
-
-                        # Don't add to still_open — trade is closed
+                    if should_roll:
+                        rolled = safe_call(
+                            execute_roll, self.client, trade, pnl_pct,
+                            component="exit_manager", operation="execute_roll",
+                            context={"ticker": trade.get("ticker")}
+                        )
+                        exit_enrichment = safe_call(
+                            collect_exit_enrichment, self.client, trade,
+                            component="exit_manager", operation="collect_exit_enrichment",
+                            default={}, context={"ticker": trade.get("ticker")}
+                        )
+                        log_trade_result(trade, current_price, result, reason, exit_enrichment)
+                        close_trade_in_db(trade, current_price, result, reason, exit_enrichment)
+                        if rolled:
+                            self.add_trade(rolled)
+                            log.info(f"[{trade.get('ticker')}] Roll complete: "
+                                     f"closed {trade.get('symbol')} → opened {rolled.get('symbol')}")
                     else:
-                        still_open.append(trade)
+                        execute_exit(self.client, trade, reason)
+                        exit_enrichment = safe_call(
+                            collect_exit_enrichment, self.client, trade,
+                            component="exit_manager", operation="collect_exit_enrichment",
+                            default={}, context={"ticker": trade.get("ticker")}
+                        )
+                        log_trade_result(trade, current_price, result, reason, exit_enrichment)
+                        close_trade_in_db(trade, current_price, result, reason, exit_enrichment)
+                        safe_call(send_trade_result_email, trade, result, current_price,
+                                  component="exit_manager", operation="send_trade_result_email",
+                                  context={"ticker": trade.get("ticker")})
 
-                except Exception as e:
-                    handle_error("exit_manager", "monitor_trade", e,
-                               context={"symbol": trade.get("symbol", "?"),
-                                        "ticker": trade.get("ticker", "?")},
-                               critical=True)
-                    still_open.append(trade)
+                    # Trade was closed — invalidate cache so next read picks up new state
+                    self.invalidate_cache()
 
-            self.open_trades = still_open
+            except Exception as e:
+                handle_error("exit_manager", "monitor_trade", e,
+                             context={"symbol": trade.get("symbol", "?"),
+                                      "ticker": trade.get("ticker", "?")},
+                             critical=True)
 
-            # ── Process UI commands ───────────────────────
-            self._process_ui_commands()
-
-            # Save state
-            if self.open_trades:
-                self._save_trades()
-            else:
-                self._clear_trades()
+        # ── Process UI commands ───────────────────────
+        self._process_ui_commands()
 
     def _process_ui_commands(self):
         """Process close commands from the dashboard."""
@@ -342,14 +302,18 @@ class ExitManager:
             commands = check_pending_commands()
             for cmd in (commands or []):
                 try:
+                    # Find trade in current open trades (from DB cache)
                     target = None
                     for t in self.open_trades:
                         if t.get("db_id") == cmd["trade_id"]:
                             target = t
                             break
                     if target:
-                        contracts = cmd.get("contracts") or target["contracts"]
+                        contracts = cmd.get("contracts") or target.get("contracts", 0)
                         execute_exit(self.client, target, f"UI CLOSE ({contracts}x)")
+                        close_trade_in_db(target, target.get("current_price", 0),
+                                          "SCRATCH", f"UI CLOSE ({contracts}x)", {})
+                        self.invalidate_cache()
                         log.info(f"UI command executed: close {contracts}x {target['symbol']}")
                         complete_command(cmd["id"])
                     else:
@@ -358,7 +322,8 @@ class ExitManager:
                         complete_command(cmd["id"], error=error_msg)
                 except Exception as e:
                     handle_error("exit_manager", "process_ui_command", e,
-                               context={"command_id": cmd.get("id"), "trade_id": cmd.get("trade_id")})
+                                 context={"command_id": cmd.get("id"),
+                                          "trade_id": cmd.get("trade_id")})
                     try:
                         complete_command(cmd["id"], error=str(e))
                     except Exception as e2:

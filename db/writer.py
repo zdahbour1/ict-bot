@@ -84,21 +84,64 @@ def insert_trade(trade: dict, account: str) -> int | None:
 
 
 @_safe_db
+def get_open_trades_from_db() -> list:
+    """Get all open trades from DB. Used by exit_manager as source of truth.
+    Returns list of trade dicts with all fields needed for monitoring."""
+    from db.models import Trade
+    session = get_session()
+    if not session:
+        return []
+    try:
+        rows = session.query(Trade).filter(Trade.status == "open").all()
+        result = []
+        for r in rows:
+            result.append({
+                "db_id": r.id,
+                "ticker": r.ticker,
+                "symbol": r.symbol,
+                "contracts": r.contracts_open,
+                "direction": r.direction or "LONG",
+                "entry_price": float(r.entry_price) if r.entry_price else 0,
+                "entry_time": r.entry_time,
+                "current_price": float(r.current_price) if r.current_price else 0,
+                "profit_target": float(r.profit_target) if r.profit_target else 0,
+                "stop_loss": float(r.stop_loss_level) if r.stop_loss_level else 0,
+                "ib_con_id": r.ib_con_id,
+                "ib_order_id": r.ib_order_id,
+                "ib_perm_id": r.ib_perm_id,
+                "ib_tp_order_id": r.ib_tp_perm_id,
+                "ib_sl_order_id": r.ib_sl_perm_id,
+                "peak_pnl_pct": float(r.peak_pnl_pct) if r.peak_pnl_pct else 0,
+                "dynamic_sl_pct": float(r.dynamic_sl_pct) if r.dynamic_sl_pct else -0.6,
+                "signal": r.signal_type,
+                "pnl_pct": float(r.pnl_pct) if r.pnl_pct else 0,
+                "pnl_usd": float(r.pnl_usd) if r.pnl_usd else 0,
+            })
+        session.close()
+        return result
+    except Exception as e:
+        session.close()
+        raise
+
+
+@_safe_db
 def update_trade_price(trade_id: int, current_price: float, pnl_pct: float,
                        pnl_usd: float, peak_pnl_pct: float, dynamic_sl_pct: float):
-    """Update live pricing for an open trade (called every 5 seconds)."""
-    from db.models import Trade
+    """Update live pricing for an open trade. Only updates if trade is still open.
+    Uses GREATEST() to never downgrade peak_pnl_pct."""
+    from sqlalchemy import text
     session = get_session()
     if not session:
         return
     try:
-        session.query(Trade).filter(Trade.id == trade_id).update({
-            "current_price": current_price,
-            "pnl_pct": pnl_pct,
-            "pnl_usd": pnl_usd,
-            "peak_pnl_pct": peak_pnl_pct,
-            "dynamic_sl_pct": dynamic_sl_pct,
-        })
+        session.execute(
+            text("UPDATE trades SET current_price=:cp, pnl_pct=:pp, pnl_usd=:pu, "
+                 "peak_pnl_pct = GREATEST(peak_pnl_pct, :peak), "
+                 "dynamic_sl_pct=:dsl "
+                 "WHERE id=:id AND status='open'"),
+            {"cp": current_price, "pp": pnl_pct, "pu": pnl_usd,
+             "peak": peak_pnl_pct, "dsl": dynamic_sl_pct, "id": trade_id}
+        )
         session.commit()
         session.close()
     except Exception as e:
@@ -125,41 +168,53 @@ def _sanitize_for_json(obj):
 
 @_safe_db
 def close_trade(trade_id: int, exit_price: float, result: str, reason: str,
-                exit_enrichment: dict = None):
-    """Mark a trade as closed in the database."""
-    from db.models import Trade
+                exit_enrichment: dict = None) -> bool:
+    """
+    Close a trade in the database. Uses SELECT FOR UPDATE to prevent double-close.
+
+    Returns True if trade was closed, False if already closed by another process.
+    This is the ONLY way to close a trade — enforced at the DB level.
+    """
+    from sqlalchemy import text
     session = get_session()
     if not session:
-        return
+        return False
     try:
-        pnl_pct = 0
-        pnl_usd = 0
-        trade = session.query(Trade).filter(Trade.id == trade_id).first()
-        if trade:
-            entry = float(trade.entry_price)
-            if entry > 0:
-                pnl_pct = (exit_price - entry) / entry * 100
-                pnl_usd = (exit_price - entry) * 100 * trade.contracts_entered
+        # Row-level lock: only proceed if trade is currently open
+        row = session.execute(
+            text("SELECT id, entry_price, contracts_entered FROM trades "
+                 "WHERE id = :id AND status = 'open' FOR UPDATE"),
+            {"id": trade_id}
+        ).fetchone()
 
-        # Sanitize enrichment data for JSONB (convert datetimes to strings)
+        if not row:
+            # Trade already closed by another process — no-op
+            session.close()
+            log.info(f"DB: trade {trade_id} already closed — skipping (another process got there first)")
+            return False
+
+        entry_price = float(row[1])
+        contracts = int(row[2])
+        pnl_pct = (exit_price - entry_price) / entry_price * 100 if entry_price > 0 else 0
+        pnl_usd = (exit_price - entry_price) * 100 * contracts
+
         safe_enrichment = _sanitize_for_json(exit_enrichment or {})
 
-        session.query(Trade).filter(Trade.id == trade_id).update({
-            "exit_price": exit_price,
-            "current_price": exit_price,
-            "pnl_pct": pnl_pct,
-            "pnl_usd": pnl_usd,
-            "exit_time": datetime.now(timezone.utc),
-            "status": "closed",
-            "exit_reason": reason,
-            "exit_result": result,
-            "contracts_open": 0,
-            "contracts_closed": trade.contracts_entered if trade else 0,
-            "exit_enrichment": safe_enrichment,
-        })
+        session.execute(
+            text("UPDATE trades SET exit_price=:ep, current_price=:ep, "
+                 "pnl_pct=:pp, pnl_usd=:pu, exit_time=NOW(), "
+                 "status='closed', exit_reason=:rn, exit_result=:er, "
+                 "contracts_open=0, contracts_closed=:cc, "
+                 "exit_enrichment=:ee::jsonb "
+                 "WHERE id=:id"),
+            {"ep": exit_price, "pp": pnl_pct, "pu": pnl_usd,
+             "rn": reason, "er": result, "cc": contracts,
+             "ee": __import__('json').dumps(safe_enrichment), "id": trade_id}
+        )
         session.commit()
         session.close()
-        log.debug(f"DB: closed trade {trade_id} — {result} ({reason})")
+        log.info(f"DB: closed trade {trade_id} — {result} ({reason}) P&L=${pnl_usd:.2f}")
+        return True
     except Exception as e:
         session.rollback()
         session.close()
