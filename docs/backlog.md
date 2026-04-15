@@ -4,6 +4,29 @@
 
 ---
 
+## CRITICAL — Architecture
+
+### ARCH-001: Database is the Single Source of Truth
+**Principle**: The PostgreSQL database is the ONLY source of truth for all system state. All other components (exit_manager in-memory list, open_trades.json, dashboard) are read-through caches that refresh from the DB.
+
+**Current violations**:
+1. `exit_manager.open_trades` (in-memory list) acts as parallel source of truth — trades can exist in memory but not DB, or vice versa
+2. `open_trades.json` file is a stale backup of the in-memory list
+3. Reconciliation has to sync two sources (IB + DB) but also a third (in-memory list)
+4. When bot restarts, it loads from `open_trades.json`, not from DB
+5. `add_trade()` writes to in-memory list first, then DB — if DB write fails, state diverges
+
+**Required changes**:
+- Exit manager should query DB for open trades on every cycle (or cache with short TTL)
+- `add_trade()` should write to DB FIRST, only add to memory cache if DB succeeds
+- Remove `open_trades.json` — DB is the persistence layer
+- On startup, rebuild in-memory state from DB open trades, not from JSON file
+- Dashboard already reads from DB (correct)
+
+Status: **Tracked — needs incremental implementation**
+
+---
+
 ## HIGH — Important for Reliable Operation
 
 ### ENH-001: IB Streaming Market Data
