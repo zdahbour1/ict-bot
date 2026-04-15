@@ -29,7 +29,7 @@ import pytz
 
 from alerts.emailer import send_trade_result_email
 from strategy.exit_conditions import evaluate_exit, update_trailing_stop
-from strategy.exit_executor import execute_exit, execute_roll, cancel_bracket_orders, verify_position_exists
+from strategy.exit_executor import execute_exit, execute_roll, cancel_bracket_orders, get_ib_position_qty
 from strategy.trade_logger import log_trade_result, close_trade_in_db, collect_exit_enrichment
 from strategy.reconciliation import periodic_reconciliation
 from strategy.error_handler import handle_error, safe_call
@@ -273,35 +273,45 @@ class ExitManager:
                         reason = exit_info["reason"]
                         should_roll = exit_info.get("should_roll", False)
 
-                        # ══ Execute exit: cancel brackets → verify → sell ══
-                        execute_exit(self.client, trade, reason)
-
-                        # Verify the position was closed
-                        if not verify_position_exists(self.client, trade):
-                            log.info(f"[{trade.get('ticker')}] Position confirmed closed on IB")
-
-                        # Collect enrichment and log
-                        exit_enrichment = safe_call(
-                            collect_exit_enrichment, self.client, trade,
-                            component="exit_manager", operation="collect_exit_enrichment",
-                            default={}, context={"ticker": trade.get("ticker")}
-                        )
-                        log_trade_result(trade, current_price, result, reason, exit_enrichment)
-                        close_trade_in_db(trade, current_price, result, reason, exit_enrichment)
-
-                        safe_call(send_trade_result_email, trade, result, current_price,
-                                 component="exit_manager", operation="send_trade_result_email",
-                                 context={"ticker": trade.get("ticker")})
-
-                        # Roll if needed
                         if should_roll:
+                            # ══ Roll: execute_roll handles the full close→open sequence ══
+                            # Do NOT call execute_exit separately — execute_roll calls it internally
                             rolled = safe_call(
                                 execute_roll, self.client, trade, pnl_pct,
                                 component="exit_manager", operation="execute_roll",
                                 context={"ticker": trade.get("ticker")}
                             )
+
+                            # Log and close the OLD trade in DB
+                            exit_enrichment = safe_call(
+                                collect_exit_enrichment, self.client, trade,
+                                component="exit_manager", operation="collect_exit_enrichment",
+                                default={}, context={"ticker": trade.get("ticker")}
+                            )
+                            log_trade_result(trade, current_price, result, reason, exit_enrichment)
+                            close_trade_in_db(trade, current_price, result, reason, exit_enrichment)
+
+                            # Add the NEW rolled trade if successful
                             if rolled:
                                 self.add_trade(rolled)
+                                log.info(f"[{trade.get('ticker')}] Roll complete: "
+                                         f"closed {trade.get('symbol')} → opened {rolled.get('symbol')}")
+                        else:
+                            # ══ Normal exit: cancel brackets → check position → sell ══
+                            execute_exit(self.client, trade, reason)
+
+                            # Log and close in DB
+                            exit_enrichment = safe_call(
+                                collect_exit_enrichment, self.client, trade,
+                                component="exit_manager", operation="collect_exit_enrichment",
+                                default={}, context={"ticker": trade.get("ticker")}
+                            )
+                            log_trade_result(trade, current_price, result, reason, exit_enrichment)
+                            close_trade_in_db(trade, current_price, result, reason, exit_enrichment)
+
+                            safe_call(send_trade_result_email, trade, result, current_price,
+                                     component="exit_manager", operation="send_trade_result_email",
+                                     context={"ticker": trade.get("ticker")})
 
                         # Don't add to still_open — trade is closed
                     else:

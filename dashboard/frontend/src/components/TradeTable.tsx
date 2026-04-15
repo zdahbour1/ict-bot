@@ -79,15 +79,16 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
     col.accessor('symbol', {
       header: 'Expiry / Strike',
       cell: info => {
-        const sym = info.getValue();
+        const sym = (info.getValue() || '').replace(/\s+/g, ''); // Strip ALL spaces first
         // Parse OCC: TICKER YYMMDD C/P SSSSSSSS
-        const match = sym.match(/^[A-Z]+(\d{6})[CP](\d{8})$/);
-        if (!match) return <span className="text-xs text-gray-400">{sym}</span>;
+        const match = sym.match(/^[A-Z]+(\d{6})([CP])(\d{8})$/);
+        if (!match) return <span className="text-xs text-gray-400">{info.getValue()}</span>;
         const expStr = match[1]; // YYMMDD
-        const strike = parseInt(match[2]) / 1000;
+        const cp = match[2]; // C or P
+        const strike = parseInt(match[3]) / 1000;
         const expDate = new Date(2000 + parseInt(expStr.slice(0,2)), parseInt(expStr.slice(2,4)) - 1, parseInt(expStr.slice(4,6)));
         const expFmt = expDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-        return <span className="text-xs">{expFmt} <span className="text-gray-400">${strike}</span></span>;
+        return <span className="text-xs">{expFmt} <span className="text-gray-400">${strike} {cp === 'C' ? 'Call' : 'Put'}</span></span>;
       },
     }),
     col.display({

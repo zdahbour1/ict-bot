@@ -706,6 +706,26 @@ class IBClient:
                 })
         return result
 
+    # ── Position Quantity Check (safety guard for sell orders) ──
+    def get_position_quantity(self, con_id: int) -> int:
+        """Get the current position quantity for a specific conId on IB.
+        Returns: positive int for long, negative for short, 0 if no position.
+        Thread-safe. Returns 0 on error (safe — prevents selling)."""
+        if not con_id:
+            return 0
+        try:
+            return self._submit_to_ib(self._ib_get_position_qty, con_id, timeout=15)
+        except Exception as e:
+            log.warning(f"Could not check position for conId={con_id}: {e}")
+            return 0  # Safe default — don't sell if we can't verify
+
+    def _ib_get_position_qty(self, con_id: int) -> int:
+        """Get position quantity for a specific conId. Runs on IB thread."""
+        for p in self.ib.positions():
+            if p.contract.conId == con_id:
+                return int(p.position)
+        return 0
+
     # ── Check Recent Executions (for timeout hardening) ───────
     def check_recent_fills(self, symbol: str) -> dict | None:
         """Check if a symbol was recently filled on IB. Thread-safe."""
