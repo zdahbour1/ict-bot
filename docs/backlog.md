@@ -4,52 +4,6 @@
 
 ---
 
-## CRITICAL — Must Fix
-
-### BUG-033: Duplicate open trades in DB (GOOGL)
-Two rows in trades table with status='open' for GOOGL. Reconciliation closed one
-but the other remains open in DB despite being closed on IB.
-- **Symptoms**: Dashboard shows stale open trade that doesn't exist on IB
-- **Likely cause**: Reconciliation adopted the same IB position twice, or trade was
-  entered via timeout recovery AND normal path simultaneously
-- **Fix needed**: Reconciliation must check for existing DB records by conId before
-  adopting. Dedup check: if a trade with same ib_con_id already exists in DB, skip.
-- Status: **Not fixed**
-
-### BUG-034: Negative position / double-close (regression of BUG-022)
-Three trades in IB show negative contract count — same trade being closed twice.
-One close from the bot's exit manager, one from the IB bracket order (TP or SL hit).
-- **Symptoms**: -2 position on IB (should be 0 after close)
-- **Root cause**: BUG-022 was fixed (cancel brackets → verify → sell) but the fix
-  may not be working correctly with the new parallel connection pool architecture.
-  Exit manager on Connection 0 cancels brackets, but the bracket orders on IB may
-  have already filled on a different connection before the cancel arrives.
-- **Race condition**: IB bracket fires TP/SL → exit manager also decides to exit →
-  both close the same position → negative position
-- **Fix needed**: Before sending any sell order, ALWAYS check current IB position
-  quantity. If position is already 0, skip the sell. Add position lock per ticker.
-- Status: **Not fixed — CRITICAL**
-
-### BUG-035: Option rolling conflicts with bracket orders
-Rolling logic (ENH-007) is currently enabled at 70% of PROFIT_TARGET but does NOT
-cancel bracket orders before rolling. This creates a conflict:
-- Bot decides to roll at 70% TP → closes current trade → opens new trade
-- But IB bracket TP order is still active at 100% TP → IB may fill the TP
-  on the OLD position that was already closed → negative position
-- **Current config**: ROLL_ENABLED=True, ROLL_THRESHOLD=0.70 (70% of TP)
-- **Required behavior**:
-  1. Roll should trigger at (bracket_TP - 10%) to ensure bot rolls BEFORE IB bracket fires
-  2. On roll decision: cancel ALL bracket orders first
-  3. Close the current position via market order
-  4. Open new trade at the next appropriate strike
-  5. Place new bracket orders on the new trade
-- **Additional concern**: `execute_roll()` in exit_executor.py currently calls
-  `select_and_enter()` which places a NEW bracket order, but does NOT cancel
-  the OLD bracket orders first. The old brackets reference the old contract.
-- Status: **Not fixed — needs redesign**
-
----
-
 ## HIGH — Important for Reliable Operation
 
 ### ENH-001: IB Streaming Market Data
@@ -57,13 +11,13 @@ Replace snapshot polling with streaming subscriptions for sub-second price updat
 Spec: docs/production_improvements.md
 Status: Not started
 
-### ENH-007: Option Rolling Logic — REDESIGN NEEDED
-Current implementation has conflicts with bracket orders (see BUG-035).
-Needs full redesign:
-- Roll trigger: at (bracket TP level - 10%) instead of fixed 70% threshold
-- Sequence: cancel brackets → close position → open new position → new brackets
-- Must be atomic: if any step fails, abort and leave position as-is
-Status: Needs redesign per BUG-035
+### ENH-007: Option Rolling Logic — PARTIALLY REDESIGNED
+Rolling now uses execute_exit() for the close step (BUG-035 fix).
+Remaining work:
+- Roll trigger should be at (bracket TP level - 10%) instead of fixed 70% threshold
+- Needs live market testing to verify the full sequence works end-to-end
+- Config: ROLL_ENABLED=True, ROLL_THRESHOLD=0.70 (70% of TP)
+Status: Close step fixed, trigger threshold not yet adjusted, needs live testing
 
 ### ENH-008: TP to Trailing Stop
 At 100% TP, move SL to TP level instead of hard exit.
@@ -95,7 +49,7 @@ Dashboard usable on phone/tablet.
 - **AUDIT-003**: Reconciliation reliability — conId matching, safety checks, direct IB calls on startup
 - **AUDIT-004**: Syntax and import verification — all 72 Python files compile, 30 modules import
 
-### Bug Fixes (BUG-001 through BUG-031)
+### Bug Fixes (BUG-001 through BUG-035)
 
 | Bug | Description | Root Cause | Fix | Status |
 |-----|-------------|------------|-----|--------|
@@ -106,6 +60,10 @@ Dashboard usable on phone/tablet.
 | BUG-029 | Phantom DB trades (Meta/Microsoft) | `option_selector.py` returned trade dict even when IB order status was Cancelled/Inactive — only logged a warning | Gate on order status: FAILED_STATUSES return `None`, only proceed for Filled/Submitted/PreSubmitted | Fixed |
 | BUG-030 | Missing DB records (Google) | Trade filled on IB but `insert_trade()` failed silently during reconciliation adoption | Reconciliation verifies adopted orphans have `db_id`, retries `insert_trade()` if missing | Fixed |
 | BUG-031 | IB error reasons silently lost | Zero `errorEvent` handlers registered — IB rejection codes (201, 202, 203) never captured | Registered `_on_ib_error` callback, stores per-order errors in `_last_errors`, attaches to order result dict | Fixed |
+| BUG-032 | Orphaned IB fills not adopted into DB | With 17 tickers placing orders simultaneously, IB queue backed up >60s. Orders filled on IB but scanner timed out. Orphaned fills were detected but only logged, not adopted into DB. | `_check_orphaned_fills()` now builds trade dict from fill data and calls `add_trade()` immediately. Timeout increased from 30s→60s, recovery window from 5s→10s. | Fixed |
+| BUG-033 | Duplicate open trades in DB (GOOGL) | Reconciliation adopted same IB position twice — no dedup check against existing DB records | Reconciliation now queries DB for open trades by `ib_con_id` before adopting. Skips if already exists in DB. | Fixed |
+| BUG-034 | Negative positions / double-close (regression of BUG-022) | `execute_roll()` bypassed `execute_exit()` — opened new position without properly closing old one via cancel-brackets→verify→sell flow | Root cause was BUG-035. Fixed by rewriting `execute_roll()` to use `execute_exit()`. | Fixed |
+| BUG-035 | Option rolling conflicts with bracket orders | `execute_roll()` had its own close logic that didn't cancel bracket orders first. IB bracket could fire on already-closed position → negative qty. | Rewrote `execute_roll()` to call `execute_exit()` (the ONE close function) first, then verify position closed, then open new trade. No duplicate close logic. | Fixed |
 | **REG-001** | **IB event loop blocked by DB writes (REGRESSION from ENH-003)** | `_on_ib_error` callback called `handle_error()` which (after ENH-003) does 2 DB writes per call. Ran on IB main thread, blocking event loop. Cascading timeouts. | `_on_ib_error` now only logs to Python logger — zero DB calls on IB thread | Fixed |
 | **REG-002** | **6x IB calls per contract lookup (REGRESSION from ENH-009)** | SPY fix added multi-exchange loop in `_occ_to_contract` — tries 6 exchanges for every contract lookup, even when SMART works fine | Try SMART first, only fall back to other exchanges if SMART fails (one at a time) | Fixed |
 | **REG-003** | **Timeout recovery completely broken (REGRESSION from ENH-006)** | ENH-006 refactor moved timeout handling into `TradeEntryManager._handle_timeout()` but `ThreadPoolExecutor` was already closed. The 5-second recovery window that saves orphaned trades was replaced with `pass`. Trades filling on IB between 30-35s were never tracked. | Keep `ThreadPoolExecutor` alive during full 35s window. `finally` block shuts it down after recovery attempt | Fixed |
