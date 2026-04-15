@@ -132,7 +132,7 @@ def _reconcile(client, exit_manager, ib_positions):
 
         ticker = pos.get("ticker", "UNK")
         sym = pos.get("symbol", "").strip()
-        qty = int(abs(pos["qty"]))
+        qty = int(pos["qty"])  # Preserve sign — negative means naked short on IB
         avg_cost = pos.get("avg_cost", 0)
         right = pos.get("right", "C")
         direction = "SHORT" if right == "P" else "LONG"
