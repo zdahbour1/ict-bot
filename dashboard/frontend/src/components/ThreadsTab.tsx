@@ -100,6 +100,15 @@ export default function ThreadsTab() {
     setLoadingErrors(false);
   };
 
+  const [reconciling, setReconciling] = useState(false);
+  const triggerReconcile = async () => {
+    setReconciling(true);
+    try {
+      await fetch('/api/bot/reconcile', { method: 'POST' });
+    } catch { /* ignore */ }
+    setTimeout(() => setReconciling(false), 3000);
+  };
+
   const fetchSysLogs = async () => {
     setLoadingSysLog(true);
     try {
@@ -198,6 +207,10 @@ export default function ThreadsTab() {
         <div className="flex items-center gap-4">
           <button onClick={refetch} className="px-3 py-1.5 text-sm bg-[#21262d] border border-[#30363d] text-gray-400 rounded-md hover:text-white">
             Refresh
+          </button>
+          <button onClick={triggerReconcile} disabled={reconciling}
+            className={`px-3 py-1.5 text-sm border rounded-md ${reconciling ? 'bg-green-500/20 border-green-500/30 text-green-400' : 'bg-[#21262d] border-[#30363d] text-gray-400 hover:text-white'}`}>
+            {reconciling ? 'Reconciling...' : 'Reconcile Now'}
           </button>
           <button onClick={() => setShowSysLog(!showSysLog)}
             className={`px-3 py-1.5 text-sm border rounded-md ${showSysLog ? 'bg-blue-500/20 border-blue-500/30 text-blue-400' : 'bg-[#21262d] border-[#30363d] text-gray-400 hover:text-white'}`}>

@@ -174,4 +174,4 @@ ROLL_THRESHOLD        = _get("ROLL_THRESHOLD", 0.70, float)  # roll at 70% of TP
 TP_TO_TRAIL           = _get("TP_TO_TRAIL", True, bool)
 
 # ── IB Reconciliation ────────────────────────────────
-RECONCILIATION_INTERVAL_MIN = _get("RECONCILIATION_INTERVAL_MIN", 5, int)
+RECONCILIATION_INTERVAL_MIN = _get("RECONCILIATION_INTERVAL_MIN", 2, int)

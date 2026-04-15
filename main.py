@@ -160,6 +160,19 @@ def main():
                             set_stop_requested(False)
                             break
 
+                        # Manual reconciliation requested?
+                        if state.get("last_error") == "RECONCILE_REQUESTED":
+                            log.info("Manual reconciliation requested via dashboard...")
+                            try:
+                                from db.writer import set_bot_error
+                                set_bot_error(None)  # Clear the signal
+                                from strategy.reconciliation import startup_reconciliation_direct
+                                startup_reconciliation_direct(client, exit_manager)
+                                add_system_log("reconciliation", "info", "Manual reconciliation completed")
+                            except Exception as e:
+                                log.error(f"Manual reconciliation failed: {e}")
+                                add_system_log("reconciliation", "error", f"Manual reconciliation failed: {e}")
+
                         # Scan state changed?
                         db_scans = state.get("scans_active", False)
                         currently_scanning = len(scanners) > 0

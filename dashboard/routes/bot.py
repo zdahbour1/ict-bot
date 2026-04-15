@@ -116,3 +116,25 @@ async def resume_scans():
         return {"status": "scans_started"}
     except Exception as e:
         raise HTTPException(500, f"Failed to update scan state: {e}")
+
+
+@router.post("/bot/reconcile")
+async def trigger_reconciliation():
+    """Trigger manual reconciliation. Bot picks this up on next main loop cycle."""
+    try:
+        from db.writer import add_system_log
+        from db.connection import get_session
+        session = get_session()
+        if session:
+            # Use bot_state.last_error field as a signal channel
+            session.execute(
+                __import__('sqlalchemy').text(
+                    "UPDATE bot_state SET last_error = 'RECONCILE_REQUESTED' WHERE id = 1"
+                )
+            )
+            session.commit()
+            session.close()
+        add_system_log("api", "info", "Manual reconciliation requested via dashboard")
+        return {"status": "reconcile_requested"}
+    except Exception as e:
+        raise HTTPException(500, f"Failed to trigger reconciliation: {e}")
