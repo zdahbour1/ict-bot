@@ -147,13 +147,32 @@ def _reconcile(client, exit_manager, ib_positions):
     bot_con_ids = {t.get("ib_con_id") for t in exit_manager.open_trades if t.get("ib_con_id")}
     bot_symbols = {t["symbol"] for t in exit_manager.open_trades}
 
+    # Also check DB for open trades — prevents duplicate adoption (BUG-033)
+    db_open_con_ids = set()
+    try:
+        from db.connection import get_session
+        from sqlalchemy import text
+        session = get_session()
+        if session:
+            rows = session.execute(
+                text("SELECT ib_con_id FROM trades WHERE status='open' AND ib_con_id IS NOT NULL")
+            ).fetchall()
+            db_open_con_ids = {int(r[0]) for r in rows if r[0]}
+            session.close()
+    except Exception as e:
+        log.warning(f"[RECONCILE] Could not check DB for existing trades: {e}")
+
     for pos in ib_positions:
         con_id = pos.get("conId")
         sym = pos.get("symbol", "").replace(" ", "")
         if abs(pos.get("qty", 0)) == 0:
             continue
-        # Skip if already tracked (by conId or symbol)
+        # Skip if already tracked in memory (by conId or symbol)
         if con_id in bot_con_ids or sym in bot_symbols:
+            continue
+        # Skip if already exists in DB (prevents duplicate adoption — BUG-033)
+        if con_id and con_id in db_open_con_ids:
+            log.info(f"[RECONCILE] {sym} (conId={con_id}) already has open trade in DB — skipping")
             continue
 
         ticker = pos.get("ticker", "UNK")

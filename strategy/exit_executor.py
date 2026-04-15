@@ -100,12 +100,30 @@ def execute_exit(client, trade: dict, reason: str) -> float | None:
 
 def execute_roll(client, trade: dict, pnl_pct: float):
     """
-    Close current position and open next strike.
+    Roll a trade: close current position, then open new one at next strike.
+    Uses execute_exit() for the close — same cancel-brackets → verify → sell flow.
     Returns the new trade dict or None if roll failed.
+
+    Sequence:
+    1. Close current trade via execute_exit() (cancels brackets, verifies, sells)
+    2. Open new trade via select_and_enter() (finds new strike, places bracket order)
+
+    If step 1 fails, abort — don't open a new position.
+    If step 2 fails, the old position is closed but no new one opened (logged as error).
     """
     ticker = trade.get("ticker", "QQQ")
     direction = trade.get("direction", "LONG")
 
+    # Step 1: Close current trade using the SAME close function everyone uses
+    log.info(f"[{ticker}] Rolling: closing current position first...")
+    execute_exit(client, trade, reason=f"ROLL at {pnl_pct:+.0%}")
+
+    # Verify the position is actually closed before opening new one
+    if verify_position_exists(client, trade):
+        log.error(f"[{ticker}] Roll aborted — position still open after exit attempt")
+        return None
+
+    # Step 2: Open new position at next strike
     try:
         from strategy.option_selector import select_and_enter, select_and_enter_put
         if direction == "SHORT":
@@ -119,8 +137,8 @@ def execute_roll(client, trade: dict, pnl_pct: float):
             log.info(f"[{ticker}] Rolled to {rolled_trade['symbol']} @ ${rolled_trade['entry_price']:.2f}")
             return rolled_trade
         else:
-            log.warning(f"[{ticker}] Roll failed — no new position opened")
+            log.warning(f"[{ticker}] Roll: old position closed but new entry failed — no new position")
             return None
     except Exception as e:
-        log.error(f"[{ticker}] Roll failed: {e}")
+        log.error(f"[{ticker}] Roll: old position closed but new entry failed: {e}")
         return None
