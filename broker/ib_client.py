@@ -252,24 +252,42 @@ class IBClient:
         atm_strike = min(strikes, key=lambda s: abs(s - price))
         log.info(f"[{ticker}] ATM strike from IB chain: ${atm_strike} (price ${price:.2f})")
 
-        # ── Qualify option contract — try multiple exchanges ──
+        # ── Qualify option contract — try ATM strike first, then nearby strikes ──
+        # Some strikes exist in the chain but don't have 0DTE contracts.
+        # Try the closest strikes until one qualifies.
         right = "C" if option_type == "C" else "P"
+
+        # Build list of candidate strikes: ATM first, then nearest alternates
+        candidates = sorted(strikes, key=lambda s: abs(s - price))[:7]  # ATM + 6 nearest
+        log.info(f"[{ticker}] Candidate strikes: {[f'${s}' for s in candidates[:5]]}...")
+
         qualified = None
         opt_contract = None
-        for exchange in self._OPTION_EXCHANGES:
-            opt_contract = Option(ticker, exp, atm_strike, right, exchange)
-            result = self.ib.qualifyContracts(opt_contract)
-            if result and opt_contract.conId:
-                qualified = result
-                log.info(f"[{ticker}] Option qualified on {exchange}: "
-                         f"{ticker} {exp} ${atm_strike} {right} conId={opt_contract.conId}")
+        winning_strike = None
+
+        for strike in candidates:
+            for exchange in self._OPTION_EXCHANGES:
+                opt_contract = Option(ticker, exp, strike, right, exchange)
+                result = self.ib.qualifyContracts(opt_contract)
+                if result and opt_contract.conId:
+                    qualified = result
+                    winning_strike = strike
+                    if strike != atm_strike:
+                        log.info(f"[{ticker}] ATM ${atm_strike} not available, using ${strike} "
+                                 f"on {exchange} (conId={opt_contract.conId})")
+                    else:
+                        log.info(f"[{ticker}] Option qualified on {exchange}: "
+                                 f"{ticker} {exp} ${strike} {right} conId={opt_contract.conId}")
+                    break
+            if qualified:
                 break
-            log.debug(f"[{ticker}] Option NOT qualified on {exchange}")
 
         if not qualified or not opt_contract or not opt_contract.conId:
-            raise RuntimeError(f"Could not qualify IB option on any exchange: "
-                               f"{ticker} {exp} {atm_strike} {right} "
-                               f"(tried: {self._OPTION_EXCHANGES})")
+            raise RuntimeError(f"Could not qualify IB option for {ticker} {exp} {right} "
+                               f"near ${atm_strike} on any exchange "
+                               f"(tried {len(candidates)} strikes × {len(self._OPTION_EXCHANGES)} exchanges)")
+
+        atm_strike = winning_strike  # Use the strike that actually qualified
 
         # Cache the validated contract
         exp_short = exp[2:]

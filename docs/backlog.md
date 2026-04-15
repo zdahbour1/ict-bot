@@ -70,6 +70,7 @@ Dashboard usable on phone/tablet.
 | **REG-004** | **Exit manager heartbeat too frequent (REGRESSION from ENH-002)** | `update_thread_status()` DB write every 5s inside exit manager monitor loop — unnecessary DB load | Heartbeat every 30s (6 cycles) instead of every 5s | Fixed |
 | **REG-005** | **Stale bot state after crash** | Bot process crashed but DB still showed `status='running'`, `ib_connected=true`. Dashboard "Stop Bot" didn't work because sidecar was also dead | Manual DB cleanup; sidecar must be running for dashboard bot control to work | Fixed (manual cleanup) |
 | **REG-006** | **IB pool connections all timing out (REGRESSION from Steps 3-4)** | `ib_async` ties its asyncio event loop to the thread that calls `ib.connect()`. Pool called `connect_all()` on main thread but ran event loops on dedicated threads. Event loop threads couldn't pump IB events → all calls timed out. | `IBConnection.start()` now does both `connect()` and event loop on the same dedicated thread. `_ready_event` blocks caller until connected. | Fixed |
+| BUG-036 | MSFT option contract qualification fails (code 200: No security definition) | Chain returns strikes like $412.50 that exist for weekly/monthly but not for 0DTE. The single ATM strike fails qualification on all exchanges. | Try ATM + 6 nearest candidate strikes. If ATM fails, fall back to closest qualifying strike. | Fixed |
 
 ### Lessons Learned from Regressions
 
@@ -84,7 +85,8 @@ Dashboard usable on phone/tablet.
 > 4. **No integration test after multi-file changes** — 7 files changed in one commit. Each change was individually sound but the interaction between them (error handler writing to DB + error callback on IB thread) created the blocking cascade.
 
 ### Enhancements
-- **ENH-014**: Button loading states — Start/Stop Bot and Start/Stop Scans buttons show "Starting...", "Stopping..." with blue pulsing color while action is in progress. Buttons disabled during operation to prevent double-clicks.
+- **ENH-014**: Button loading states — Start/Stop Bot and Scans show "Starting..."/"Stopping..." with blue pulse
+- **ENH-015**: Trade count summary badges — total/open/closed/errored counts with colored badges in Trades tab PnlSummary — Start/Stop Bot and Start/Stop Scans buttons show "Starting...", "Stopping..." with blue pulsing color while action is in progress. Buttons disabled during operation to prevent double-clicks.
 - **ENH-002**: Heartbeat monitoring — exit manager (30s), bot main (30s), scanner (60s) heartbeats to thread_status
 - **ENH-003**: Error pipeline — connected `log_error()` to populate errors table for dashboard popup (was empty because only `system_log` was written)
 - **ENH-004**: System status — stale/dead detection in ThreadsTab (>2m=STALE, >5m=DEAD), system log viewer panel with level filtering, health dot indicators

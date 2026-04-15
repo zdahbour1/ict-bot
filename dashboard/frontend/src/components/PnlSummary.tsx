@@ -7,15 +7,32 @@ export default function PnlSummary({ summary }: { summary: Summary | null }) {
 
   return (
     <div className="flex items-center gap-6 mb-4 text-sm">
+      {/* Trade counts — prominent badges */}
+      <div className="flex items-center gap-1.5">
+        <span className="px-2 py-0.5 rounded bg-blue-500/20 text-blue-400 font-bold">{summary.total_trades}</span>
+        <span className="text-gray-500">total</span>
+        <span className="text-gray-700 mx-0.5">|</span>
+        <span className="px-2 py-0.5 rounded bg-green-500/15 text-green-400 font-bold">{summary.open_trades}</span>
+        <span className="text-gray-500">open</span>
+        <span className="text-gray-700 mx-0.5">|</span>
+        <span className="px-2 py-0.5 rounded bg-gray-500/15 text-gray-300 font-bold">{summary.closed_trades}</span>
+        <span className="text-gray-500">closed</span>
+        {summary.errored_trades > 0 && (
+          <>
+            <span className="text-gray-700 mx-0.5">|</span>
+            <span className="px-2 py-0.5 rounded bg-red-500/15 text-red-400 font-bold">{summary.errored_trades}</span>
+            <span className="text-gray-500">errored</span>
+          </>
+        )}
+      </div>
+      <span className="text-gray-700">|</span>
       <div className="flex items-center gap-2">
         <span className="text-gray-500">Open P&L:</span>
         <span className={`font-bold ${clr(summary.open_pnl)}`}>{fmt(summary.open_pnl)}</span>
-        <span className="text-gray-600">({summary.open_trades} open)</span>
       </div>
       <div className="flex items-center gap-2">
         <span className="text-gray-500">Closed:</span>
         <span className={`font-bold ${clr(summary.closed_pnl)}`}>{fmt(summary.closed_pnl)}</span>
-        <span className="text-gray-600">({summary.closed_trades} closed)</span>
       </div>
       <div className="flex items-center gap-2">
         <span className="text-gray-500">Day Total:</span>
