@@ -126,12 +126,25 @@ def main():
     # ── Main loop: read state from DB, process IB orders ──
     import time
     _last_state_check = 0
+    _last_heartbeat = 0
     STATE_CHECK_INTERVAL = 2  # check DB every 2 seconds
+    HEARTBEAT_INTERVAL = 30   # heartbeat every 30 seconds
 
     log.info("Main thread: processing IB order queue (state managed via DB)...")
     while True:
         try:
             now = time.time()
+
+            # ── Bot main heartbeat ────────────────────
+            if now - _last_heartbeat >= HEARTBEAT_INTERVAL:
+                _last_heartbeat = now
+                try:
+                    from db.writer import update_thread_status
+                    scan_status = f"{len(scanners)} scanners" if scanners else "scans off"
+                    update_thread_status("bot-main", None, "running",
+                                         f"Main loop active ({scan_status})")
+                except Exception:
+                    pass
 
             # ── Periodic state check from DB ──────────
             if now - _last_state_check >= STATE_CHECK_INTERVAL:

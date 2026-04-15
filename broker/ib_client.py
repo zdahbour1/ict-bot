@@ -32,6 +32,9 @@ class IBClient:
         self._connected = False
         # Cache of validated contracts: occ_symbol → Option contract
         self._contract_cache = {}
+        # IB error tracking: order_id → {code, message, reqId, contract}
+        self._last_errors = {}
+        self._last_errors_lock = threading.Lock()
 
     # ── Connection ────────────────────────────────────────────
     def connect(self):
@@ -48,7 +51,71 @@ class IBClient:
             if config.IB_ACCOUNT not in accounts:
                 log.warning(f"Configured account {config.IB_ACCOUNT} not found in {accounts}")
         log.info(f"Connected to IB — accounts: {accounts}")
+        self._register_error_handler()
         self._connected = True
+
+    # ── IB Error Event Handling ─────────────────────────────────
+    def _register_error_handler(self):
+        """Register IB error event handler to capture rejection reasons."""
+        self.ib.errorEvent += self._on_ib_error
+        log.info("IB errorEvent handler registered")
+
+    # IB informational codes — not actionable, suppress from error logging
+    _IB_INFO_CODES = {2104, 2106, 2107, 2108, 2119, 2158}
+
+    # IB error codes that indicate order rejection or failure
+    _IB_ACTIONABLE_CODES = {
+        104,    # Can't modify a filled order
+        110,    # Price does not conform to price variation
+        125,    # Invalid order
+        135,    # Can't find order
+        161,    # Cancel attempted when order not in cancelable state
+        201,    # Order rejected — loss of margin
+        202,    # Order cancelled
+        203,    # Security not available for trading
+        399,    # Order message (various warnings)
+        10147,  # OrderId to be cancelled not found
+    }
+
+    # Subset that are truly critical (order rejected/cancelled)
+    _IB_CRITICAL_CODES = {201, 202, 203}
+
+    def _on_ib_error(self, reqId, errorCode, errorString, contract):
+        """Called by ib_async on every IB error/warning event."""
+        # Skip informational messages (connection status, market data farm, etc.)
+        if errorCode in self._IB_INFO_CODES:
+            return
+
+        # Store actionable errors for retrieval by order placement code
+        if errorCode in self._IB_ACTIONABLE_CODES:
+            error_info = {
+                "code": errorCode,
+                "message": errorString,
+                "reqId": reqId,
+                "contract": str(contract) if contract else None,
+            }
+            with self._last_errors_lock:
+                self._last_errors[reqId] = error_info
+
+            # Log to centralized error handler
+            try:
+                from strategy.error_handler import handle_error
+                handle_error("ib_client", "ib_error_event",
+                             RuntimeError(f"IB error {errorCode}: {errorString}"),
+                             context={"reqId": reqId, "errorCode": errorCode,
+                                      "errorString": errorString,
+                                      "contract": str(contract) if contract else None},
+                             critical=(errorCode in self._IB_CRITICAL_CODES))
+            except Exception:
+                pass  # Error handler itself failed — just log below
+
+        # Always log non-informational errors
+        log.warning(f"[IB ERROR] reqId={reqId} code={errorCode}: {errorString}")
+
+    def _get_last_error(self, order_id: int) -> dict | None:
+        """Retrieve and remove the last captured IB error for an order_id."""
+        with self._last_errors_lock:
+            return self._last_errors.pop(order_id, None)
 
     def process_orders(self):
         """Must be called in a loop on the MAIN thread.
@@ -119,9 +186,16 @@ class IBClient:
     def get_atm_put_symbol(self, ticker: str) -> str:
         return self._submit_to_ib(self._ib_get_atm_symbol, ticker, "P")
 
+    # Exchanges to try when qualifying option contracts (in priority order)
+    _OPTION_EXCHANGES = ["SMART", "AMEX", "CBOE", "PSE", "BATS", "ISE"]
+
     def _ib_get_atm_symbol(self, ticker: str, option_type: str) -> str:
         contract = Stock(ticker, "SMART", "USD")
-        self.ib.qualifyContracts(contract)
+        qualified_stock = self.ib.qualifyContracts(contract)
+        if not qualified_stock or not contract.conId:
+            raise RuntimeError(f"Could not qualify stock {ticker} on IB — "
+                               f"conId={getattr(contract, 'conId', 'N/A')}")
+
         ticker_data = self.ib.reqMktData(contract, "", False, False)
         self.ib.sleep(2)
         price = 0.0
@@ -140,15 +214,29 @@ class IBClient:
         if not chains:
             raise RuntimeError(f"No option chain found on IB for {ticker}")
 
+        # ── Select the best chain: prefer one that has today's expiry (0DTE) ──
+        today_str = date.today().strftime("%Y%m%d")
+        log.info(f"[{ticker}] Found {len(chains)} option chains: "
+                 f"{[c.exchange for c in chains]}")
+
+        # First pass: find a chain with today's expiry (0DTE support)
         chain = None
         for c in chains:
-            if c.exchange == "SMART":
+            if today_str in c.expirations:
                 chain = c
+                log.info(f"[{ticker}] Using chain from {c.exchange} (has 0DTE expiry)")
                 break
+
+        # Second pass: fall back to SMART, then any chain
+        if chain is None:
+            for c in chains:
+                if c.exchange == "SMART":
+                    chain = c
+                    break
         if chain is None:
             chain = chains[0]
+            log.warning(f"[{ticker}] No SMART chain found, using {chain.exchange}")
 
-        today_str = date.today().strftime("%Y%m%d")
         expirations = sorted(chain.expirations)
         exp = None
         for e in expirations:
@@ -156,23 +244,37 @@ class IBClient:
                 exp = e
                 break
         if exp is None:
-            raise RuntimeError(f"No future expirations found on IB for {ticker}")
+            raise RuntimeError(f"No future expirations found on IB for {ticker} "
+                               f"(chain={chain.exchange}, expirations={expirations[:5]})")
 
         exp_display = f"{exp[:4]}-{exp[4:6]}-{exp[6:8]}"
         if exp == today_str:
-            log.info(f"[{ticker}] 0DTE expiration on IB: {exp_display}")
+            log.info(f"[{ticker}] 0DTE expiration on IB: {exp_display} (chain={chain.exchange})")
         else:
-            log.info(f"[{ticker}] Nearest IB expiry: {exp_display}")
+            log.info(f"[{ticker}] Nearest IB expiry: {exp_display} (chain={chain.exchange})")
 
         strikes = sorted(chain.strikes)
         atm_strike = min(strikes, key=lambda s: abs(s - price))
         log.info(f"[{ticker}] ATM strike from IB chain: ${atm_strike} (price ${price:.2f})")
 
+        # ── Qualify option contract — try multiple exchanges ──
         right = "C" if option_type == "C" else "P"
-        opt_contract = Option(ticker, exp, atm_strike, right, "SMART")
-        qualified = self.ib.qualifyContracts(opt_contract)
-        if not qualified:
-            raise RuntimeError(f"Could not qualify IB option: {ticker} {exp} {atm_strike} {right}")
+        qualified = None
+        opt_contract = None
+        for exchange in self._OPTION_EXCHANGES:
+            opt_contract = Option(ticker, exp, atm_strike, right, exchange)
+            result = self.ib.qualifyContracts(opt_contract)
+            if result and opt_contract.conId:
+                qualified = result
+                log.info(f"[{ticker}] Option qualified on {exchange}: "
+                         f"{ticker} {exp} ${atm_strike} {right} conId={opt_contract.conId}")
+                break
+            log.debug(f"[{ticker}] Option NOT qualified on {exchange}")
+
+        if not qualified or not opt_contract or not opt_contract.conId:
+            raise RuntimeError(f"Could not qualify IB option on any exchange: "
+                               f"{ticker} {exp} {atm_strike} {right} "
+                               f"(tried: {self._OPTION_EXCHANGES})")
 
         # Cache the validated contract
         exp_short = exp[2:]
@@ -208,7 +310,11 @@ class IBClient:
     def _occ_to_contract(self, occ_symbol: str) -> Option:
         # Return cached contract if available
         if occ_symbol in self._contract_cache:
-            return self._contract_cache[occ_symbol]
+            cached = self._contract_cache[occ_symbol]
+            if cached is not None and getattr(cached, 'conId', 0):
+                return cached
+            # Cached value is invalid — remove and re-qualify
+            del self._contract_cache[occ_symbol]
 
         match = re.match(r'^([A-Z]+)(\d{6})([CP])(\d{8})$', occ_symbol)
         if not match:
@@ -218,12 +324,17 @@ class IBClient:
         right = "C" if match.group(3) == "C" else "P"
         strike = int(match.group(4)) / 1000
         expiry = f"20{exp_str}"
-        contract = Option(ticker, expiry, strike, right, "SMART")
-        qualified = self.ib.qualifyContracts(contract)
-        if not qualified:
-            raise RuntimeError(f"Could not qualify IB contract for {occ_symbol}")
-        self._contract_cache[occ_symbol] = qualified[0]
-        return qualified[0]
+
+        # Try multiple exchanges for qualification
+        for exchange in self._OPTION_EXCHANGES:
+            contract = Option(ticker, expiry, strike, right, exchange)
+            qualified = self.ib.qualifyContracts(contract)
+            if qualified and qualified[0] and getattr(qualified[0], 'conId', 0):
+                self._contract_cache[occ_symbol] = qualified[0]
+                return qualified[0]
+
+        raise RuntimeError(f"Could not qualify IB contract for {occ_symbol} "
+                           f"on any exchange (tried: {self._OPTION_EXCHANGES})")
 
     # ── Option Price (IB real-time) ───────────────────────────
     def get_option_price(self, symbol: str, priority: bool = False) -> float:
@@ -396,7 +507,8 @@ class IBClient:
         log.info(f"[IB] {action} {desc.upper()}: {contracts}x {option_symbol} — "
                  f"orderId={trade.order.orderId} permId={perm_id} conId={con_id} "
                  f"status={status} fill=${fill_price:.2f}")
-        return {
+
+        result = {
             "symbol": option_symbol,
             "contracts": contracts,
             "order_id": trade.order.orderId,
@@ -405,6 +517,15 @@ class IBClient:
             "status": status,
             "fill_price": fill_price,
         }
+
+        # Attach IB error info if the order was rejected/errored
+        ib_error = self._get_last_error(trade.order.orderId)
+        if ib_error:
+            result["ib_error"] = ib_error
+            log.warning(f"[IB] Order {trade.order.orderId} error: "
+                        f"code={ib_error['code']} {ib_error['message']}")
+
+        return result
 
     # ── Bracket Orders (OCO TP + SL on IB) ────────────────────
     def place_bracket_order(self, option_symbol: str, contracts: int,
@@ -473,7 +594,7 @@ class IBClient:
                  f"status={status} fill=${fill_price:.2f} "
                  f"TP={tp_order.orderId}(perm={tp_perm_id}) SL={sl_order.orderId}(perm={sl_perm_id})")
 
-        return {
+        result = {
             "symbol": option_symbol,
             "contracts": contracts,
             "order_id": parent.orderId,
@@ -486,6 +607,15 @@ class IBClient:
             "status": status,
             "fill_price": fill_price,
         }
+
+        # Attach IB error info if the parent order was rejected/errored
+        ib_error = self._get_last_error(parent.orderId)
+        if ib_error:
+            result["ib_error"] = ib_error
+            log.warning(f"[IB] Bracket parent {parent.orderId} error: "
+                        f"code={ib_error['code']} {ib_error['message']}")
+
+        return result
 
     def update_bracket_sl(self, sl_order_id: int, new_sl_price: float) -> bool:
         """Update the stop loss leg of a bracket order."""

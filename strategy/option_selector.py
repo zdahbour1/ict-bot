@@ -8,6 +8,12 @@ import config
 
 log = logging.getLogger(__name__)
 
+# IB order statuses that mean the order FAILED — never create a trade for these
+FAILED_STATUSES = {"Cancelled", "Inactive", "ApiCancelled", "ApiPending", "PendingCancel"}
+
+# IB order statuses that mean the order is working — safe to track
+WORKING_STATUSES = {"Filled", "Submitted", "PreSubmitted"}
+
 
 def select_and_enter(client, ticker: str = "QQQ") -> dict | None:
     """
@@ -62,10 +68,43 @@ def select_and_enter(client, ticker: str = "QQQ") -> dict | None:
         return None
 
     order_status = order_result.get("status", "unknown")
-    if order_status not in ("Filled", "Submitted", "PreSubmitted"):
-        if not order_result.get("dry_run"):
-            log.warning(f"[{ticker}] Order status '{order_status}' — may not have filled. "
-                       f"Will track with pre-order quote as entry.")
+
+    # ── Gate on order status — NEVER create a trade for failed orders ──
+    if order_result.get("dry_run"):
+        pass  # Dry run always proceeds
+    elif order_status in FAILED_STATUSES:
+        ib_error = order_result.get("ib_error", {})
+        error_detail = f"code={ib_error.get('code')} {ib_error.get('message')}" if ib_error else "no IB error details"
+        log.error(f"[{ticker}] Order REJECTED — status='{order_status}' ({error_detail}). "
+                  f"Trade NOT opened.")
+        try:
+            from strategy.error_handler import handle_error
+            handle_error(f"option_selector-{ticker}", "order_rejected",
+                         RuntimeError(f"IB order status '{order_status}': {error_detail}"),
+                         context={"ticker": ticker, "symbol": option_symbol,
+                                  "status": order_status, "ib_error": ib_error,
+                                  "order_id": order_result.get("order_id")},
+                         critical=True)
+        except Exception:
+            pass
+        return None
+    elif order_status not in WORKING_STATUSES:
+        log.error(f"[{ticker}] Order returned unexpected status '{order_status}' — "
+                  f"refusing to create trade. Trade NOT opened.")
+        try:
+            from strategy.error_handler import handle_error
+            handle_error(f"option_selector-{ticker}", "order_unknown_status",
+                         RuntimeError(f"Unexpected IB order status '{order_status}'"),
+                         context={"ticker": ticker, "symbol": option_symbol,
+                                  "status": order_status,
+                                  "order_id": order_result.get("order_id")},
+                         critical=True)
+        except Exception:
+            pass
+        return None
+    elif order_status in ("Submitted", "PreSubmitted"):
+        log.warning(f"[{ticker}] Order status '{order_status}' — not yet filled. "
+                    f"Will track with pre-order quote as entry.")
 
     # ── Extract fill price ────────────────────────────────
     fill_price = order_result.get("fill_price", 0)
@@ -152,9 +191,43 @@ def select_and_enter_put(client, ticker: str = "QQQ") -> dict | None:
         return None
 
     order_status = order_result.get("status", "unknown")
-    if order_status not in ("Filled", "Submitted", "PreSubmitted"):
-        if not order_result.get("dry_run"):
-            log.warning(f"[{ticker}] PUT order status '{order_status}' — may not have filled.")
+
+    # ── Gate on order status — NEVER create a trade for failed orders ──
+    if order_result.get("dry_run"):
+        pass  # Dry run always proceeds
+    elif order_status in FAILED_STATUSES:
+        ib_error = order_result.get("ib_error", {})
+        error_detail = f"code={ib_error.get('code')} {ib_error.get('message')}" if ib_error else "no IB error details"
+        log.error(f"[{ticker}] PUT order REJECTED — status='{order_status}' ({error_detail}). "
+                  f"Trade NOT opened.")
+        try:
+            from strategy.error_handler import handle_error
+            handle_error(f"option_selector-{ticker}", "put_order_rejected",
+                         RuntimeError(f"IB PUT order status '{order_status}': {error_detail}"),
+                         context={"ticker": ticker, "symbol": option_symbol,
+                                  "status": order_status, "ib_error": ib_error,
+                                  "order_id": order_result.get("order_id")},
+                         critical=True)
+        except Exception:
+            pass
+        return None
+    elif order_status not in WORKING_STATUSES:
+        log.error(f"[{ticker}] PUT order returned unexpected status '{order_status}' — "
+                  f"refusing to create trade. Trade NOT opened.")
+        try:
+            from strategy.error_handler import handle_error
+            handle_error(f"option_selector-{ticker}", "put_order_unknown_status",
+                         RuntimeError(f"Unexpected IB PUT order status '{order_status}'"),
+                         context={"ticker": ticker, "symbol": option_symbol,
+                                  "status": order_status,
+                                  "order_id": order_result.get("order_id")},
+                         critical=True)
+        except Exception:
+            pass
+        return None
+    elif order_status in ("Submitted", "PreSubmitted"):
+        log.warning(f"[{ticker}] PUT order status '{order_status}' — not yet filled. "
+                    f"Will track with pre-order quote as entry.")
 
     fill_price = order_result.get("fill_price", 0)
     if fill_price and fill_price > 0:

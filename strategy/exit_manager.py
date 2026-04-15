@@ -170,6 +170,16 @@ class ExitManager:
                 except Exception as e:
                     handle_error("exit_manager", "periodic_reconciliation", e)
 
+            # ── Heartbeat: update thread_status so dashboard knows we're alive ──
+            try:
+                from db.writer import update_thread_status
+                update_thread_status(
+                    "exit_manager", None, "running",
+                    f"Monitoring {len(self.open_trades)} trades",
+                )
+            except Exception:
+                pass  # Heartbeat failure should never crash the monitor loop
+
             time.sleep(config.MONITOR_INTERVAL)
 
     def _check_exits(self):

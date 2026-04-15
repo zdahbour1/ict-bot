@@ -179,9 +179,33 @@ def _reconcile(client, exit_manager, ib_positions):
             "dynamic_sl_pct": -config.STOP_LOSS,
         }
 
-        # Add to exit manager
+        # Add to exit manager (this also writes to DB)
         exit_manager.add_trade(trade)
-        log.info(f"[RECONCILE] Adopted {ticker} {sym} (conId={con_id}): {qty}x @ ${avg_cost:.2f} {direction}")
+
+        # Verify DB record was created — adopted trades MUST have db_id for dashboard visibility
+        if not trade.get("db_id"):
+            log.error(f"[RECONCILE] CRITICAL: Adopted trade {ticker} {sym} has NO db_id — "
+                      f"retrying insert_trade directly")
+            try:
+                from db.writer import insert_trade
+                db_id = insert_trade(trade, config.IB_ACCOUNT or "unknown")
+                if db_id:
+                    trade["db_id"] = db_id
+                    log.info(f"[RECONCILE] Retry succeeded: db_id={db_id} for {ticker} {sym}")
+                else:
+                    from strategy.error_handler import handle_error
+                    handle_error("reconciliation", "adopt_orphan_db_retry",
+                                 RuntimeError(f"insert_trade returned None on retry for {sym}"),
+                                 context={"ticker": ticker, "symbol": sym, "conId": con_id},
+                                 critical=True)
+            except Exception as e:
+                from strategy.error_handler import handle_error
+                handle_error("reconciliation", "adopt_orphan_db_retry", e,
+                             context={"ticker": ticker, "symbol": sym, "conId": con_id},
+                             critical=True)
+
+        log.info(f"[RECONCILE] Adopted {ticker} {sym} (conId={con_id}): {qty}x @ ${avg_cost:.2f} {direction}"
+                 f" db_id={trade.get('db_id', 'MISSING')}")
 
     # ── 3. Matched trades — verify quantities ──
     matched = 0

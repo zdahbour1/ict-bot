@@ -33,15 +33,34 @@ def handle_error(component: str, operation: str, error: Exception,
     else:
         log.warning(log_msg)
 
-    # Store in database
+    # Store in system_log table (general logging)
     try:
         from db.writer import add_system_log
-        details = context or {}
+        details = context.copy() if context else {}
         details["error_type"] = error_type
         details["traceback"] = trace[:2000]
         add_system_log(component, level, f"{operation}: {error_msg}"[:500], details)
     except Exception:
         # If we can't even log to DB, at least it's in the Python log
+        pass
+
+    # Also store in errors table (for dashboard error popup per thread/ticker)
+    try:
+        from db.writer import log_error
+        # Extract ticker from component name (e.g., "scanner-QQQ" → "QQQ")
+        ticker = None
+        if "-" in component:
+            parts = component.split("-", 1)
+            ticker = parts[1] if len(parts) > 1 else None
+        log_error(
+            thread_name=component,
+            ticker=ticker,
+            trade_id=(context or {}).get("trade_id"),
+            error_type=f"{operation}:{error_type}",
+            message=f"{operation}: {error_msg}"[:2000],
+            trace=trace[:5000] if trace else None,
+        )
+    except Exception:
         pass
 
 

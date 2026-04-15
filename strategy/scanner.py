@@ -335,6 +335,19 @@ class Scanner:
                             trade = future.result(timeout=30)  # 30s max for option entry
 
                         if trade:
+                            # ── Validate trade has IB order confirmation ──
+                            if not config.DRY_RUN and not trade.get("ib_order_id") and not trade.get("ib_perm_id"):
+                                log.error(f"[{self.ticker}] Trade dict has no IB order/perm ID — "
+                                          f"refusing to track. Order may not have been placed.")
+                                handle_error(f"scanner-{self.ticker}", "trade_no_ib_id",
+                                             RuntimeError("Trade returned without IB order identifiers"),
+                                             context={"ticker": self.ticker,
+                                                      "trade_keys": list(trade.keys()),
+                                                      "status": trade.get("status")},
+                                             critical=True)
+                                self._entry_pending = False
+                                continue
+
                             trade["signal"]    = signal["signal_type"]
                             trade["ict_entry"] = signal["entry_price"]
                             trade["ict_sl"]    = signal["sl"]
