@@ -7,7 +7,7 @@
 ## CRITICAL — Architecture
 
 ### ARCH-001: Database is the Single Source of Truth
-**Principle**: The PostgreSQL database is the ONLY source of truth for all system state. All other components (exit_manager in-memory list, open_trades.json, dashboard) are read-through caches that refresh from the DB.
+**Principle**: The PostgreSQL database is the ONLY source of truth for all system state. No process should rely on its in-memory cache for state decisions. Every component reads from the DB. Accuracy is more important than speed — PostgreSQL has its own caching layer.
 
 **Current violations**:
 1. `exit_manager.open_trades` (in-memory list) acts as parallel source of truth — trades can exist in memory but not DB, or vice versa
@@ -17,13 +17,47 @@
 5. `add_trade()` writes to in-memory list first, then DB — if DB write fails, state diverges
 
 **Required changes**:
-- Exit manager should query DB for open trades on every cycle (or cache with short TTL)
-- `add_trade()` should write to DB FIRST, only add to memory cache if DB succeeds
-- Remove `open_trades.json` — DB is the persistence layer
-- On startup, rebuild in-memory state from DB open trades, not from JSON file
-- Dashboard already reads from DB (correct)
+- Exit manager reads open trades from DB every cycle (5s) — no in-memory list as source of truth
+- `add_trade()` writes to DB FIRST. If DB write fails, trade is NOT tracked (fail-safe).
+- Remove `open_trades.json` entirely — DB is the persistence layer
+- On startup, rebuild state from DB, not from JSON file
+- All trade state decisions (is this trade open? what's the qty?) query the DB
+- Dashboard already reads from DB (correct pattern)
 
 Status: **Tracked — needs incremental implementation**
+
+### ARCH-002: Row-Level Locking for Trade State Transitions
+**Principle**: When changing the state of any trade (open→closed, updating price, rolling), the process MUST use `SELECT ... FOR UPDATE` (row-level locking) to prevent race conditions between parallel components.
+
+**Why this matters**: Multiple components run in parallel:
+- Exit manager (every 5s, checks all open trades)
+- Scanner threads (17+, can place orders concurrently)
+- Reconciliation (every 2min, can close/adopt trades)
+- Dashboard API (user clicks Close, Reconcile Now)
+- IB bracket orders (fire independently on IB servers)
+
+Without row-level locking, two processes can both read a trade as "open", both decide to close it, and both send sell orders → negative position.
+
+**Required implementation**:
+- `close_trade()` in db/writer.py: `SELECT ... FOR UPDATE WHERE id=X AND status='open'` — if status is already 'closed', skip (another process got there first)
+- `insert_trade()`: use DB-generated ID, return it immediately
+- `update_trade_price()`: `SELECT ... FOR UPDATE` to prevent stale overwrites
+- Choose blocking vs non-blocking:
+  - Exit manager: blocking wait (critical path, must complete)
+  - Reconciliation: `FOR UPDATE NOWAIT` or `SKIP LOCKED` (best-effort, retries next cycle)
+  - Dashboard close: blocking wait (user action, must complete)
+- All state transitions go through DB — no in-memory-only state changes
+
+**Example close_trade with locking**:
+```sql
+BEGIN;
+SELECT id FROM trades WHERE id = :trade_id AND status = 'open' FOR UPDATE;
+-- If no row returned → trade already closed by another process → ROLLBACK
+UPDATE trades SET status = 'closed', exit_price = :price, ... WHERE id = :trade_id;
+COMMIT;
+```
+
+Status: **Tracked — implement alongside ARCH-001**
 
 ### BUG-038: QQQ 634 Call closed 3 times — negative position (-6 contracts)
 The QQQ 634 call was rolled (ENH-007 rolling logic), but after rolling, the old
