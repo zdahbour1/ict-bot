@@ -107,6 +107,58 @@ utils/
 
 Status: **Planned — implement after ARCH-001/002 testing is stable**
 
+### ARCH-004: Automated Regression Test Suite
+**Principle**: Every bug fix and enhancement must have a corresponding test. No code change ships without passing the full regression suite. Tests run automatically before commits.
+
+**Test categories**:
+
+1. **Unit tests** (no IB, no DB — pure logic)
+   - exit_conditions.py: evaluate_exit() with various P&L scenarios
+   - signal_engine.py: detect() with mock bar data
+   - OCC symbol parsing (once extracted to utils/)
+   - Time window calculations
+
+2. **DB integration tests** (real PostgreSQL, no IB)
+   - insert_trade() → returns id
+   - close_trade() with row-level locking: close same trade twice → second returns False
+   - update_trade_price() with GREATEST: peak never downgrades
+   - get_open_trades_from_db(): returns correct trades
+   - Reconciliation pass 1: DB trade not on IB → closed
+   - Reconciliation pass 2: IB position not in DB → adopted
+   - Duplicate adoption prevention (BUG-033)
+
+3. **IB integration tests** (mock IB or paper trading)
+   - Order placement returns valid order_id/perm_id/con_id
+   - Position check before sell: qty=0 → skip sell (BUG-039)
+   - Position check before sell: negative qty → abort (BUG-039)
+   - Bracket cancel before sell (BUG-022)
+   - Multi-exchange contract qualification fallback (ENH-009, BUG-036)
+   - Timeout recovery: orphaned fill adoption (BUG-032)
+
+4. **End-to-end scenarios** (full system with paper IB)
+   - Signal → order → fill → DB record → monitoring → exit → DB closed
+   - Rolling: old trade closed → new trade opened → no double-close
+   - Dashboard close: click Close → exit_manager sees it closed
+   - Restart: trades survive in DB, resume monitoring
+   - Reconciliation: stale DB trades cleaned, orphan IB positions adopted
+   - 17 tickers simultaneous entry: all tracked in DB, no timeouts
+
+5. **Race condition tests**
+   - Two threads close same trade simultaneously → only one succeeds
+   - Exit manager + dashboard close race → no negative position
+   - Reconciliation + exit manager close race → no double-close
+   - Scanner entry + exit manager close on same ticker → no conflict
+
+**Tools to consider**:
+- pytest for all test categories
+- pytest-postgresql for DB integration tests with fresh schema per test
+- unittest.mock for IB client mocking
+- Docker test containers for isolated PostgreSQL
+- Pre-commit hooks to run test suite before every commit
+- CI/CD (GitHub Actions) for automated test runs on push
+
+Status: **Planned — implement alongside ARCH-003 refactoring**
+
 ### BUG-038: QQQ 634 Call closed 3 times — negative position (-6 contracts)
 The QQQ 634 call was rolled (ENH-007 rolling logic), but after rolling, the old
 position kept being "closed" repeatedly. Each close sold 2 more contracts, resulting
