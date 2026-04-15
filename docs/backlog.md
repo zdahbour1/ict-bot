@@ -69,6 +69,7 @@ Dashboard usable on phone/tablet.
 | **REG-003** | **Timeout recovery completely broken (REGRESSION from ENH-006)** | ENH-006 refactor moved timeout handling into `TradeEntryManager._handle_timeout()` but `ThreadPoolExecutor` was already closed. The 5-second recovery window that saves orphaned trades was replaced with `pass`. Trades filling on IB between 30-35s were never tracked. | Keep `ThreadPoolExecutor` alive during full 35s window. `finally` block shuts it down after recovery attempt | Fixed |
 | **REG-004** | **Exit manager heartbeat too frequent (REGRESSION from ENH-002)** | `update_thread_status()` DB write every 5s inside exit manager monitor loop — unnecessary DB load | Heartbeat every 30s (6 cycles) instead of every 5s | Fixed |
 | **REG-005** | **Stale bot state after crash** | Bot process crashed but DB still showed `status='running'`, `ib_connected=true`. Dashboard "Stop Bot" didn't work because sidecar was also dead | Manual DB cleanup; sidecar must be running for dashboard bot control to work | Fixed (manual cleanup) |
+| **REG-006** | **IB pool connections all timing out (REGRESSION from Steps 3-4)** | `ib_async` ties its asyncio event loop to the thread that calls `ib.connect()`. Pool called `connect_all()` on main thread but ran event loops on dedicated threads. Event loop threads couldn't pump IB events → all calls timed out. | `IBConnection.start()` now does both `connect()` and event loop on the same dedicated thread. `_ready_event` blocks caller until connected. | Fixed |
 
 ### Lessons Learned from Regressions
 
