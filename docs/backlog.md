@@ -84,6 +84,7 @@ Dashboard usable on phone/tablet.
 > 4. **No integration test after multi-file changes** — 7 files changed in one commit. Each change was individually sound but the interaction between them (error handler writing to DB + error callback on IB thread) created the blocking cascade.
 
 ### Enhancements
+- **ENH-014**: Button loading states — Start/Stop Bot and Start/Stop Scans buttons show "Starting...", "Stopping..." with blue pulsing color while action is in progress. Buttons disabled during operation to prevent double-clicks.
 - **ENH-002**: Heartbeat monitoring — exit manager (30s), bot main (30s), scanner (60s) heartbeats to thread_status
 - **ENH-003**: Error pipeline — connected `log_error()` to populate errors table for dashboard popup (was empty because only `system_log` was written)
 - **ENH-004**: System status — stale/dead detection in ThreadsTab (>2m=STALE, >5m=DEAD), system log viewer panel with level filtering, health dot indicators

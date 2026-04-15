@@ -20,6 +20,8 @@ function BotStatusDot({ status }: { status: string }) {
 export default function App() {
   const [tab, setTab] = useState<Tab>('trades');
   const [refreshInterval, setRefreshInterval] = useState(15000);
+  const [botBusy, setBotBusy] = useState<'starting' | 'stopping' | null>(null);
+  const [scanBusy, setScanBusy] = useState(false);
 
   const { data: botStatus, refetch: refetchBot } = useApi<BotStatus>('/bot/status', 10000);
   const { data: summaryData, refetch: refetchSummary } = useApi<Summary>('/summary', refreshInterval);
@@ -33,14 +35,20 @@ export default function App() {
   const handleStartStop = async () => {
     if (bot.status === 'running') {
       if (confirm('Stop the bot entirely? This stops IB connection, all monitoring, and all threads.')) {
-        await apiPost('/bot/stop');
-        refetchBot();
+        setBotBusy('stopping');
+        try {
+          await apiPost('/bot/stop');
+        } finally {
+          setTimeout(() => { refetchBot(); setBotBusy(null); }, 3000);
+        }
       }
     } else {
+      setBotBusy('starting');
       try {
         await apiPost('/bot/start');
-        refetchBot();
+        setTimeout(() => { refetchBot(); setBotBusy(null); }, 5000);
       } catch (e: any) {
+        setBotBusy(null);
         alert(`Failed to start bot:\n\n${e.message}\n\nMake sure IB TWS/Gateway is running.`);
         refetchBot();
       }
@@ -48,12 +56,13 @@ export default function App() {
   };
 
   const handleScanToggle = async () => {
+    setScanBusy(true);
     if (scansActive) {
       await apiPost('/bot/pause-scans');
     } else {
       await apiPost('/bot/resume-scans');
     }
-    setTimeout(refetchBot, 2000);
+    setTimeout(() => { refetchBot(); setScanBusy(false); }, 2000);
   };
 
   const refetchAll = () => { refetchTrades(); refetchSummary(); };
@@ -90,22 +99,26 @@ export default function App() {
             <option value={300000}>5 min</option>
           </select>
           {bot.status === 'running' && (
-            <button onClick={handleScanToggle}
-              className={`px-3 py-1.5 text-xs rounded-md font-medium ${
-                scansActive
-                  ? 'bg-yellow-600 text-white hover:bg-yellow-700'
-                  : 'bg-green-600 text-white hover:bg-green-700'
+            <button onClick={handleScanToggle} disabled={scanBusy || !!botBusy}
+              className={`px-3 py-1.5 text-xs rounded-md font-medium transition-all ${
+                scanBusy
+                  ? 'bg-blue-600 text-white animate-pulse cursor-wait'
+                  : scansActive
+                    ? 'bg-yellow-600 text-white hover:bg-yellow-700'
+                    : 'bg-green-600 text-white hover:bg-green-700'
               }`}>
-              {scansActive ? 'Stop Scans' : 'Start Scans'}
+              {scanBusy ? (scansActive ? 'Stopping Scans...' : 'Starting Scans...') : scansActive ? 'Stop Scans' : 'Start Scans'}
             </button>
           )}
-          <button onClick={handleStartStop}
-            className={`px-3 py-1.5 text-xs rounded-md font-medium ${
-              bot.status === 'running'
-                ? 'bg-red-600 text-white hover:bg-red-700'
-                : 'bg-green-600 text-white hover:bg-green-700'
+          <button onClick={handleStartStop} disabled={!!botBusy}
+            className={`px-3 py-1.5 text-xs rounded-md font-medium transition-all ${
+              botBusy
+                ? 'bg-blue-600 text-white animate-pulse cursor-wait'
+                : bot.status === 'running'
+                  ? 'bg-red-600 text-white hover:bg-red-700'
+                  : 'bg-green-600 text-white hover:bg-green-700'
             }`}>
-            {bot.status === 'running' ? 'Stop Bot' : 'Start Bot'}
+            {botBusy === 'stopping' ? 'Stopping...' : botBusy === 'starting' ? 'Starting...' : bot.status === 'running' ? 'Stop Bot' : 'Start Bot'}
           </button>
         </div>
       </nav>
