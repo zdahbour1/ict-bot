@@ -4,6 +4,52 @@
 
 ---
 
+## CRITICAL — Must Fix
+
+### BUG-033: Duplicate open trades in DB (GOOGL)
+Two rows in trades table with status='open' for GOOGL. Reconciliation closed one
+but the other remains open in DB despite being closed on IB.
+- **Symptoms**: Dashboard shows stale open trade that doesn't exist on IB
+- **Likely cause**: Reconciliation adopted the same IB position twice, or trade was
+  entered via timeout recovery AND normal path simultaneously
+- **Fix needed**: Reconciliation must check for existing DB records by conId before
+  adopting. Dedup check: if a trade with same ib_con_id already exists in DB, skip.
+- Status: **Not fixed**
+
+### BUG-034: Negative position / double-close (regression of BUG-022)
+Three trades in IB show negative contract count — same trade being closed twice.
+One close from the bot's exit manager, one from the IB bracket order (TP or SL hit).
+- **Symptoms**: -2 position on IB (should be 0 after close)
+- **Root cause**: BUG-022 was fixed (cancel brackets → verify → sell) but the fix
+  may not be working correctly with the new parallel connection pool architecture.
+  Exit manager on Connection 0 cancels brackets, but the bracket orders on IB may
+  have already filled on a different connection before the cancel arrives.
+- **Race condition**: IB bracket fires TP/SL → exit manager also decides to exit →
+  both close the same position → negative position
+- **Fix needed**: Before sending any sell order, ALWAYS check current IB position
+  quantity. If position is already 0, skip the sell. Add position lock per ticker.
+- Status: **Not fixed — CRITICAL**
+
+### BUG-035: Option rolling conflicts with bracket orders
+Rolling logic (ENH-007) is currently enabled at 70% of PROFIT_TARGET but does NOT
+cancel bracket orders before rolling. This creates a conflict:
+- Bot decides to roll at 70% TP → closes current trade → opens new trade
+- But IB bracket TP order is still active at 100% TP → IB may fill the TP
+  on the OLD position that was already closed → negative position
+- **Current config**: ROLL_ENABLED=True, ROLL_THRESHOLD=0.70 (70% of TP)
+- **Required behavior**:
+  1. Roll should trigger at (bracket_TP - 10%) to ensure bot rolls BEFORE IB bracket fires
+  2. On roll decision: cancel ALL bracket orders first
+  3. Close the current position via market order
+  4. Open new trade at the next appropriate strike
+  5. Place new bracket orders on the new trade
+- **Additional concern**: `execute_roll()` in exit_executor.py currently calls
+  `select_and_enter()` which places a NEW bracket order, but does NOT cancel
+  the OLD bracket orders first. The old brackets reference the old contract.
+- Status: **Not fixed — needs redesign**
+
+---
+
 ## HIGH — Important for Reliable Operation
 
 ### ENH-001: IB Streaming Market Data
@@ -11,9 +57,13 @@ Replace snapshot polling with streaming subscriptions for sub-second price updat
 Spec: docs/production_improvements.md
 Status: Not started
 
-### ENH-007: Option Rolling Logic
-At ~70% profit, close and roll to next strike.
-Status: Implemented but untested with live market
+### ENH-007: Option Rolling Logic — REDESIGN NEEDED
+Current implementation has conflicts with bracket orders (see BUG-035).
+Needs full redesign:
+- Roll trigger: at (bracket TP level - 10%) instead of fixed 70% threshold
+- Sequence: cancel brackets → close position → open new position → new brackets
+- Must be atomic: if any step fails, abort and leave position as-is
+Status: Needs redesign per BUG-035
 
 ### ENH-008: TP to Trailing Stop
 At 100% TP, move SL to TP level instead of hard exit.
