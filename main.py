@@ -43,19 +43,35 @@ def main():
     log.info("=" * 60)
 
     # ── Connect to broker ─────────────────────────────────
+    pool = None  # IB connection pool (None if not using IB)
+
     if config.USE_IB:
         from broker.ib_client import IBClient
-        client = IBClient()
+        from broker.ib_pool import IBConnectionPool
+
+        # Create connection pool: 1 exit + 2 scanner connections
+        num_scanner_conns = max(1, min(4, (len(config.TICKERS) + 8) // 9))
+        log.info(f"Creating IB connection pool: 1 exit + {num_scanner_conns} scanner connections")
+        pool = IBConnectionPool(num_scanner_connections=num_scanner_conns)
+        pool.connect_all()
+        pool.start_all_loops()
+
+        # Exit manager gets a dedicated IBClient on the exit connection
+        client = IBClient(pool.exit_conn, pool.contract_cache, pool.cache_lock)
+        log.info(f"IB connection pool active: {len(pool.all_connections)} connections")
+
     elif config.USE_SCHWAB:
         from broker.schwab_client import SchwabClient
         client = SchwabClient()
+        client.connect()
     elif config.USE_ALPACA:
         from broker.alpaca_client import AlpacaClient
         client = AlpacaClient()
+        client.connect()
     else:
         from broker.tastytrade_client import TastytradeClient
         client = TastytradeClient()
-    client.connect()
+        client.connect()
 
     # ── Update bot state in DB ────────────────────────────
     try:
@@ -178,14 +194,26 @@ def main():
                         currently_scanning = len(scanners) > 0
 
                         if db_scans and not currently_scanning:
-                            # Start scanners
+                            # Start scanners — each gets its own IBClient from the pool
                             log.info("DB: scans_active=True — starting scanners...")
                             scanners.clear()
                             for i, ticker in enumerate(config.TICKERS):
-                                scanner = Scanner(client, exit_manager, ticker=ticker, scan_offset=i * 2)
+                                if pool:
+                                    # Pool mode: each scanner gets its own IBClient
+                                    # backed by a scanner connection from the pool
+                                    scanner_conn = pool.get_scanner_connection(ticker)
+                                    scanner_client = IBClient(scanner_conn,
+                                                              pool.contract_cache,
+                                                              pool.cache_lock)
+                                else:
+                                    # Non-IB broker: shared client
+                                    scanner_client = client
+                                scanner = Scanner(scanner_client, exit_manager,
+                                                  ticker=ticker, scan_offset=i * 2)
                                 scanner.start()
                                 scanners.append(scanner)
-                            log.info(f"Started {len(scanners)} scanner threads")
+                            log.info(f"Started {len(scanners)} scanner threads"
+                                     f"{f' on {len(pool.scanner_conns)} IB connections' if pool else ''}")
                             try:
                                 add_system_log("scanner", "info", f"Scanners started ({len(scanners)} tickers)")
                             except Exception as e:
@@ -209,7 +237,11 @@ def main():
                     log.debug(f"State check error: {e}")
 
             # ── Process IB orders ─────────────────────
-            if hasattr(client, 'process_orders'):
+            if pool:
+                # Pool mode: event loops run on their own threads
+                # Main thread just sleeps briefly
+                time.sleep(0.5)
+            elif hasattr(client, 'process_orders'):
                 client.process_orders()
             else:
                 time.sleep(0.5)
@@ -226,11 +258,20 @@ def main():
                 pass
             time.sleep(1)
 
-    _shutdown_cleanup()
+    _shutdown_cleanup(pool)
 
 
-def _shutdown_cleanup():
-    """Mark bot and all threads as stopped in DB."""
+def _shutdown_cleanup(pool=None):
+    """Mark bot and all threads as stopped in DB. Stop IB pool if active."""
+    # Stop IB connection pool
+    if pool:
+        try:
+            pool.stop_all()
+            log.info("IB connection pool stopped")
+        except Exception as e:
+            log.debug(f"Pool shutdown: {e}")
+
+    # Update DB
     try:
         from db.writer import update_bot_state, update_thread_status, set_ib_connected, set_stop_requested, add_system_log
         update_bot_state("stopped")
@@ -238,6 +279,8 @@ def _shutdown_cleanup():
         set_stop_requested(False)
         for ticker in config.TICKERS:
             update_thread_status(f"scanner-{ticker}", ticker, "stopped", "Bot shut down")
+        update_thread_status("exit_manager", None, "stopped", "Bot shut down")
+        update_thread_status("bot-main", None, "stopped", "Bot shut down")
         add_system_log("bot", "info", "Bot shut down gracefully")
         log.info("DB updated: bot and threads marked as stopped")
     except Exception as e:

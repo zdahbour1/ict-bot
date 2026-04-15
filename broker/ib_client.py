@@ -25,19 +25,41 @@ log = logging.getLogger(__name__)
 
 
 class IBClient:
-    def __init__(self):
-        self.ib = IB()
-        self._order_queue = queue.Queue()
-        self._priority_queue = queue.Queue()  # Exit manager gets priority
-        self._connected = False
-        # Cache of validated contracts: occ_symbol → Option contract
-        self._contract_cache = {}
-        # IB error tracking: order_id → {code, message, reqId, contract}
-        self._last_errors = {}
-        self._last_errors_lock = threading.Lock()
+    """
+    IB API client. Wraps an IBConnection from the connection pool.
+
+    Two modes:
+    1. Pool mode: pass an IBConnection + shared cache (preferred)
+    2. Legacy mode: no args — creates its own IB() and queues (backwards compatible)
+    """
+
+    def __init__(self, connection=None, contract_cache=None, cache_lock=None):
+        if connection is not None:
+            # ── Pool mode: use provided IBConnection ──
+            self._conn = connection
+            self.ib = connection.ib
+            self._contract_cache = contract_cache if contract_cache is not None else {}
+            self._cache_lock = cache_lock if cache_lock is not None else threading.Lock()
+            self._connected = connection.connected
+            self._pool_mode = True
+        else:
+            # ── Legacy mode: standalone IB connection ──
+            self._conn = None
+            self.ib = IB()
+            self._contract_cache = {}
+            self._cache_lock = threading.Lock()
+            self._connected = False
+            self._pool_mode = False
+            self._order_queue = queue.Queue()
+            self._priority_queue = queue.Queue()
+            self._last_errors = {}
+            self._last_errors_lock = threading.Lock()
 
     # ── Connection ────────────────────────────────────────────
     def connect(self):
+        """Connect to IB. Only used in legacy mode — pool mode connects via pool."""
+        if self._pool_mode:
+            raise RuntimeError("IBClient in pool mode — use pool.connect_all() instead")
         log.info(f"Connecting to Interactive Brokers at {config.IB_HOST}:{config.IB_PORT} "
                  f"(clientId={config.IB_CLIENT_ID})...")
         self.ib.connect(
@@ -54,53 +76,27 @@ class IBClient:
         self._register_error_handler()
         self._connected = True
 
-    # ── IB Error Event Handling ─────────────────────────────────
+    # ── IB Error Event Handling (legacy mode only) ──────────────
     def _register_error_handler(self):
-        """Register IB error event handler to capture rejection reasons."""
+        if self._pool_mode:
+            return  # Pool connections register their own handlers
         self.ib.errorEvent += self._on_ib_error
         log.info("IB errorEvent handler registered")
 
-    # IB informational codes — not actionable, suppress from error logging
     _IB_INFO_CODES = {2104, 2106, 2107, 2108, 2119, 2158}
-
-    # IB error codes that indicate order rejection or failure
-    _IB_ACTIONABLE_CODES = {
-        104,    # Can't modify a filled order
-        110,    # Price does not conform to price variation
-        125,    # Invalid order
-        135,    # Can't find order
-        161,    # Cancel attempted when order not in cancelable state
-        201,    # Order rejected — loss of margin
-        202,    # Order cancelled
-        203,    # Security not available for trading
-        399,    # Order message (various warnings)
-        10147,  # OrderId to be cancelled not found
-    }
-
-    # Subset that are truly critical (order rejected/cancelled)
+    _IB_ACTIONABLE_CODES = {104, 110, 125, 135, 161, 201, 202, 203, 399, 10147}
     _IB_CRITICAL_CODES = {201, 202, 203}
 
     def _on_ib_error(self, reqId, errorCode, errorString, contract):
-        """Called by ib_async on every IB error/warning event.
-
-        CRITICAL: This runs on the IB event loop thread. It must NEVER block
-        (no DB writes, no network calls). Only store in memory and log.
-        """
-        # Skip informational messages (connection status, market data farm, etc.)
+        """Legacy mode error handler. Non-blocking."""
         if errorCode in self._IB_INFO_CODES:
             return
-
-        # Store actionable errors for retrieval by order placement code
         if errorCode in self._IB_ACTIONABLE_CODES:
             with self._last_errors_lock:
                 self._last_errors[reqId] = {
-                    "code": errorCode,
-                    "message": errorString,
-                    "reqId": reqId,
-                    "contract": str(contract) if contract else None,
+                    "code": errorCode, "message": errorString,
+                    "reqId": reqId, "contract": str(contract) if contract else None,
                 }
-
-        # Log to Python logger only — NO DB writes on the IB thread
         if errorCode in self._IB_CRITICAL_CODES:
             log.error(f"[IB ERROR] reqId={reqId} code={errorCode}: {errorString}")
         else:
@@ -108,13 +104,15 @@ class IBClient:
 
     def _get_last_error(self, order_id: int) -> dict | None:
         """Retrieve and remove the last captured IB error for an order_id."""
+        if self._pool_mode:
+            return self._conn.get_last_error(order_id)
         with self._last_errors_lock:
             return self._last_errors.pop(order_id, None)
 
     def process_orders(self):
-        """Must be called in a loop on the MAIN thread.
-        Priority queue (exit manager) always processed first."""
-        # Process ALL priority items first (trade monitoring)
+        """Legacy mode only: process queues on the main thread."""
+        if self._pool_mode:
+            return  # Pool connections have their own event loops
         while not self._priority_queue.empty():
             try:
                 func, args, result_event, result_holder = self._priority_queue.get_nowait()
@@ -126,7 +124,6 @@ class IBClient:
                     result_event.set()
             except queue.Empty:
                 break
-        # Then process one normal item (scanner requests)
         if not self._order_queue.empty():
             try:
                 func, args, result_event, result_holder = self._order_queue.get_nowait()
@@ -140,7 +137,11 @@ class IBClient:
                 pass
         self.ib.sleep(0.1)
 
-    def _submit_to_ib(self, func, *args, timeout=30, priority=False):
+    def _submit_to_ib(self, func, *args, timeout=60, priority=False):
+        """Submit a function to run on the IB event loop thread."""
+        if self._pool_mode:
+            return self._conn.submit(func, *args, timeout=timeout)
+        # Legacy mode: use internal queues
         result_event = threading.Event()
         result_holder = {}
         q = self._priority_queue if priority else self._order_queue
