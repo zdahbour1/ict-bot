@@ -81,36 +81,30 @@ class IBClient:
     _IB_CRITICAL_CODES = {201, 202, 203}
 
     def _on_ib_error(self, reqId, errorCode, errorString, contract):
-        """Called by ib_async on every IB error/warning event."""
+        """Called by ib_async on every IB error/warning event.
+
+        CRITICAL: This runs on the IB event loop thread. It must NEVER block
+        (no DB writes, no network calls). Only store in memory and log.
+        """
         # Skip informational messages (connection status, market data farm, etc.)
         if errorCode in self._IB_INFO_CODES:
             return
 
         # Store actionable errors for retrieval by order placement code
         if errorCode in self._IB_ACTIONABLE_CODES:
-            error_info = {
-                "code": errorCode,
-                "message": errorString,
-                "reqId": reqId,
-                "contract": str(contract) if contract else None,
-            }
             with self._last_errors_lock:
-                self._last_errors[reqId] = error_info
+                self._last_errors[reqId] = {
+                    "code": errorCode,
+                    "message": errorString,
+                    "reqId": reqId,
+                    "contract": str(contract) if contract else None,
+                }
 
-            # Log to centralized error handler
-            try:
-                from strategy.error_handler import handle_error
-                handle_error("ib_client", "ib_error_event",
-                             RuntimeError(f"IB error {errorCode}: {errorString}"),
-                             context={"reqId": reqId, "errorCode": errorCode,
-                                      "errorString": errorString,
-                                      "contract": str(contract) if contract else None},
-                             critical=(errorCode in self._IB_CRITICAL_CODES))
-            except Exception:
-                pass  # Error handler itself failed — just log below
-
-        # Always log non-informational errors
-        log.warning(f"[IB ERROR] reqId={reqId} code={errorCode}: {errorString}")
+        # Log to Python logger only — NO DB writes on the IB thread
+        if errorCode in self._IB_CRITICAL_CODES:
+            log.error(f"[IB ERROR] reqId={reqId} code={errorCode}: {errorString}")
+        else:
+            log.warning(f"[IB ERROR] reqId={reqId} code={errorCode}: {errorString}")
 
     def _get_last_error(self, order_id: int) -> dict | None:
         """Retrieve and remove the last captured IB error for an order_id."""
@@ -308,13 +302,11 @@ class IBClient:
         return False
 
     def _occ_to_contract(self, occ_symbol: str) -> Option:
-        # Return cached contract if available
+        # Return cached contract if available (fast path — no IB call)
         if occ_symbol in self._contract_cache:
             cached = self._contract_cache[occ_symbol]
             if cached is not None and getattr(cached, 'conId', 0):
                 return cached
-            # Cached value is invalid — remove and re-qualify
-            del self._contract_cache[occ_symbol]
 
         match = re.match(r'^([A-Z]+)(\d{6})([CP])(\d{8})$', occ_symbol)
         if not match:
@@ -325,16 +317,23 @@ class IBClient:
         strike = int(match.group(4)) / 1000
         expiry = f"20{exp_str}"
 
-        # Try multiple exchanges for qualification
-        for exchange in self._OPTION_EXCHANGES:
+        # Try SMART first (most common), then fall back to other exchanges
+        contract = Option(ticker, expiry, strike, right, "SMART")
+        qualified = self.ib.qualifyContracts(contract)
+        if qualified and qualified[0] and getattr(qualified[0], 'conId', 0):
+            self._contract_cache[occ_symbol] = qualified[0]
+            return qualified[0]
+
+        # SMART failed — try other exchanges (one at a time)
+        for exchange in self._OPTION_EXCHANGES[1:]:  # skip SMART, already tried
             contract = Option(ticker, expiry, strike, right, exchange)
             qualified = self.ib.qualifyContracts(contract)
             if qualified and qualified[0] and getattr(qualified[0], 'conId', 0):
                 self._contract_cache[occ_symbol] = qualified[0]
+                log.info(f"[IB] Contract {occ_symbol} qualified on {exchange} (SMART failed)")
                 return qualified[0]
 
-        raise RuntimeError(f"Could not qualify IB contract for {occ_symbol} "
-                           f"on any exchange (tried: {self._OPTION_EXCHANGES})")
+        raise RuntimeError(f"Could not qualify IB contract for {occ_symbol}")
 
     # ── Option Price (IB real-time) ───────────────────────────
     def get_option_price(self, symbol: str, priority: bool = False) -> float:

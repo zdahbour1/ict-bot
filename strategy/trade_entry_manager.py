@@ -175,29 +175,54 @@ class TradeEntryManager:
             return None
 
     def _place_order_with_timeout(self, signal: Signal) -> dict | None:
-        """Place order via thread pool with 30s timeout."""
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        """Place order via thread pool with 30s timeout + 5s recovery.
+
+        The ThreadPoolExecutor stays alive during the entire recovery window
+        so the future can still deliver a result after the initial timeout.
+        """
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
             if signal.direction == "SHORT":
                 future = pool.submit(select_and_enter_put, self.client, self.ticker)
             else:
                 future = pool.submit(select_and_enter, self.client, self.ticker)
-            return future.result(timeout=30)
 
-    def _handle_timeout(self, signal: Signal):
-        """Handle trade entry timeout — attempt recovery."""
-        log.warning(f"[{self.ticker}] Trade entry timed out (30s) — checking for orphaned IB order...")
-        self._errors_today += 1
+            try:
+                return future.result(timeout=30)
+            except concurrent.futures.TimeoutError:
+                # Order may have been placed on IB but we timed out waiting.
+                # Give 5 more seconds before giving up.
+                log.warning(f"[{self.ticker}] Trade entry timed out (30s) — "
+                            f"waiting 5 more seconds for recovery...")
+                self._errors_today += 1
 
-        # Try to recover: wait 5 more seconds for the future
-        orphan_trade = None
-        try:
-            # Note: future is in the enclosing scope's thread pool which is now shut down
-            # The timeout recovery here relies on check_recent_fills instead
-            pass
-        except Exception:
-            pass
+                orphan_trade = None
+                try:
+                    orphan_trade = future.result(timeout=5)
+                except (concurrent.futures.TimeoutError, Exception):
+                    pass
 
-        # Check IB for orphaned fills
+                if orphan_trade:
+                    # Trade DID complete — recovered!
+                    log.warning(f"[{self.ticker}] Timeout recovery: trade completed! Adopting.")
+                    handle_error(f"scanner-{self.ticker}", "trade_entry_timeout_recovered",
+                                 TimeoutError("Trade entry timed out but was recovered"),
+                                 context={"ticker": self.ticker,
+                                          "symbol": orphan_trade.get("symbol")})
+                    return orphan_trade
+                else:
+                    # Could not recover — check IB for orphaned fills
+                    self._check_orphaned_fills()
+                    handle_error(f"scanner-{self.ticker}", "trade_entry_timeout",
+                                 TimeoutError("Trade entry timed out after 35s"),
+                                 context={"ticker": self.ticker, "recovered": False},
+                                 critical=True)
+                    raise concurrent.futures.TimeoutError()
+        finally:
+            pool.shutdown(wait=False)
+
+    def _check_orphaned_fills(self):
+        """Check IB for fills that occurred but weren't tracked."""
         try:
             fill = self.client.check_recent_fills(self.ticker)
             if fill:
@@ -213,11 +238,6 @@ class TradeEntryManager:
         except Exception as e:
             handle_error(f"scanner-{self.ticker}", "check_orphan_fills", e,
                          context={"ticker": self.ticker})
-
-        handle_error(f"scanner-{self.ticker}", "trade_entry_timeout",
-                     TimeoutError("Trade entry timed out after 30s"),
-                     context={"ticker": self.ticker, "recovered": False},
-                     critical=True)
 
     def _enrich_trade(self, trade: dict, bars_1m: pd.DataFrame = None):
         """Add entry-time enrichment data (indicators, Greeks, VIX)."""
