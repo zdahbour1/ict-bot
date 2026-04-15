@@ -479,8 +479,11 @@ class IBClient:
             order.account = config.IB_ACCOUNT
         trade = self.ib.placeOrder(contract, order)
 
-        # ── Wait for fill (up to 15 seconds) ──────────────
-        for _ in range(30):
+        # ── Wait for fill (up to 5 seconds) ───────────────
+        # Market orders fill in <1s during market hours.
+        # Don't block the queue waiting longer — return Submitted status
+        # and let exit manager monitor it.
+        for _ in range(10):
             self.ib.sleep(0.5)
             if trade.orderStatus.status == "Filled":
                 break
@@ -488,10 +491,9 @@ class IBClient:
         fill_price = trade.orderStatus.avgFillPrice
         status = trade.orderStatus.status
 
-        # ── Timeout hardening: check actual fill ──────────
+        # ── Quick check if not filled yet ─────────────────
         if status != "Filled" and status not in ("Cancelled", "Inactive"):
-            # Order may still be working — check executions
-            self.ib.sleep(2)
+            self.ib.sleep(1)
             if trade.orderStatus.status == "Filled":
                 fill_price = trade.orderStatus.avgFillPrice
                 status = "Filled"
@@ -499,7 +501,8 @@ class IBClient:
                 fill_price = trade.fills[0].execution.avgPrice
                 status = "Filled"
             else:
-                log.warning(f"[IB] Order {trade.order.orderId} not filled after 17s — status: {trade.orderStatus.status}")
+                log.warning(f"[IB] Order {trade.order.orderId} not filled after 6s — "
+                            f"status: {trade.orderStatus.status} (will track as Submitted)")
 
         perm_id = trade.order.permId
         con_id = contract.conId
@@ -574,14 +577,21 @@ class IBClient:
         tp_trade = self.ib.placeOrder(contract, tp_order)
         sl_trade = self.ib.placeOrder(contract, sl_order)
 
-        # Wait for parent fill
-        for _ in range(30):
+        # Wait for parent fill (up to 5 seconds — market orders fill in <1s)
+        for _ in range(10):
             self.ib.sleep(0.5)
             if parent_trade.orderStatus.status == "Filled":
                 break
 
         fill_price = parent_trade.orderStatus.avgFillPrice
         status = parent_trade.orderStatus.status
+
+        # Quick extra check if not filled yet
+        if status != "Filled" and status not in ("Cancelled", "Inactive"):
+            self.ib.sleep(1)
+            if parent_trade.orderStatus.status == "Filled":
+                fill_price = parent_trade.orderStatus.avgFillPrice
+                status = "Filled"
 
         perm_id = parent_trade.order.permId
         tp_perm_id = tp_trade.order.permId
