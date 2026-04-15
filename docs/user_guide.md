@@ -173,42 +173,106 @@ To close all open trades at once:
 
 ---
 
+## Analytics Tab
+
+The Analytics tab provides 12 interactive charts for strategy analysis and performance tuning. All timestamps are in Pacific Time.
+
+### Date Range Controls
+
+- **Date picker**: Select custom start/end dates
+- **Quick buttons**: "Latest" (most recent day), "5 Days", "All" (entire history)
+- Charts auto-refresh every 60 seconds
+
+### Charts
+
+| Chart | Description | Drill-Down |
+|-------|-------------|------------|
+| Cumulative P&L (Timeline) | Running P&L line chart by exit time | - |
+| P&L by Ticker | Bar chart per ticker | Click bar to see trades |
+| P&L by Exit Hour PT | When exits are most profitable | Click bar to see trades |
+| P&L by Entry Hour PT | When entries are most profitable | Click bar to see trades |
+| Risk Capital by Hour PT | Premium deployed per hour | - |
+| P&L by Contract Type | Pie chart: Calls vs Puts | Click to see trades |
+| Contracts by Hour PT | Volume of contracts per hour | - |
+| Exit Reasons | Horizontal bars by exit reason | Click to see trades |
+| P&L by Day of Week | Mon-Fri performance with win rate overlay | Click day to see trades |
+| P&L by Signal Type | ICT signal performance (iFVG, OB, etc.) with win rate | Click signal to see trades |
+| Hold Time Distribution | Histogram of trade duration in 5-min buckets | - |
+
+### Top Stats Cards
+
+Six KPI cards above the charts: Best Trade, Worst Trade, Win Streak, Loss Streak, Avg Hold Time, Total Risk Capital.
+
+### Drill-Down
+
+Click any chart bar/segment to open a popup showing the individual trades that make up that data point. The popup shows ticker, type, entry/exit prices, P&L, reason, and hold time.
+
+---
+
 ## Threads Tab
 
-The Threads tab shows the status of each scanner thread (one per ticker) and the exit manager thread.
+The Threads tab shows the health of all system components: scanner threads, exit manager, and bot main loop. It includes heartbeat monitoring, stale/dead detection, error visibility, and a system log viewer.
 
 ### Thread Status Values
 
 | Status       | Meaning                                                       |
 |--------------|---------------------------------------------------------------|
-| Running      | Thread is active and scanning normally                        |
+| Running      | Thread is active and processing                               |
 | Scanning     | Actively evaluating price data for trade setups               |
-| In Trade     | A trade is open for this ticker; scanner pauses new entries   |
-| Cooldown     | A trade recently closed; 15-minute cooldown before next entry |
-| Error        | Thread encountered an error (see error column)                |
+| Idle         | Thread is alive but between scan cycles                       |
+| Error        | Thread encountered an error (click error count for details)   |
 | Stopped      | Thread is not running (ticker disabled or bot stopped)        |
-| Initializing | Thread is starting up, loading historical data                |
+| **STALE**    | No heartbeat for >2 minutes (yellow badge) — may be hung     |
+| **DEAD**     | No heartbeat for >5 minutes (red badge) — likely crashed     |
+
+### Heartbeat Monitoring
+
+Each component writes a heartbeat to the database at regular intervals:
+
+| Component | Heartbeat Interval | What It Reports |
+|-----------|-------------------|-----------------|
+| Scanner threads | Every 60s (each scan cycle) | Scan count, trade count, error count |
+| Exit Manager | Every 5s (each monitor cycle) | Number of open trades being monitored |
+| Bot Main Loop | Every 30s | Active scanner count |
+
+The "Last Heartbeat" column shows relative time (e.g., "15s ago", "2m 30s ago") with a color-coded health dot:
+- Green: healthy (heartbeat within expected interval)
+- Yellow: STALE (>2 minutes since last heartbeat)
+- Red: DEAD (>5 minutes since last heartbeat)
+
+An alert banner appears at the top if any thread is stale or dead.
+
+### Error Popup
+
+When the Errors column shows a non-zero count, click it to open a popup showing the recent errors for that thread/ticker. Each error shows:
+- Error type and timestamp
+- Error message
+- Full Python traceback (expandable)
+
+### System Log Viewer
+
+Click the **System Log** button to toggle the system log panel below the thread table. Features:
+- Filter by level: All, Errors, Warnings
+- Auto-refreshes every 10 seconds
+- Shows: timestamp, level badge (color-coded), component, message
+- Scrollable with most recent entries at top
 
 ### Error Troubleshooting
 
-When a thread shows **Error** status:
+Common errors visible in the error popup or system log:
 
-1. Check the **Error** column for the specific error message
-2. Common errors:
-   - **"No market data"** -- IB market data subscription missing for this ticker. Check TWS subscriptions.
-   - **"Contract not found"** -- Invalid ticker symbol or expired option contract. Check the Tickers tab.
-   - **"Connection lost"** -- IB connection dropped. Check that TWS/Gateway is running.
-   - **"Rate limited"** -- Too many IB API requests. The bot will auto-recover.
-3. Most errors are transient and the thread will auto-recover on its next scan cycle
-4. Persistent errors may require checking IB TWS/Gateway or the bot logs in the `logs/` directory
+- **"Order REJECTED"** -- IB rejected the order. Check IB error code in system log for reason (margin, invalid contract, etc.)
+- **"'NoneType' object has no attribute 'secType'"** -- Option contract qualification failed. May indicate wrong exchange or expired option chain.
+- **"Trade entry timed out"** -- Order placement took >30 seconds. Reconciliation will adopt any orphaned fills.
+- **"No IB price data"** -- Market data subscription missing for this ticker.
 
 ### Thread Recovery
 
-Threads automatically attempt to recover from errors. If a thread remains in Error status for an extended period:
+Threads automatically recover from transient errors. If a thread shows STALE or DEAD:
 
-1. Check the bot console output or daily log file in `logs/`
+1. Check the System Log for recent errors from that component
 2. Verify IB TWS/Gateway is connected and responsive
-3. Try disabling and re-enabling the ticker in the Tickers tab
+3. Try stopping and restarting scans via the dashboard
 4. As a last resort, restart the bot
 
 ---

@@ -63,13 +63,35 @@ The ICT Trading Bot is a multi-component system that executes ICT (Inner Circle 
 ### Data Flow Summary
 
 ```
-Signal Detection --> Order Execution --> Trade Monitoring --> Exit/CSV Logging
-   (scanners)        (IB worker)        (exit manager)      (enriched data)
-       |                  |                   |                    |
-       v                  v                   v                    v
-   PostgreSQL         PostgreSQL          PostgreSQL           PostgreSQL
-   (threads)          (trades)            (trades)             (trades)
-                                                               + CSV file
+Signal Detection --> Trade Entry Decision --> Order Execution --> Trade Monitoring --> Exit/CSV
+ (SignalEngine)    (TradeEntryManager)        (IB worker)        (ExitManager)       Logging
+      |                   |                       |                   |                 |
+      v                   v                       v                   v                 v
+  [pure logic]       PostgreSQL              PostgreSQL          PostgreSQL         PostgreSQL
+  [no side fx]       (threads)               (trades)            (trades)           (trades)
+                                                                                   + CSV file
+```
+
+### Signal Engine Architecture (ENH-006)
+
+The scanner uses a clean three-layer separation:
+
+```
+Scanner (thin orchestrator)
+  |
+  +-- SignalEngine (strategy/signal_engine.py)
+  |     Pure signal detection. No broker calls, no DB writes.
+  |     - Runs ICT long + short strategies
+  |     - Deduplicates signals by (type, entry_price)
+  |     - Tracks seen setups to avoid re-signaling
+  |     - Returns Signal dataclass objects
+  |
+  +-- TradeEntryManager (strategy/trade_entry_manager.py)
+        Trade entry orchestration. Handles all side effects.
+        - Entry gates: position conflicts, daily limits, cooldowns
+        - Order placement via option_selector (30s timeout + recovery)
+        - Trade enrichment (Greeks, VIX, indicators)
+        - Registration with ExitManager
 ```
 
 ---
@@ -82,12 +104,13 @@ The dashboard is a React single-page application served by nginx. It provides fo
 
 **Tabs:**
 
-| Tab      | Purpose                                                        |
-|----------|----------------------------------------------------------------|
-| Trades   | P&L summary cards, sortable/filterable trade table, close actions |
-| Threads  | Scanner thread status monitoring, error visibility             |
-| Tickers  | CRUD operations for traded ticker symbols                      |
-| Settings | System configuration CRUD, categorized settings                |
+| Tab       | Purpose                                                        |
+|-----------|----------------------------------------------------------------|
+| Trades    | P&L summary cards, sortable/filterable trade table, close actions |
+| Analytics | 12 interactive charts with drill-down, date range filtering, P&L by ticker/hour/day/signal |
+| Threads   | Thread health with heartbeat monitoring, stale/dead detection, error popup, system log viewer |
+| Tickers   | CRUD operations for traded ticker symbols                      |
+| Settings  | System configuration CRUD, categorized settings                |
 
 **Key behaviors:**
 - Auto-refreshes data via Socket.IO WebSocket connection to the API
@@ -151,14 +174,15 @@ Interactive Brokers' Trader Workstation or IB Gateway provides the connection to
 
 | Table            | Purpose                                                             |
 |------------------|---------------------------------------------------------------------|
-| `trades`         | Primary trade records. One row per trade. Tracks entry, exit, P&L, status, Greeks, indicators, and enriched metadata. |
+| `trades`         | Primary trade records. One row per trade. Tracks entry, exit, P&L, status, IB order IDs (permId, conId), Greeks, indicators, and enriched metadata (JSONB). |
 | `trade_closes`   | Records of trade close events. Links back to trades. Captures close price, time, reason, and partial fill details. |
 | `trade_commands` | Command queue for trade actions. The API writes commands (e.g., close trade) that the bot polls and executes. |
-| `thread_status`  | Current state of each scanner thread. Updated by the bot, read by the dashboard Threads tab. |
-| `bot_state`      | Singleton-style table tracking whether the bot is running, last heartbeat, start time, and configuration snapshot. |
-| `errors`         | Error log table. Scanner threads and the exit manager write errors here for dashboard visibility. |
-| `tickers`        | List of tradeable ticker symbols with enabled/disabled flag and configuration overrides. |
-| `settings`       | Key-value configuration store with categories. Supports secrets masking. |
+| `thread_status`  | Heartbeat monitoring for all threads. Updated every 5-60s by scanners, exit manager, and bot main loop. Dashboard uses `updated_at` for stale/dead detection. |
+| `bot_state`      | Singleton table (id=1) tracking bot status, IB connection, scans_active flag, stop_requested flag, and last error. |
+| `errors`         | Error log table. Populated by centralized `handle_error()` via `log_error()`. Feeds the dashboard error popup per thread/ticker. |
+| `system_log`     | General system log. All errors, warnings, and info events with JSONB details. Feeds the System Log viewer panel. |
+| `tickers`        | List of tradeable ticker symbols with enabled/disabled flag and per-ticker contract count. |
+| `settings`       | Key-value configuration store with categories (broker, strategy, exit_rules, trade_window, email, webhook, general). Supports secrets masking. |
 
 ### Relationships
 
@@ -181,32 +205,62 @@ errors
   (standalone log table, may reference trade_id or thread)
 ```
 
-### Views and Triggers
+### Analytics Views (11 PostgreSQL views, all Pacific Time)
 
-- **Views** provide pre-aggregated data for the dashboard (e.g., P&L summaries, active trade counts)
-- **Triggers** fire on trade status changes to propagate events and maintain data consistency
+| View | Purpose |
+|------|---------|
+| `v_trades_analytics` | Base: all trades with PT timestamps, computed entry_hour/exit_hour, contract_type, risk_capital, hold_minutes |
+| `v_pnl_by_ticker` | P&L aggregated per ticker per date with win/loss/scratch counts |
+| `v_pnl_by_exit_hour` | P&L aggregated by exit hour (PT) |
+| `v_pnl_by_entry_hour` | P&L aggregated by entry hour (PT) |
+| `v_risk_by_hour` | Risk capital deployed per entry hour |
+| `v_contracts_by_hour` | Contract count per entry hour |
+| `v_pnl_by_contract_type` | P&L split by Call vs Put |
+| `v_pnl_by_exit_reason` | P&L by exit reason (TP, SL, trailing, manual, etc.) |
+| `v_daily_summary` | Daily account-level rollup: trades, win rate, P&L, risk capital |
+| `v_pnl_by_day_of_week` | Win/loss patterns by day of week (Mon-Fri) with win rate |
+| `v_pnl_by_signal_type` | Performance breakdown by ICT signal type (LONG_iFVG, SHORT_OB, etc.) |
+
+### Triggers
+
+| Trigger | Table | Purpose |
+|---------|-------|---------|
+| `trg_trades_updated_at` | trades | Auto-set `updated_at` on UPDATE |
+| `trg_thread_status_updated_at` | thread_status | Auto-set `updated_at` on UPDATE |
+| `trg_bot_state_updated_at` | bot_state | Auto-set `updated_at` on UPDATE |
 
 ---
 
 ## Data Flow: Lifecycle of a Trade
 
-### 1. Signal Detection (Scanner Thread)
+### 1. Signal Detection (SignalEngine)
 
-Each of the 17 scanner threads monitors one ticker continuously:
+Each of the 17 scanner threads delegates to a `SignalEngine` instance:
 
-1. Scanner fetches real-time price data from IB
-2. Detects ICT patterns: liquidity raids, displacement moves, iFVG (inverse Fair Value Gap), and Order Block entries
-3. Checks constraints: trade window, cooldown timer (15 min), one-trade-per-ticker limit
-4. If a valid setup is found, queues an order request to the IB worker
+1. Scanner fetches real-time price data from IB (1m, 1h, 4h bars)
+2. `SignalEngine.detect()` runs ICT long + short strategies (pure, no side effects)
+3. Detects ICT patterns: liquidity raids, displacement moves, iFVG (inverse Fair Value Gap), and Order Block entries
+4. Deduplicates signals by (signal_type, entry_price) and filters already-seen setups
+5. Returns a list of `Signal` dataclass objects
 
-### 2. Order Execution (IB Worker Queue)
+### 2. Trade Entry Decision (TradeEntryManager)
 
-1. The IB worker (main thread) dequeues the order request
-2. Validates the option contract with IB (contract validation)
+The scanner passes each signal to `TradeEntryManager.enter()`:
+
+1. Checks entry gates: one-trade-per-ticker, daily limit (8), post-exit cooldown
+2. If allowed, delegates order placement to `option_selector` via thread pool (30s timeout)
+3. Validates the returned trade has IB order IDs (blocks phantom trades)
+4. Enriches trade with Greeks, VIX, technical indicators
+5. Registers trade with ExitManager (writes to DB + in-memory tracking)
+
+### 3. Order Execution (IB Worker Queue)
+
+1. The IB worker (main thread) dequeues the order request from `option_selector`
+2. Validates the option contract on IB (tries SMART, AMEX, CBOE, PSE, BATS, ISE)
 3. Places a bracket order: entry + take-profit + stop-loss (server-side on IB)
-4. Receives fill confirmation from IB
-5. Writes the new trade record to PostgreSQL `trades` table
-6. Updates `thread_status` to reflect the active trade
+4. Captures any IB error events (errorEvent handler logs rejection reasons)
+5. Returns fill confirmation with permId, conId, and any ib_error details
+6. `option_selector` gates on order status: Cancelled/Inactive returns `None` (no phantom trade)
 
 ### 3. Trade Monitoring (Exit Manager)
 
@@ -246,22 +300,26 @@ When a trade closes (via TP, SL, trailing stop, manual close, or rolling):
 The bot uses a multi-threaded architecture with careful coordination to avoid IB API thread-safety issues.
 
 ```
-Main Thread (IB Event Loop)
+Main Thread (IB Event Loop + Heartbeat)
   |
   |-- Processes IB worker queue (all IB API calls)
-  |-- Handles IB callbacks (fills, data, errors)
+  |-- Handles IB callbacks (fills, data, errors via errorEvent)
   |-- Runs the IB client event loop
+  |-- Heartbeat: updates thread_status every 30s ("bot-main")
   |
   +-- Scanner Threads (17 threads, one per ticker)
-  |     |-- Each runs an independent scan loop
+  |     |-- Each contains: SignalEngine + TradeEntryManager
+  |     |-- SignalEngine: pure signal detection (no IB calls)
+  |     |-- TradeEntryManager: entry gates + order placement
   |     |-- Enqueue IB requests to the worker queue
-  |     |-- Write thread_status to PostgreSQL directly
-  |     |-- Write errors to PostgreSQL directly
+  |     |-- Heartbeat: updates thread_status every 60s
+  |     |-- Errors flow to both errors + system_log tables
   |
   +-- Exit Manager Thread (1 thread)
   |     |-- Runs every 5 seconds
   |     |-- Enqueues IB data/order requests to worker queue
   |     |-- Updates trades in PostgreSQL
+  |     |-- Heartbeat: updates thread_status every 5s
   |
   +-- Flask Webhook Thread (1 thread)
         |-- Listens for API callbacks
@@ -277,6 +335,30 @@ Main Thread (IB Event Loop)
 | Scanner          | 17    | One per ticker, detects trade setups       |
 | Exit Manager     | 1     | Monitors open trades, manages exits        |
 | Flask Webhook    | 1     | Receives commands from API/dashboard       |
+
+---
+
+## Error Handling Architecture
+
+All errors flow through a centralized pipeline:
+
+```
+Exception caught → handle_error() → Python logger (file + console)
+                                   → system_log table (JSONB details, traceback)
+                                   → errors table (per-thread/ticker, for dashboard popup)
+```
+
+**IB Error Events:**
+- `ib_client.py` registers an `errorEvent` handler on IB connect
+- Captures IB error codes (201=rejected, 202=cancelled, 203=unavailable, etc.)
+- Stores per-order errors in `_last_errors` dict
+- Attaches `ib_error` details to order result dicts
+- `option_selector.py` gates on order status — failed orders return `None`
+
+**Dashboard Error Visibility:**
+- ThreadsTab error popup fetches from `errors` table per ticker/thread
+- System Log panel fetches from `system_log` table with level filtering
+- Stale/dead thread detection via `updated_at` heartbeat age
 
 ---
 

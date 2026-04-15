@@ -12,6 +12,7 @@ erDiagram
     thread_status ||--o{ errors : "may log errors"
     bot_state ||--|| bot_state : "singleton"
     settings ||--|| settings : "key-value config"
+    system_log ||--|| system_log : "append-only log"
 
     tickers {
         serial id PK "GENERATED ALWAYS AS IDENTITY"
@@ -50,6 +51,10 @@ erDiagram
         numeric_10_4 current_price "NULL (updated every 5s)"
         numeric_10_4 ib_fill_price "NULL (actual IB fill)"
         int ib_order_id "NULL"
+        bigint ib_perm_id "NULL (IB permanent ID)"
+        bigint ib_tp_perm_id "NULL (TP order perm ID)"
+        bigint ib_sl_perm_id "NULL (SL order perm ID)"
+        bigint ib_con_id "NULL (IB contract ID for reconciliation)"
         numeric_8_4 pnl_pct "DEFAULT 0"
         numeric_12_4 pnl_usd "DEFAULT 0"
         numeric_8_4 peak_pnl_pct "DEFAULT 0"
@@ -100,7 +105,9 @@ erDiagram
         serial id PK "GENERATED ALWAYS AS IDENTITY"
         varchar_30 thread_name "NOT NULL UNIQUE"
         varchar_10 ticker "NULL"
-        varchar_20 status "NOT NULL DEFAULT 'idle', CHECK (status IN ('starting','running','scanning','idle','error','stopped'))"
+        varchar_20 status "NOT NULL DEFAULT 'idle'"
+        int pid "NULL (OS process ID)"
+        bigint thread_id "NULL (Python thread ID)"
         timestamptz last_scan_time "NULL"
         text last_message "NULL"
         int scans_today "DEFAULT 0"
@@ -108,18 +115,31 @@ erDiagram
         int alerts_today "DEFAULT 0"
         int error_count "DEFAULT 0"
         timestamptz created_at "NOT NULL DEFAULT NOW()"
-        timestamptz updated_at "NOT NULL DEFAULT NOW()"
+        timestamptz updated_at "NOT NULL DEFAULT NOW() (heartbeat)"
     }
 
     bot_state {
         int id PK "DEFAULT 1 CHECK (id = 1)"
-        varchar_20 status "NOT NULL DEFAULT 'stopped', CHECK (status IN ('running','stopped','starting','stopping'))"
+        varchar_20 status "NOT NULL DEFAULT 'stopped'"
         varchar_20 account "NULL"
         int pid "NULL"
         int total_tickers "DEFAULT 0"
+        boolean scans_active "DEFAULT FALSE"
+        boolean stop_requested "DEFAULT FALSE"
+        boolean ib_connected "DEFAULT FALSE"
+        text last_error "NULL"
         timestamptz started_at "NULL"
         timestamptz stopped_at "NULL"
         timestamptz updated_at "NOT NULL DEFAULT NOW()"
+    }
+
+    system_log {
+        serial id PK "GENERATED ALWAYS AS IDENTITY"
+        varchar_30 component "NOT NULL, INDEX"
+        varchar_10 level "NOT NULL DEFAULT 'info', CHECK IN ('info','warn','error','debug')"
+        text message "NOT NULL"
+        jsonb details "DEFAULT '{}' (traceback, error_type, context)"
+        timestamptz created_at "NOT NULL DEFAULT NOW(), INDEX DESC"
     }
 
     errors {
@@ -208,44 +228,23 @@ END;
 $$ LANGUAGE plpgsql;
 ```
 
-## Views
+## Analytics Views (11 views, all Pacific Time)
 
-### v_daily_summary
-Aggregated daily P&L for the summary cards on the dashboard.
-```sql
-SELECT
-    account,
-    entry_time::date AS trade_date,
-    COUNT(*) FILTER (WHERE status = 'open') AS open_trades,
-    COUNT(*) FILTER (WHERE status = 'closed') AS closed_trades,
-    COUNT(*) FILTER (WHERE status = 'errored') AS errored_trades,
-    COUNT(*) FILTER (WHERE exit_result = 'WIN') AS wins,
-    COUNT(*) FILTER (WHERE exit_result = 'LOSS') AS losses,
-    COALESCE(SUM(pnl_usd) FILTER (WHERE status = 'open'), 0) AS open_pnl,
-    COALESCE(SUM(pnl_usd) FILTER (WHERE status = 'closed'), 0) AS closed_pnl,
-    COALESCE(SUM(pnl_usd), 0) AS total_pnl,
-    ROUND(COUNT(*) FILTER (WHERE exit_result = 'WIN')::numeric /
-          NULLIF(COUNT(*) FILTER (WHERE status = 'closed'), 0) * 100, 1) AS win_rate
-FROM trades
-GROUP BY account, entry_time::date;
-```
+All views are defined in `db/analytics_views.sql`. They convert UTC to PT and provide pre-aggregated data for the Analytics tab charts.
 
-### v_ticker_performance
-P&L breakdown by ticker for identifying most profitable instruments.
-```sql
-SELECT
-    ticker,
-    COUNT(*) AS total_trades,
-    COUNT(*) FILTER (WHERE exit_result = 'WIN') AS wins,
-    COUNT(*) FILTER (WHERE exit_result = 'LOSS') AS losses,
-    ROUND(AVG(pnl_pct) FILTER (WHERE status = 'closed'), 2) AS avg_pnl_pct,
-    COALESCE(SUM(pnl_usd) FILTER (WHERE status = 'closed'), 0) AS total_pnl,
-    ROUND(COUNT(*) FILTER (WHERE exit_result = 'WIN')::numeric /
-          NULLIF(COUNT(*) FILTER (WHERE status = 'closed'), 0) * 100, 1) AS win_rate
-FROM trades
-GROUP BY ticker
-ORDER BY total_pnl DESC;
-```
+| View | Aggregation | Key Columns |
+|------|-------------|-------------|
+| `v_trades_analytics` | Base: all trades with PT timestamps | entry_time_pt, exit_time_pt, entry_hour, exit_hour, trade_date, contract_type, risk_capital, hold_minutes |
+| `v_pnl_by_ticker` | P&L per ticker per date | ticker, total_trades, wins, losses, scratches, total_pnl, avg_pnl_pct, avg_hold_min |
+| `v_pnl_by_exit_hour` | P&L by exit hour (PT) | hour, trades, pnl |
+| `v_pnl_by_entry_hour` | P&L by entry hour (PT) | hour, trades, pnl |
+| `v_risk_by_hour` | Risk capital by entry hour | hour, capital, contracts |
+| `v_contracts_by_hour` | Contracts opened by hour | hour, contracts |
+| `v_pnl_by_contract_type` | Calls vs Puts | contract_type, trades, pnl, wins, losses |
+| `v_pnl_by_exit_reason` | P&L by exit reason | exit_reason, exit_result, trades, pnl |
+| `v_daily_summary` | Daily account-level rollup | trade_date, account, total/open/closed, wins/losses, win_rate, risk_capital, avg_hold_min |
+| `v_pnl_by_day_of_week` | Performance by day of week | day_num (1=Mon), day_name, trades, wins, losses, total_pnl, avg_pnl, win_rate |
+| `v_pnl_by_signal_type` | Performance by ICT signal | signal_type, trades, wins, losses, total_pnl, avg_pnl, win_rate |
 
 ## Data Flow
 
@@ -257,12 +256,14 @@ ORDER BY total_pnl DESC;
                            │ Socket.IO + REST
                     ┌──────┴──────┐
                     │  FastAPI    │
-                    │  (api:8000) │◄── reads trades, thread_status, errors
+                    │  (api:8000) │◄── reads trades, thread_status, errors, system_log
                     └──────┬──────┘    writes trade_commands
                            │
                     ┌──────┴──────┐
                     │ PostgreSQL  │
                     │ (pg:5432)   │
+                    │ 8 tables +  │
+                    │ 11 views    │
                     └──────┬──────┘
                            │
         ┌──────────────────┼──────────────────┐
@@ -271,9 +272,14 @@ ORDER BY total_pnl DESC;
   │ Scanner   │    │ ExitManager │    │ Bot Main    │
   │ Threads   │    │ Thread      │    │ Thread      │
   │ (×17)     │    │             │    │             │
-  └───────────┘    └─────────────┘    └─────────────┘
-  writes:          writes:             reads:
-  thread_status    trades (UPDATE)     trade_commands
-  errors           trade_closes        (executes on IB)
-                   errors
+  │           │    │ heartbeat   │    │ heartbeat   │
+  │ Signal    │    │ every 5s    │    │ every 30s   │
+  │ Engine    │    │             │    │             │
+  │ + Trade   │    └─────────────┘    └─────────────┘
+  │ Entry Mgr │    writes:             reads:
+  └───────────┘    trades (UPDATE)     trade_commands
+  writes:          trade_closes        bot_state
+  thread_status    thread_status       writes:
+  errors           errors              thread_status
+  system_log       system_log          system_log
 ```
