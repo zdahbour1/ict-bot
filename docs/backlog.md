@@ -25,6 +25,46 @@
 
 Status: **Tracked — needs incremental implementation**
 
+### BUG-038: QQQ 634 Call closed 3 times — negative position (-6 contracts)
+The QQQ 634 call was rolled (ENH-007 rolling logic), but after rolling, the old
+position kept being "closed" repeatedly. Each close sold 2 more contracts, resulting
+in -6 naked short calls on IB.
+
+**Root cause (multiple failures)**:
+1. Rolling closes the position but the old trade stays in exit_manager memory as "open"
+2. Exit manager evaluates exit conditions on the stale in-memory trade
+3. Each cycle, exit manager sees the old trade, decides to close it, sends another sell
+4. IB executes each sell — creating naked short positions
+
+**This is a direct consequence of ARCH-001 violation**: exit_manager trusts its
+in-memory list instead of checking the DB/IB for actual position state.
+
+**Required fix**: Before ANY sell order, verify:
+- The position actually exists on IB with positive quantity
+- Use "reduce only" or check position direction to prevent naked shorts
+- After closing a trade, REMOVE it from exit_manager memory AND mark closed in DB atomically
+
+Status: **Not fixed — CRITICAL (can create unlimited naked short exposure)**
+
+### BUG-039: No "sell-to-close" / position existence check before selling
+The bot sends raw SELL orders without verifying a position exists. IB executes
+the sell regardless, creating naked short options positions.
+
+**Required validation before every sell order**:
+1. Query IB for current position quantity for the specific contract (by conId)
+2. If quantity is 0 → skip the sell (position already closed)
+3. If quantity is negative → ABORT and log critical error (already naked)
+4. Only sell up to the actual position quantity (never more)
+
+**IB API options**:
+- Use `reduceOnly=True` on orders (IB rejects if no position to reduce)
+- Or manually check `ib.positions()` before every sell
+
+**This is a safety guard** — even if all other logic is perfect, this prevents
+the worst-case scenario of accidentally selling naked options.
+
+Status: **Not fixed — CRITICAL safety requirement**
+
 ---
 
 ## HIGH — Important for Reliable Operation
