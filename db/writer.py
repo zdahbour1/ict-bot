@@ -167,34 +167,65 @@ def _sanitize_for_json(obj):
 
 
 @_safe_db
-def close_trade(trade_id: int, exit_price: float, result: str, reason: str,
-                exit_enrichment: dict = None) -> bool:
+def lock_trade_for_close(trade_id: int):
     """
-    Close a trade in the database. Uses SELECT FOR UPDATE to prevent double-close.
+    Lock a trade record for closing. Returns (session, trade_data) or (None, None).
 
-    Returns True if trade was closed, False if already closed by another process.
-    This is the ONLY way to close a trade — enforced at the DB level.
+    The caller MUST call finalize_close() or release_trade_lock() when done.
+    The row-level lock (FOR UPDATE) prevents any other process from modifying
+    or closing this trade until the session is committed or rolled back.
+
+    Flow:
+    1. lock_trade_for_close()   ← acquires DB lock, returns session
+    2. [caller does IB work]    ← cancel brackets, sell, verify, enrich
+    3. finalize_close()         ← updates DB, commits, releases lock
+    OR release_trade_lock()     ← rollback if IB work failed
     """
     from sqlalchemy import text
     session = get_session()
     if not session:
-        return False
+        return None, None
     try:
-        # Row-level lock: only proceed if trade is currently open
         row = session.execute(
-            text("SELECT id, entry_price, contracts_entered FROM trades "
-                 "WHERE id = :id AND status = 'open' FOR UPDATE"),
+            text("SELECT id, entry_price, contracts_entered, contracts_open, ticker, symbol "
+                 "FROM trades WHERE id = :id AND status = 'open' FOR UPDATE"),
             {"id": trade_id}
         ).fetchone()
 
         if not row:
-            # Trade already closed by another process — no-op
             session.close()
-            log.info(f"DB: trade {trade_id} already closed — skipping (another process got there first)")
-            return False
+            log.info(f"DB: trade {trade_id} already closed — lock not acquired")
+            return None, None
 
-        entry_price = float(row[1])
-        contracts = int(row[2])
+        trade_data = {
+            "id": row[0], "entry_price": float(row[1]),
+            "contracts_entered": int(row[2]), "contracts_open": int(row[3]),
+            "ticker": row[4], "symbol": row[5],
+        }
+        log.debug(f"DB: locked trade {trade_id} for close")
+        return session, trade_data
+    except Exception as e:
+        session.rollback()
+        session.close()
+        raise
+
+
+def finalize_close(session, trade_id: int, exit_price: float, result: str,
+                   reason: str, exit_enrichment: dict = None) -> bool:
+    """
+    Complete the close: update DB record and commit (releases lock).
+    Must be called after lock_trade_for_close() with the same session.
+    """
+    import json as json_mod
+    from sqlalchemy import text
+    try:
+        row = session.execute(
+            text("SELECT entry_price, contracts_entered FROM trades WHERE id = :id"),
+            {"id": trade_id}
+        ).fetchone()
+        entry_price = float(row[0]) if row else 0
+        contracts = int(row[1]) if row else 0
+
         pnl_pct = (exit_price - entry_price) / entry_price * 100 if entry_price > 0 else 0
         pnl_usd = (exit_price - entry_price) * 100 * contracts
 
@@ -209,7 +240,7 @@ def close_trade(trade_id: int, exit_price: float, result: str, reason: str,
                  "WHERE id=:id"),
             {"ep": exit_price, "pp": pnl_pct, "pu": pnl_usd,
              "rn": reason, "er": result, "cc": contracts,
-             "ee": __import__('json').dumps(safe_enrichment), "id": trade_id}
+             "ee": json_mod.dumps(safe_enrichment), "id": trade_id}
         )
         session.commit()
         session.close()
@@ -218,7 +249,34 @@ def close_trade(trade_id: int, exit_price: float, result: str, reason: str,
     except Exception as e:
         session.rollback()
         session.close()
-        raise
+        log.error(f"DB: finalize_close failed for trade {trade_id}: {e}")
+        return False
+
+
+def release_trade_lock(session):
+    """Rollback and release the lock without closing the trade.
+    Use when IB close operation failed and we want to retry later."""
+    if session:
+        try:
+            session.rollback()
+            session.close()
+        except Exception:
+            pass
+
+
+@_safe_db
+def close_trade(trade_id: int, exit_price: float, result: str, reason: str,
+                exit_enrichment: dict = None) -> bool:
+    """
+    Simple close: lock, update, commit in one call.
+    Use this for reconciliation or cases where IB work is already done.
+    For the full atomic flow (lock → IB close → update), use
+    lock_trade_for_close() + finalize_close() instead.
+    """
+    session, trade_data = lock_trade_for_close(trade_id)
+    if not session:
+        return False
+    return finalize_close(session, trade_id, exit_price, result, reason, exit_enrichment)
 
 
 @_safe_db

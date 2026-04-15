@@ -253,38 +253,9 @@ class ExitManager:
                     reason = exit_info["reason"]
                     should_roll = exit_info.get("should_roll", False)
 
-                    if should_roll:
-                        rolled = safe_call(
-                            execute_roll, self.client, trade, pnl_pct,
-                            component="exit_manager", operation="execute_roll",
-                            context={"ticker": trade.get("ticker")}
-                        )
-                        exit_enrichment = safe_call(
-                            collect_exit_enrichment, self.client, trade,
-                            component="exit_manager", operation="collect_exit_enrichment",
-                            default={}, context={"ticker": trade.get("ticker")}
-                        )
-                        log_trade_result(trade, current_price, result, reason, exit_enrichment)
-                        close_trade_in_db(trade, current_price, result, reason, exit_enrichment)
-                        if rolled:
-                            self.add_trade(rolled)
-                            log.info(f"[{trade.get('ticker')}] Roll complete: "
-                                     f"closed {trade.get('symbol')} → opened {rolled.get('symbol')}")
-                    else:
-                        execute_exit(self.client, trade, reason)
-                        exit_enrichment = safe_call(
-                            collect_exit_enrichment, self.client, trade,
-                            component="exit_manager", operation="collect_exit_enrichment",
-                            default={}, context={"ticker": trade.get("ticker")}
-                        )
-                        log_trade_result(trade, current_price, result, reason, exit_enrichment)
-                        close_trade_in_db(trade, current_price, result, reason, exit_enrichment)
-                        safe_call(send_trade_result_email, trade, result, current_price,
-                                  component="exit_manager", operation="send_trade_result_email",
-                                  context={"ticker": trade.get("ticker")})
-
-                    # Trade was closed — invalidate cache so next read picks up new state
-                    self.invalidate_cache()
+                    # ── Atomic close: lock DB → IB work → update DB → release ──
+                    self._atomic_close(trade, current_price, result, reason,
+                                       pnl_pct, should_roll)
 
             except Exception as e:
                 handle_error("exit_manager", "monitor_trade", e,
@@ -295,14 +266,89 @@ class ExitManager:
         # ── Process UI commands ───────────────────────
         self._process_ui_commands()
 
+    def _atomic_close(self, trade: dict, current_price: float, result: str,
+                      reason: str, pnl_pct: float, should_roll: bool):
+        """
+        Atomic close operation: DB lock → IB work → enrich → DB update → commit.
+
+        The DB row is locked (SELECT FOR UPDATE) for the entire duration.
+        No other process can close or modify this trade until we commit/rollback.
+
+        Flow:
+        1. lock_trade_for_close() — acquire DB row lock
+        2. execute_exit() or execute_roll() — IB close operations
+        3. collect_exit_enrichment() — Greeks, VIX, indicators
+        4. log_trade_result() — CSV log
+        5. finalize_close() — UPDATE DB, COMMIT, release lock
+        """
+        from db.writer import lock_trade_for_close, finalize_close, release_trade_lock
+
+        trade_id = trade.get("db_id")
+        ticker = trade.get("ticker", "UNK")
+
+        if not trade_id:
+            log.warning(f"[{ticker}] Cannot atomic close — no db_id")
+            return
+
+        # Step 1: Lock the DB record
+        session, locked_data = lock_trade_for_close(trade_id)
+        if not session:
+            log.info(f"[{ticker}] Trade {trade_id} already closed by another process — skipping")
+            self.invalidate_cache()
+            return
+
+        try:
+            # Step 2: IB work (cancel brackets, verify, sell)
+            if should_roll:
+                rolled = safe_call(
+                    execute_roll, self.client, trade, pnl_pct,
+                    component="exit_manager", operation="execute_roll",
+                    context={"ticker": ticker}
+                )
+            else:
+                execute_exit(self.client, trade, reason)
+                rolled = None
+
+            # Step 3: Collect enrichment
+            exit_enrichment = safe_call(
+                collect_exit_enrichment, self.client, trade,
+                component="exit_manager", operation="collect_exit_enrichment",
+                default={}, context={"ticker": ticker}
+            )
+
+            # Step 4: CSV log
+            log_trade_result(trade, current_price, result, reason, exit_enrichment)
+
+            # Step 5: Finalize in DB and release lock
+            finalize_close(session, trade_id, current_price, result, reason, exit_enrichment)
+
+            # Post-close: send email, add rolled trade, invalidate cache
+            if not should_roll:
+                safe_call(send_trade_result_email, trade, result, current_price,
+                          component="exit_manager", operation="send_trade_result_email",
+                          context={"ticker": ticker})
+
+            if should_roll and rolled:
+                self.add_trade(rolled)
+                log.info(f"[{ticker}] Roll complete: "
+                         f"closed {trade.get('symbol')} → opened {rolled.get('symbol')}")
+
+            self.invalidate_cache()
+
+        except Exception as e:
+            # IB work failed — release lock, trade stays open for retry
+            release_trade_lock(session)
+            handle_error("exit_manager", "atomic_close", e,
+                         context={"trade_id": trade_id, "ticker": ticker},
+                         critical=True)
+
     def _process_ui_commands(self):
-        """Process close commands from the dashboard."""
+        """Process close commands from the dashboard using atomic close."""
         try:
             from db.writer import check_pending_commands, complete_command
             commands = check_pending_commands()
             for cmd in (commands or []):
                 try:
-                    # Find trade in current open trades (from DB cache)
                     target = None
                     for t in self.open_trades:
                         if t.get("db_id") == cmd["trade_id"]:
@@ -310,11 +356,11 @@ class ExitManager:
                             break
                     if target:
                         contracts = cmd.get("contracts") or target.get("contracts", 0)
-                        execute_exit(self.client, target, f"UI CLOSE ({contracts}x)")
-                        close_trade_in_db(target, target.get("current_price", 0),
-                                          "SCRATCH", f"UI CLOSE ({contracts}x)", {})
-                        self.invalidate_cache()
-                        log.info(f"UI command executed: close {contracts}x {target['symbol']}")
+                        reason = f"UI CLOSE ({contracts}x)"
+                        # Use atomic close: lock → IB close → DB update → release
+                        self._atomic_close(target, target.get("current_price", 0),
+                                           "SCRATCH", reason, pnl_pct=0, should_roll=False)
+                        log.info(f"UI command executed: {reason} {target['symbol']}")
                         complete_command(cmd["id"])
                     else:
                         error_msg = f"Trade {cmd['trade_id']} not found in open trades"
