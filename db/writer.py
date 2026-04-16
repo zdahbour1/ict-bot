@@ -244,7 +244,7 @@ def finalize_close(session, trade_id: int, exit_price: float, result: str,
                  "pnl_pct=:pp, pnl_usd=:pu, exit_time=NOW(), "
                  "status='closed', exit_reason=:rn, exit_result=:er, "
                  "contracts_open=0, contracts_closed=:cc, "
-                 "exit_enrichment=:ee::jsonb "
+                 "exit_enrichment=CAST(:ee AS jsonb) "
                  "WHERE id=:id"),
             {"ep": exit_price, "pp": pnl_pct, "pu": pnl_usd,
              "rn": reason, "er": result, "cc": contracts,
