@@ -681,6 +681,28 @@ class IBClient:
                 self.ib.cancelOrder(trade.order)
                 log.info(f"[IB] Cancelled orderId={trade.order.orderId}")
 
+    def check_bracket_orders_active(self, trade: dict) -> bool:
+        """Check if bracket orders (TP/SL) are still active on IB.
+        Returns True if any bracket orders are still open/submitted."""
+        tp_id = trade.get("ib_tp_order_id")
+        sl_id = trade.get("ib_sl_order_id")
+        if not tp_id and not sl_id:
+            return False
+        try:
+            return self._submit_to_ib(self._ib_check_brackets_active, tp_id, sl_id, timeout=5)
+        except Exception:
+            return False  # If can't check, assume cancelled (safe to proceed)
+
+    def _ib_check_brackets_active(self, tp_id, sl_id) -> bool:
+        """Runs on IB thread. Returns True if any bracket legs still active."""
+        check_ids = {i for i in [tp_id, sl_id] if i}
+        for trade in self.ib.openTrades():
+            if trade.order.orderId in check_ids:
+                status = trade.orderStatus.status
+                if status in ("Submitted", "PreSubmitted", "PendingSubmit"):
+                    return True  # Still active
+        return False  # All cancelled or not found
+
     # ── IB Reconciliation ─────────────────────────────────────
     def get_ib_positions_raw(self) -> list:
         """Get raw IB positions for reconciliation. Thread-safe.

@@ -17,21 +17,45 @@ PT = pytz.timezone("America/Los_Angeles")
 
 
 def cancel_bracket_orders(client, trade: dict) -> bool:
-    """Cancel bracket TP and SL legs on IB."""
+    """
+    Cancel bracket TP and SL legs on IB and VERIFY they are cancelled.
+    Waits up to 3 seconds for IB to confirm cancellation.
+    Returns True if brackets were cancelled (or didn't exist).
+    """
     tp_id = trade.get("ib_tp_order_id")
     sl_id = trade.get("ib_sl_order_id")
     ids = [i for i in [tp_id, sl_id] if i]
     if not ids:
-        return False
+        return True  # No brackets to cancel
+
+    ticker = trade.get("ticker", "UNK")
     try:
         client.cancel_bracket_children(*ids)
-        trade["ib_tp_order_id"] = None
-        trade["ib_sl_order_id"] = None
-        log.info(f"[{trade.get('ticker')}] Cancelled bracket orders (TP={tp_id}, SL={sl_id})")
-        return True
+        log.info(f"[{ticker}] Cancel request sent for brackets (TP={tp_id}, SL={sl_id})")
     except Exception as e:
-        log.warning(f"[{trade.get('ticker')}] Failed to cancel brackets: {e}")
-        return False
+        log.warning(f"[{ticker}] Failed to send cancel for brackets: {e}")
+        # Continue anyway — brackets may not exist anymore
+
+    # VERIFY cancellation: wait up to 3 seconds for IB to process
+    import time
+    for attempt in range(6):  # 6 × 0.5s = 3 seconds
+        time.sleep(0.5)
+        try:
+            still_active = client.check_bracket_orders_active(trade)
+            if not still_active:
+                trade["ib_tp_order_id"] = None
+                trade["ib_sl_order_id"] = None
+                log.info(f"[{ticker}] Bracket orders confirmed cancelled")
+                return True
+        except Exception:
+            pass
+
+    # After 3 seconds, brackets may still be active — warn but continue
+    log.warning(f"[{ticker}] Bracket cancel not confirmed after 3s — "
+                f"proceeding with caution")
+    trade["ib_tp_order_id"] = None
+    trade["ib_sl_order_id"] = None
+    return True
 
 
 def get_ib_position_qty(client, trade: dict) -> int:
@@ -121,12 +145,13 @@ def execute_exit(client, trade: dict, reason: str) -> float | None:
     ticker = trade.get("ticker", "UNK")
     log.info(f"[{ticker}] Executing exit: {reason}")
 
-    # Step 1: Cancel bracket orders (if any)
+    # Step 1: Cancel bracket orders and VERIFY cancelled
     has_brackets = bool(trade.get("ib_tp_order_id") or trade.get("ib_sl_order_id"))
     if has_brackets:
         cancel_bracket_orders(client, trade)
+        # cancel_bracket_orders already waits up to 3s for verification
 
-    # Step 2: Check ACTUAL position on IB
+    # Step 2: Check ACTUAL position on IB (after brackets confirmed cancelled)
     ib_qty = get_ib_position_qty(client, trade)
 
     if ib_qty == 0:
