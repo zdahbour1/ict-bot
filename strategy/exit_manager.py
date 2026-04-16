@@ -26,7 +26,7 @@ import pytz
 from alerts.emailer import send_trade_result_email
 from strategy.exit_conditions import evaluate_exit, update_trailing_stop
 from strategy.exit_executor import execute_exit, execute_roll, cancel_bracket_orders, get_ib_position_qty
-from strategy.trade_logger import log_trade_result, close_trade_in_db, collect_exit_enrichment
+from strategy.trade_logger import log_trade_result, collect_exit_enrichment
 from strategy.reconciliation import periodic_reconciliation
 from strategy.error_handler import handle_error, safe_call
 import config
@@ -172,12 +172,15 @@ class ExitManager:
         if not trades:
             return
 
-        # ── Remove expired contracts ──────────────────
+        # ── Remove expired contracts (using locked close) ─
         for trade in trades:
             if _is_expired(trade.get("symbol", "")):
                 ticker = trade.get("ticker", "UNK")
+                db_id = trade.get("db_id")
                 log.warning(f"[{ticker}] Contract EXPIRED: {trade['symbol']} — auto-closing")
-                close_trade_in_db(trade, trade.get("entry_price", 0), "LOSS", "EXPIRED CONTRACT", {})
+                if db_id:
+                    from db.writer import close_trade
+                    close_trade(db_id, trade.get("entry_price", 0), "LOSS", "EXPIRED CONTRACT", {})
                 self.invalidate_cache()
 
         # Re-read after expiry closures

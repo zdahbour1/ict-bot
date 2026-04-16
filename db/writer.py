@@ -169,14 +169,17 @@ def _sanitize_for_json(obj):
 @_safe_db
 def lock_trade_for_close(trade_id: int):
     """
-    Lock a trade record for closing. Returns (session, trade_data) or (None, None).
+    Lock a trade record for closing using SELECT FOR UPDATE NOWAIT.
+    Returns (session, trade_data) or (None, None).
+
+    NOWAIT: If another thread already holds the lock, returns (None, None)
+    immediately instead of blocking. The caller should skip this trade
+    and move to the next one.
 
     The caller MUST call finalize_close() or release_trade_lock() when done.
-    The row-level lock (FOR UPDATE) prevents any other process from modifying
-    or closing this trade until the session is committed or rolled back.
 
     Flow:
-    1. lock_trade_for_close()   ← acquires DB lock, returns session
+    1. lock_trade_for_close()   ← acquires DB lock (or returns None if locked)
     2. [caller does IB work]    ← cancel brackets, sell, verify, enrich
     3. finalize_close()         ← updates DB, commits, releases lock
     OR release_trade_lock()     ← rollback if IB work failed
@@ -186,9 +189,10 @@ def lock_trade_for_close(trade_id: int):
     if not session:
         return None, None
     try:
+        # NOWAIT: fail immediately if another process holds the lock
         row = session.execute(
             text("SELECT id, entry_price, contracts_entered, contracts_open, ticker, symbol "
-                 "FROM trades WHERE id = :id AND status = 'open' FOR UPDATE"),
+                 "FROM trades WHERE id = :id AND status = 'open' FOR UPDATE NOWAIT"),
             {"id": trade_id}
         ).fetchone()
 
@@ -207,6 +211,10 @@ def lock_trade_for_close(trade_id: int):
     except Exception as e:
         session.rollback()
         session.close()
+        error_str = str(e)
+        if "could not obtain lock" in error_str or "lock" in error_str.lower():
+            log.info(f"DB: trade {trade_id} locked by another process — skipping")
+            return None, None
         raise
 
 
