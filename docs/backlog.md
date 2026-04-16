@@ -226,6 +226,60 @@ the bot rolls BEFORE the IB bracket order fires.
 
 Status: **Not fixed — Medium priority, tracked**
 
+### ARCH-006: Single Open Authority — one function opens all trades
+**Principle**: Same as ARCH-005 (single close), but for opening trades.
+Only ONE function creates trade records in the DB. All paths use it.
+
+**Current open paths** (3 — should be 1):
+1. `trade_entry_manager.enter()` → `exit_manager.add_trade()` — scanner signal
+2. `execute_roll()` → `exit_manager.add_trade()` — rolling
+3. `reconciliation` → `exit_manager.add_trade()` — orphan adoption
+
+**Required**: `exit_manager.add_trade()` already serves as the single point,
+but it needs a DB-level guard:
+- Before INSERT, check no other open trade exists for same ticker + conId
+- Use DB unique constraint or SELECT before INSERT to prevent duplicates
+- Return db_id or None (already does this)
+
+Status: **Tracked — implement after ARCH-001/002 testing stable**
+
+### BUG-044: Exit reason values inconsistent — not analyzable
+**Current exit_reason values** (34 distinct strings, many with embedded P&L):
+- `TIME EXIT (90min)`, `STOP LOSS`, `TRAIL STOP (SL=+0%)`, `TRAIL STOP (SL=-20%)`
+- `ROLL (P&L=+71%)`, `ROLL (P&L=+137%)` — different string per trade
+- `CLOSED ON IB (RECONCILE)`, `BRACKET/CLOSED (RECONCILE)`, `BRACKET/CLOSED (BOT OFFLINE)`
+- `CLOSED (UI CLOSE ALL)`, `CLOSED (UI)`, `EXPIRED CONTRACT`
+
+**Problem**: You can't GROUP BY exit_reason for analytics because each ROLL has
+a different P&L percentage embedded in the string. You can't filter on "all
+reconciliation closes" because there are 3 different strings for it.
+
+**Fix**: Standardize exit_reason to a fixed set of categories. Move variable
+data (P&L%, SL level) to exit_enrichment JSONB.
+
+**Proposed standard values**:
+
+| exit_reason | Meaning | exit_result |
+|-------------|---------|-------------|
+| `TP` | Take profit hit | WIN |
+| `SL` | Stop loss hit | LOSS |
+| `TRAIL_STOP` | Trailing stop triggered | WIN or LOSS |
+| `ROLL` | Position rolled to next strike | WIN |
+| `TIME_EXIT` | Held >90 minutes | WIN/LOSS/SCRATCH |
+| `EOD_EXIT` | End of day forced close | WIN/LOSS/SCRATCH |
+| `EXPIRED` | Contract expired | LOSS |
+| `UI_CLOSE` | User clicked close in dashboard | WIN/LOSS/SCRATCH |
+| `RECONCILE` | Closed by reconciliation (was closed on IB) | WIN/LOSS/SCRATCH |
+| `BRACKET_IB` | IB bracket order fired (TP or SL) | WIN or LOSS |
+
+**"CLOSED ON IB (RECONCILE)" meaning**: This means the reconciliation process
+found a trade that was open in the DB but did not exist on IB anymore. This
+happens when the IB bracket order (TP or SL) fires while the bot was down or
+between reconciliation cycles. Reconciliation detected the mismatch and updated
+the DB to match IB reality.
+
+Status: **Tracked — implement with ARCH-003 refactoring**
+
 ### BUG-038: QQQ 634 Call closed 3 times — negative position (-6 contracts)
 The QQQ 634 call was rolled (ENH-007 rolling logic), but after rolling, the old
 position kept being "closed" repeatedly. Each close sold 2 more contracts, resulting
