@@ -174,185 +174,31 @@ class IBClient:
             return float(ticker_data.close)
         raise ValueError(f"No IB price data for {ticker}")
 
-    # ── ATM Option Symbol (IB option chain) ───────────────────
+    # ── ATM Option Symbol (delegates to ib_contracts.py) ────────
     def get_atm_call_symbol(self, ticker: str) -> str:
         return self._submit_to_ib(self._ib_get_atm_symbol, ticker, "C")
 
     def get_atm_put_symbol(self, ticker: str) -> str:
         return self._submit_to_ib(self._ib_get_atm_symbol, ticker, "P")
 
-    # Exchanges to try when qualifying option contracts (in priority order)
-    _OPTION_EXCHANGES = ["SMART", "AMEX", "CBOE", "PSE", "BATS", "ISE"]
-
     def _ib_get_atm_symbol(self, ticker: str, option_type: str) -> str:
-        contract = Stock(ticker, "SMART", "USD")
-        qualified_stock = self.ib.qualifyContracts(contract)
-        if not qualified_stock or not contract.conId:
-            raise RuntimeError(f"Could not qualify stock {ticker} on IB — "
-                               f"conId={getattr(contract, 'conId', 'N/A')}")
+        from broker.ib_contracts import ib_get_atm_symbol
+        return ib_get_atm_symbol(self.ib, ticker, option_type, self._contract_cache)
 
-        ticker_data = self.ib.reqMktData(contract, "", False, False)
-        self.ib.sleep(2)
-        price = 0.0
-        if ticker_data.bid and ticker_data.bid > 0 and ticker_data.ask and ticker_data.ask > 0:
-            price = round((ticker_data.bid + ticker_data.ask) / 2, 2)
-        elif ticker_data.last and ticker_data.last > 0:
-            price = float(ticker_data.last)
-        elif ticker_data.close and ticker_data.close > 0:
-            price = float(ticker_data.close)
-        self.ib.cancelMktData(contract)
-        if price <= 0:
-            raise ValueError(f"No IB price data for {ticker}")
-        log.info(f"[{ticker}] IB price: ${price:.2f}")
-
-        chains = self.ib.reqSecDefOptParams(ticker, "", contract.secType, contract.conId)
-        if not chains:
-            raise RuntimeError(f"No option chain found on IB for {ticker}")
-
-        # ── Select the best chain: prefer one that has today's expiry (0DTE) ──
-        today_str = date.today().strftime("%Y%m%d")
-        log.info(f"[{ticker}] Found {len(chains)} option chains: "
-                 f"{[c.exchange for c in chains]}")
-
-        # First pass: find a chain with today's expiry (0DTE support)
-        chain = None
-        for c in chains:
-            if today_str in c.expirations:
-                chain = c
-                log.info(f"[{ticker}] Using chain from {c.exchange} (has 0DTE expiry)")
-                break
-
-        # Second pass: fall back to SMART, then any chain
-        if chain is None:
-            for c in chains:
-                if c.exchange == "SMART":
-                    chain = c
-                    break
-        if chain is None:
-            chain = chains[0]
-            log.warning(f"[{ticker}] No SMART chain found, using {chain.exchange}")
-
-        expirations = sorted(chain.expirations)
-        exp = None
-        for e in expirations:
-            if e >= today_str:
-                exp = e
-                break
-        if exp is None:
-            raise RuntimeError(f"No future expirations found on IB for {ticker} "
-                               f"(chain={chain.exchange}, expirations={expirations[:5]})")
-
-        exp_display = f"{exp[:4]}-{exp[4:6]}-{exp[6:8]}"
-        if exp == today_str:
-            log.info(f"[{ticker}] 0DTE expiration on IB: {exp_display} (chain={chain.exchange})")
-        else:
-            log.info(f"[{ticker}] Nearest IB expiry: {exp_display} (chain={chain.exchange})")
-
-        strikes = sorted(chain.strikes)
-        atm_strike = min(strikes, key=lambda s: abs(s - price))
-        log.info(f"[{ticker}] ATM strike from IB chain: ${atm_strike} (price ${price:.2f})")
-
-        # ── Qualify option contract — try ATM strike first, then nearby strikes ──
-        # Some strikes exist in the chain but don't have 0DTE contracts.
-        # Try the closest strikes until one qualifies.
-        right = "C" if option_type == "C" else "P"
-
-        # Build list of candidate strikes: ATM first, then nearest alternates
-        candidates = sorted(strikes, key=lambda s: abs(s - price))[:7]  # ATM + 6 nearest
-        log.info(f"[{ticker}] Candidate strikes: {[f'${s}' for s in candidates[:5]]}...")
-
-        qualified = None
-        opt_contract = None
-        winning_strike = None
-
-        for strike in candidates:
-            for exchange in self._OPTION_EXCHANGES:
-                opt_contract = Option(ticker, exp, strike, right, exchange)
-                result = self.ib.qualifyContracts(opt_contract)
-                if result and opt_contract.conId:
-                    qualified = result
-                    winning_strike = strike
-                    if strike != atm_strike:
-                        log.info(f"[{ticker}] ATM ${atm_strike} not available, using ${strike} "
-                                 f"on {exchange} (conId={opt_contract.conId})")
-                    else:
-                        log.info(f"[{ticker}] Option qualified on {exchange}: "
-                                 f"{ticker} {exp} ${strike} {right} conId={opt_contract.conId}")
-                    break
-            if qualified:
-                break
-
-        if not qualified or not opt_contract or not opt_contract.conId:
-            raise RuntimeError(f"Could not qualify IB option for {ticker} {exp} {right} "
-                               f"near ${atm_strike} on any exchange "
-                               f"(tried {len(candidates)} strikes × {len(self._OPTION_EXCHANGES)} exchanges)")
-
-        atm_strike = winning_strike  # Use the strike that actually qualified
-
-        # Cache the validated contract
-        exp_short = exp[2:]
-        strike_str = str(int(atm_strike * 1000)).zfill(8)
-        occ_symbol = f"{ticker}{exp_short}{option_type}{strike_str}"
-        self._contract_cache[occ_symbol] = qualified[0]
-
-        log.info(f"[{ticker}] ATM {option_type} symbol: {occ_symbol} (strike ${atm_strike}, exp {exp_display}) ✓ validated")
-        return occ_symbol
-
-    # ── Contract Validation ───────────────────────────────────
+    # ── Contract Validation (delegates to ib_contracts.py) ────
     def validate_contract(self, occ_symbol: str) -> bool:
-        """Validate an option contract exists on IB. Thread-safe."""
         try:
             return self._submit_to_ib(self._ib_validate_contract, occ_symbol)
-        except Exception as e:
+        except Exception:
             return False
 
     def _ib_validate_contract(self, occ_symbol: str) -> bool:
-        """Qualify contract on IB. Cache if valid."""
-        if occ_symbol in self._contract_cache:
-            return True
-        try:
-            contract = self._occ_to_contract(occ_symbol)
-            if contract:
-                self._contract_cache[occ_symbol] = contract
-                log.info(f"[IB] Contract validated: {occ_symbol}")
-                return True
-        except Exception as e:
-            log.warning(f"[IB] Contract validation failed for {occ_symbol}: {e}")
-        return False
+        from broker.ib_contracts import ib_validate_contract
+        return ib_validate_contract(self.ib, occ_symbol, self._contract_cache)
 
-    def _occ_to_contract(self, occ_symbol: str) -> Option:
-        # Return cached contract if available (fast path — no IB call)
-        if occ_symbol in self._contract_cache:
-            cached = self._contract_cache[occ_symbol]
-            if cached is not None and getattr(cached, 'conId', 0):
-                return cached
-
-        match = re.match(r'^([A-Z]+)(\d{6})([CP])(\d{8})$', occ_symbol)
-        if not match:
-            raise ValueError(f"Invalid OCC symbol: {occ_symbol}")
-        ticker = match.group(1)
-        exp_str = match.group(2)
-        right = "C" if match.group(3) == "C" else "P"
-        strike = int(match.group(4)) / 1000
-        expiry = f"20{exp_str}"
-
-        # Try SMART first (most common), then fall back to other exchanges
-        contract = Option(ticker, expiry, strike, right, "SMART")
-        qualified = self.ib.qualifyContracts(contract)
-        if qualified and qualified[0] and getattr(qualified[0], 'conId', 0):
-            self._contract_cache[occ_symbol] = qualified[0]
-            return qualified[0]
-
-        # SMART failed — try other exchanges (one at a time)
-        for exchange in self._OPTION_EXCHANGES[1:]:  # skip SMART, already tried
-            contract = Option(ticker, expiry, strike, right, exchange)
-            qualified = self.ib.qualifyContracts(contract)
-            if qualified and qualified[0] and getattr(qualified[0], 'conId', 0):
-                self._contract_cache[occ_symbol] = qualified[0]
-                log.info(f"[IB] Contract {occ_symbol} qualified on {exchange} (SMART failed)")
-                return qualified[0]
-
-        raise RuntimeError(f"Could not qualify IB contract for {occ_symbol}")
+    def _occ_to_contract(self, occ_symbol: str):
+        from broker.ib_contracts import ib_occ_to_contract
+        return ib_occ_to_contract(self.ib, occ_symbol, self._contract_cache)
 
     # ── Option Price (IB real-time) ───────────────────────────
     def get_option_price(self, symbol: str, priority: bool = False) -> float:

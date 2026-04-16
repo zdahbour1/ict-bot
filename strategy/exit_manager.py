@@ -17,10 +17,9 @@ Responsibilities:
 - Process UI commands (close from dashboard)
 """
 import logging
-import re
 import threading
 import time
-from datetime import datetime, date
+from datetime import datetime
 import pytz
 
 from alerts.emailer import send_trade_result_email
@@ -35,17 +34,7 @@ log = logging.getLogger(__name__)
 PT = pytz.timezone("America/Los_Angeles")
 
 
-def _is_expired(symbol: str) -> bool:
-    symbol = symbol.replace(" ", "")
-    match = re.match(r'^[A-Z]+(\d{6})[CP]\d+$', symbol)
-    if not match:
-        return False
-    exp_str = match.group(1)
-    try:
-        exp_date = date(2000 + int(exp_str[:2]), int(exp_str[2:4]), int(exp_str[4:6]))
-        return exp_date < date.today()
-    except (ValueError, IndexError):
-        return False
+from utils.occ_parser import is_expired as _is_expired
 
 
 class ExitManager:
