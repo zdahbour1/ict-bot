@@ -105,7 +105,7 @@ def _reconcile(client, exit_manager, ib_positions):
 
         try:
             from db.writer import close_trade
-            close_trade(db_id, exit_price, result, "CLOSED ON IB (RECONCILE)", {})
+            close_trade(db_id, exit_price, result, "RECONCILE", {"source": "periodic", "detail": "closed on IB"})
             closed_count += 1
             log.info(f"[RECONCILE] Closed db_id={db_id} {ticker}: {result} P&L={pnl_pct:+.1%}")
         except Exception as e:

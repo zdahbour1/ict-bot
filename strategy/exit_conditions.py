@@ -86,28 +86,36 @@ def evaluate_exit(trade: dict, current_price: float, now_pt: datetime) -> dict |
         hit_tp = pnl_pct >= config.PROFIT_TARGET
     hit_sl = pnl_pct <= trade["dynamic_sl_pct"]
 
-    # Determine exit
+    # Determine exit — reason is a STANDARD CATEGORY for analytics GROUP BY
+    # reason_detail has the variable data for drill-down analysis
+    sl_changed = old_sl != trade["dynamic_sl_pct"]
     if should_roll:
-        return {"result": "WIN", "reason": f"ROLL (P&L={pnl_pct:+.0%})", "pnl_pct": pnl_pct,
-                "sl_changed": old_sl != trade["dynamic_sl_pct"], "should_roll": True}
+        return {"result": "WIN", "reason": "ROLL",
+                "reason_detail": f"P&L={pnl_pct:+.0%}",
+                "pnl_pct": pnl_pct, "sl_changed": sl_changed, "should_roll": True}
     elif hit_tp:
-        return {"result": "WIN", "reason": "TAKE PROFIT", "pnl_pct": pnl_pct,
-                "sl_changed": old_sl != trade["dynamic_sl_pct"]}
+        return {"result": "WIN", "reason": "TP",
+                "reason_detail": f"P&L={pnl_pct:+.0%}",
+                "pnl_pct": pnl_pct, "sl_changed": sl_changed}
     elif hit_sl and trade["dynamic_sl_pct"] > -config.STOP_LOSS:
         result = "WIN" if pnl_pct > 0 else "LOSS" if pnl_pct < 0 else "SCRATCH"
-        return {"result": result, "reason": f"TRAIL STOP (SL={trade['dynamic_sl_pct']:+.0%})",
-                "pnl_pct": pnl_pct, "sl_changed": old_sl != trade["dynamic_sl_pct"]}
+        return {"result": result, "reason": "TRAIL_STOP",
+                "reason_detail": f"SL={trade['dynamic_sl_pct']:+.0%} P&L={pnl_pct:+.0%}",
+                "pnl_pct": pnl_pct, "sl_changed": sl_changed}
     elif hit_sl:
-        return {"result": "LOSS", "reason": "STOP LOSS", "pnl_pct": pnl_pct,
-                "sl_changed": old_sl != trade["dynamic_sl_pct"]}
+        return {"result": "LOSS", "reason": "SL",
+                "reason_detail": f"P&L={pnl_pct:+.0%}",
+                "pnl_pct": pnl_pct, "sl_changed": sl_changed}
     elif time_exit:
         result = "WIN" if pnl_pct > 0 else "LOSS" if pnl_pct < 0 else "SCRATCH"
-        return {"result": result, "reason": "TIME EXIT (90min)", "pnl_pct": pnl_pct,
-                "sl_changed": old_sl != trade["dynamic_sl_pct"]}
+        return {"result": result, "reason": "TIME_EXIT",
+                "reason_detail": f"90min P&L={pnl_pct:+.0%}",
+                "pnl_pct": pnl_pct, "sl_changed": sl_changed}
     elif eod_exit:
         result = "WIN" if pnl_pct > 0 else "LOSS"
-        return {"result": result, "reason": "EOD EXIT", "pnl_pct": pnl_pct,
-                "sl_changed": old_sl != trade["dynamic_sl_pct"]}
+        return {"result": result, "reason": "EOD_EXIT",
+                "reason_detail": f"P&L={pnl_pct:+.0%}",
+                "pnl_pct": pnl_pct, "sl_changed": sl_changed}
 
     # No exit — return info for monitoring
     return None

@@ -99,25 +99,47 @@ class ExitManager:
         """
         Add a new trade. DB-FIRST: writes to DB, then invalidates cache.
         If DB write fails, trade is NOT tracked (fail-safe).
+
+        ARCH-006: Checks DB for existing open trade on same ticker before INSERT
+        to prevent duplicate entries from race conditions (scanner + roller).
         """
         trade["peak_pnl_pct"] = trade.get("peak_pnl_pct", 0.0)
         trade["dynamic_sl_pct"] = trade.get("dynamic_sl_pct", -config.STOP_LOSS)
+        ticker = trade.get("ticker", "UNK")
+
+        # ARCH-006: Check for existing open trade on same ticker
+        try:
+            from sqlalchemy import text
+            from db.connection import get_session
+            session = get_session()
+            if session:
+                existing = session.execute(
+                    text("SELECT id FROM trades WHERE ticker = :ticker AND status = 'open' LIMIT 1"),
+                    {"ticker": ticker}
+                ).fetchone()
+                session.close()
+                if existing:
+                    log.warning(f"[{ticker}] DUPLICATE GUARD: open trade already exists "
+                                f"(db_id={existing[0]}) — skipping add_trade")
+                    return
+        except Exception as e:
+            log.warning(f"[{ticker}] Duplicate check failed: {e} — proceeding with insert")
 
         try:
             from db.writer import insert_trade
             db_id = insert_trade(trade, config.IB_ACCOUNT or "unknown")
             if db_id:
                 trade["db_id"] = db_id
-                log.info(f"Trade saved to DB: id={db_id} {trade.get('ticker')} {trade.get('symbol')}")
+                log.info(f"Trade saved to DB: id={db_id} {ticker} {trade.get('symbol')}")
                 self.invalidate_cache()
             else:
                 handle_error("exit_manager", "add_trade_db",
                              RuntimeError("insert_trade returned None — trade NOT tracked"),
-                             context={"ticker": trade.get("ticker"), "symbol": trade.get("symbol")},
+                             context={"ticker": ticker, "symbol": trade.get("symbol")},
                              critical=True)
         except Exception as e:
             handle_error("exit_manager", "add_trade_db", e,
-                         context={"ticker": trade.get("ticker"), "symbol": trade.get("symbol")},
+                         context={"ticker": ticker, "symbol": trade.get("symbol")},
                          critical=True)
 
     def start(self):
@@ -180,7 +202,7 @@ class ExitManager:
                 log.warning(f"[{ticker}] Contract EXPIRED: {trade['symbol']} — auto-closing")
                 if db_id:
                     from db.writer import close_trade
-                    close_trade(db_id, trade.get("entry_price", 0), "LOSS", "EXPIRED CONTRACT", {})
+                    close_trade(db_id, trade.get("entry_price", 0), "LOSS", "EXPIRED", {"detail": trade.get("symbol", "")})
                 self.invalidate_cache()
 
         # Re-read after expiry closures
@@ -254,11 +276,12 @@ class ExitManager:
                 if exit_info:
                     result = exit_info["result"]
                     reason = exit_info["reason"]
+                    reason_detail = exit_info.get("reason_detail", "")
                     should_roll = exit_info.get("should_roll", False)
 
                     # ── Atomic close: lock DB → IB work → update DB → release ──
                     self._atomic_close(trade, current_price, result, reason,
-                                       pnl_pct, should_roll)
+                                       pnl_pct, should_roll, reason_detail=reason_detail)
 
             except Exception as e:
                 handle_error("exit_manager", "monitor_trade", e,
@@ -270,19 +293,13 @@ class ExitManager:
         self._process_ui_commands()
 
     def _atomic_close(self, trade: dict, current_price: float, result: str,
-                      reason: str, pnl_pct: float, should_roll: bool):
+                      reason: str, pnl_pct: float, should_roll: bool,
+                      reason_detail: str = ""):
         """
         Atomic close operation: DB lock → IB work → enrich → DB update → commit.
 
-        The DB row is locked (SELECT FOR UPDATE) for the entire duration.
+        The DB row is locked (SELECT FOR UPDATE NOWAIT) for the entire duration.
         No other process can close or modify this trade until we commit/rollback.
-
-        Flow:
-        1. lock_trade_for_close() — acquire DB row lock
-        2. execute_exit() or execute_roll() — IB close operations
-        3. collect_exit_enrichment() — Greeks, VIX, indicators
-        4. log_trade_result() — CSV log
-        5. finalize_close() — UPDATE DB, COMMIT, release lock
         """
         from db.writer import lock_trade_for_close, finalize_close, release_trade_lock
 
@@ -318,6 +335,13 @@ class ExitManager:
                 component="exit_manager", operation="collect_exit_enrichment",
                 default={}, context={"ticker": ticker}
             )
+
+            # Add reason_detail to enrichment for analytics drill-down
+            if reason_detail:
+                exit_enrichment["reason_detail"] = reason_detail
+            if should_roll:
+                exit_enrichment["roll_pnl_pct"] = round(pnl_pct * 100, 1)
+                exit_enrichment["roll_from_symbol"] = trade.get("symbol", "")
 
             # Step 4: CSV log
             log_trade_result(trade, current_price, result, reason, exit_enrichment)
@@ -359,7 +383,7 @@ class ExitManager:
                             break
                     if target:
                         contracts = cmd.get("contracts") or target.get("contracts", 0)
-                        reason = f"UI CLOSE ({contracts}x)"
+                        reason = "UI_CLOSE"
                         # Use atomic close: lock → IB close → DB update → release
                         self._atomic_close(target, target.get("current_price", 0),
                                            "SCRATCH", reason, pnl_pct=0, should_roll=False)

@@ -278,12 +278,30 @@ happens when the IB bracket order (TP or SL) fires while the bot was down or
 between reconciliation cycles. Reconciliation detected the mismatch and updated
 the DB to match IB reality.
 
-**Resolution**: Keep both — use standard category prefix + detail suffix:
-- `exit_reason = 'ROLL'` for analytics GROUP BY (strip everything after first space/paren)
-- Keep full detail like `ROLL (P&L=+71%)` in the field for drill-down
-- OR: split into `exit_reason` (category) + detail in `exit_enrichment` JSONB
+**Resolution**: Use structured `exit_reason` with separate `exit_detail` for analytics:
 
-Status: **Tracked — implement with ARCH-003 refactoring**
+**exit_reason** (fixed category for GROUP BY):
+`TP`, `SL`, `TRAIL_STOP`, `ROLL`, `TIME_EXIT`, `EOD_EXIT`, `EXPIRED`, `UI_CLOSE`, `RECONCILE`, `BRACKET_IB`
+
+**exit_enrichment JSONB** (variable detail for drill-down):
+```json
+{
+  "roll_pnl_pct": 71.0,
+  "roll_from_symbol": "AMD260417C00265000",
+  "roll_to_symbol": "AMD260417C00270000",
+  "trail_sl_level": -0.20,
+  "reconcile_source": "periodic"
+}
+```
+
+**Analytics use cases enabled**:
+1. Compare ROLL vs TP vs TRAIL_STOP performance over time
+2. Filter by roll percentage ranges (>50%, >100%, >150%) to find optimal roll threshold
+3. A/B analysis: trades that rolled vs trades that hit bracket TP — which had better total return?
+4. Day-of-week × exit_reason cross-analysis
+5. Signal_type × exit_reason — which signals are best for rolling vs quick TP?
+
+Status: **Ready to implement**
 
 ### BUG-045: Orphaned "transmit" state orders stuck in IB (MSFT, META)
 Orders were submitted to IB but never completed — stuck in "transmit" state.
