@@ -278,7 +278,42 @@ happens when the IB bracket order (TP or SL) fires while the bot was down or
 between reconciliation cycles. Reconciliation detected the mismatch and updated
 the DB to match IB reality.
 
+**Resolution**: Keep both — use standard category prefix + detail suffix:
+- `exit_reason = 'ROLL'` for analytics GROUP BY (strip everything after first space/paren)
+- Keep full detail like `ROLL (P&L=+71%)` in the field for drill-down
+- OR: split into `exit_reason` (category) + detail in `exit_enrichment` JSONB
+
 Status: **Tracked — implement with ARCH-003 refactoring**
+
+### BUG-045: Orphaned "transmit" state orders stuck in IB (MSFT, META)
+Orders were submitted to IB but never completed — stuck in "transmit" state.
+Likely from earlier timeout issues where the order was sent to IB but the
+bot timed out waiting for the fill. These orders are not in the DB.
+
+**Required**: Add a startup cleanup function that:
+1. On bot start, query IB for all open/pending orders
+2. For each order not matched to a DB trade, cancel it
+3. Log the cancelled orders to system_log
+
+Status: **Tracked — Medium priority**
+
+### BUG-046: Race condition — scanner and exit manager can both open for same ticker
+Trade entry does NOT use a DB queue. Scanner directly places IB orders.
+If exit manager is rolling ticker X (closing old + opening new) at the
+same time scanner detects a signal for ticker X, both could open a position.
+
+**Current guard**: `can_enter()` checks `exit_manager.open_trades` for ticker.
+But during a roll, the old trade may be locked/closing while the scanner
+doesn't see the new rolled trade yet (not in DB until roll completes).
+
+**Fix needed**: Before INSERT in `add_trade()`, do:
+```sql
+SELECT id FROM trades WHERE ticker = :ticker AND status = 'open' FOR UPDATE NOWAIT
+```
+If a row exists → skip the insert (another process already has an open trade).
+This is the DB-level duplicate guard from ARCH-006.
+
+Status: **Tracked — implement with ARCH-006**
 
 ### BUG-038: QQQ 634 Call closed 3 times — negative position (-6 contracts)
 The QQQ 634 call was rolled (ENH-007 rolling logic), but after rolling, the old
