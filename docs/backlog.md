@@ -57,7 +57,28 @@ UPDATE trades SET status = 'closed', exit_price = :price, ... WHERE id = :trade_
 COMMIT;
 ```
 
-Status: **Implemented** — close_trade uses SELECT FOR UPDATE, update_trade_price uses GREATEST
+Status: **Implemented** — close_trade uses SELECT FOR UPDATE NOWAIT, update_trade_price uses GREATEST
+
+### ARCH-005: Single Close Authority + Graceful Already-Closed Handling
+**Principle**: Only ONE code path can close trades — `_atomic_close()` in exit_manager. No other thread, module, or function sends sell orders. All close requests funnel through this single point.
+
+**Verified sell order chain** (no other path exists):
+```
+_atomic_close() → execute_exit() → close_position_on_ib() → sell_call/sell_put
+```
+
+**Error handling for already-closed trades**:
+When `execute_exit()` checks IB and finds position qty=0 (already closed by bracket order or another process), it:
+1. Does NOT send a sell order (prevents naked shorts)
+2. Returns to `_atomic_close()` which proceeds to `finalize_close()`
+3. `finalize_close()` updates the DB to status='closed' with the current price
+4. The DB is now in sync with IB reality
+
+This means: regardless of WHO closed the trade on IB (bracket TP/SL, manual TWS close, another process), the DB always gets updated to reflect the true state.
+
+**Future enhancement rule**: Any new feature that needs to close trades (new exit conditions, new UI actions, scheduled closes, API endpoints) MUST call `_atomic_close()` — never send sell orders directly.
+
+Status: **Implemented and enforced**
 
 ### ARCH-003: Refactor into Clean, Small, Reusable Components
 **Principle**: Each module has a single responsibility, is independently testable, and communicates only through the DB. No module should be >200 lines. No duplicated logic.
