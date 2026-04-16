@@ -60,8 +60,14 @@ def _reconcile(client, exit_manager, ib_positions):
     for p in ib_positions:
         con_id = p.get("conId")
         qty = p.get("qty", 0)
-        if con_id and abs(qty) > 0:
+        if con_id and qty > 0:
+            # Only include LONG positions (positive qty)
             ib_by_con_id[con_id] = p
+        elif con_id and qty < 0:
+            # NEGATIVE position = naked short from prior bug. Log but do NOT adopt.
+            log.error(f"[RECONCILE] NEGATIVE POSITION on IB: {p.get('ticker')} "
+                      f"{p.get('symbol')} conId={con_id} qty={qty} — "
+                      f"this is a bug, NOT a legitimate trade. Must be closed manually in TWS.")
 
     # ── Get all open trades from DATABASE (not just in-memory) ──
     db_open_trades = _get_db_open_trades()

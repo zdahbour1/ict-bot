@@ -315,6 +315,32 @@ bot timed out waiting for the fill. These orders are not in the DB.
 
 Status: **Tracked — Medium priority**
 
+### BUG-047: Double-close from bracket order + exit_manager racing
+IB bracket orders (TP/SL) fire independently on IB servers. When a trade
+hits SL, the IB bracket sells the position. But the exit_manager ALSO
+detects SL and sends its own sell via execute_exit(). Both happen within
+seconds → double-sell → negative position.
+
+**Root cause**: Exit manager and IB bracket orders are BOTH trying to close
+the same trade. The position qty check in execute_exit helps but can't
+prevent a race where both check qty=2 at the same moment.
+
+**The reconciliation then adopts the -2 position as a new open trade**
+(BUG-047b: fixed by filtering negative positions).
+
+**Required architectural fix**: When bracket orders are active, the exit
+manager should NOT send its own SL/TP sell orders. Instead:
+1. Exit manager monitors P&L and DETECTS that bracket should fire
+2. If bracket didn't fire yet → update the bracket SL level on IB (trailing)
+3. If bracket already fired → just update DB to reflect the close
+4. Only send manual sell for: TIME_EXIT, EOD_EXIT, ROLL, UI_CLOSE
+   (exit types that IB brackets don't handle)
+
+This means: for SL and TP exits, the exit_manager is a MONITOR, not an executor.
+The IB bracket is the executor. Exit_manager only updates DB after the fact.
+
+Status: **Not fixed — CRITICAL architectural issue**
+
 ### BUG-046: Race condition — scanner and exit manager can both open for same ticker
 Trade entry does NOT use a DB queue. Scanner directly places IB orders.
 If exit manager is rolling ticker X (closing old + opening new) at the
