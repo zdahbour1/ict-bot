@@ -37,3 +37,4 @@ backtest/*.csv
 # OS
 .DS_Store
 Thumbs.db
+open_trades.json
