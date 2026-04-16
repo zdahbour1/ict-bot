@@ -1,6 +1,6 @@
 # ICT Trading Bot — Backlog
 
-## Last Updated: 2026-04-15
+## Last Updated: 2026-04-16
 
 ---
 
@@ -24,7 +24,7 @@
 - All trade state decisions (is this trade open? what's the qty?) query the DB
 - Dashboard already reads from DB (correct pattern)
 
-Status: **Tracked — needs incremental implementation**
+Status: **Implemented** — exit_manager reads from DB, no JSON, DB-first add_trade
 
 ### ARCH-002: Row-Level Locking for Trade State Transitions
 **Principle**: When changing the state of any trade (open→closed, updating price, rolling), the process MUST use `SELECT ... FOR UPDATE` (row-level locking) to prevent race conditions between parallel components.
@@ -180,7 +180,7 @@ Status: **Planned — implement after ARCH-001/002 testing is stable**
 
 Status: **Planned — implement alongside ARCH-003 refactoring**
 
-### BUG-042: Option rolling leaves old trade open in DB + creates negative positions (AMD 265→270)
+### BUG-042: Option rolling leaves old trade open in DB (AMD 265→270)
 **Observed**: AMD 265 was rolled to AMD 270. IB closed 265 and opened 270 correctly.
 But DB record for 265 was never marked closed (still status='open'). Exit manager
 sees 265 as open, tries to close it every 5s, finds -2 qty (naked short from the
@@ -206,7 +206,7 @@ sees -2 for LONG → direction mismatch → refuses to sell → trade stays open
 - The 265 DB record MUST be marked closed regardless of whether the 270 open succeeds
 - Need to verify why finalize_close() didn't update the DB for trade 103
 
-Status: **Not fixed — CRITICAL (creates repeated errors + negative positions)**
+Status: **Fixed** — root cause was SQL syntax error in finalize_close (`:ee::jsonb` → `CAST(:ee AS jsonb)`). Plus reconciliation no longer adopts negative positions.
 
 ### BUG-043: ENH-007/BUG-038 overlap — rolling config should be in settings table
 ROLL_ENABLED and ROLL_THRESHOLD are hardcoded in config.py. They need to be in the
@@ -224,7 +224,7 @@ the bot rolls BEFORE the IB bracket order fires.
 - Roll trigger should be: (bracket_TP_price - 10%) converted to P&L percentage
   instead of fixed 70% of PROFIT_TARGET
 
-Status: **Not fixed — Medium priority, tracked**
+Status: **Fixed** — ROLL_ENABLED, ROLL_THRESHOLD, TP_TO_TRAIL, STOP_LOSS, PROFIT_TARGET, USE_BRACKET_ORDERS, RECONCILIATION_INTERVAL_MIN all in settings table. Dashboard Settings tab shows them under "exit_rules" category.
 
 ### ARCH-006: Single Open Authority — one function opens all trades
 **Principle**: Same as ARCH-005 (single close), but for opening trades.
@@ -241,7 +241,7 @@ but it needs a DB-level guard:
 - Use DB unique constraint or SELECT before INSERT to prevent duplicates
 - Return db_id or None (already does this)
 
-Status: **Tracked — implement after ARCH-001/002 testing stable**
+Status: **Implemented** — add_trade() checks DB for existing open trade on same ticker before INSERT
 
 ### BUG-044: Exit reason values inconsistent — not analyzable
 **Current exit_reason values** (34 distinct strings, many with embedded P&L):
@@ -301,7 +301,7 @@ the DB to match IB reality.
 4. Day-of-week × exit_reason cross-analysis
 5. Signal_type × exit_reason — which signals are best for rolling vs quick TP?
 
-Status: **Ready to implement**
+Status: **Implemented** — standardized to TP, SL, TRAIL_STOP, ROLL, TIME_EXIT, EOD_EXIT, EXPIRED, UI_CLOSE, RECONCILE. Detail in exit_enrichment JSONB.
 
 ### BUG-045: Orphaned "transmit" state orders stuck in IB (MSFT, META)
 Orders were submitted to IB but never completed — stuck in "transmit" state.
@@ -313,7 +313,7 @@ bot timed out waiting for the fill. These orders are not in the DB.
 2. For each order not matched to a DB trade, cancel it
 3. Log the cancelled orders to system_log
 
-Status: **Tracked — Medium priority**
+Status: **Implemented** — cleanup_orphaned_orders() runs on startup, cancels IB orders not matched to DB trades
 
 ### BUG-047: Double-close from bracket order + exit_manager racing
 IB bracket orders (TP/SL) fire independently on IB servers. When a trade
@@ -339,7 +339,7 @@ manager should NOT send its own SL/TP sell orders. Instead:
 This means: for SL and TP exits, the exit_manager is a MONITOR, not an executor.
 The IB bracket is the executor. Exit_manager only updates DB after the fact.
 
-Status: **Not fixed — CRITICAL architectural issue**
+Status: **Fixed** — cancel_bracket_orders() now verifies cancellation (polls up to 3s). If not confirmed, ABORTS the close entirely. execute_exit() checks return value and skips sell if brackets still active.
 
 ### BUG-046: Race condition — scanner and exit manager can both open for same ticker
 Trade entry does NOT use a DB queue. Scanner directly places IB orders.
@@ -357,7 +357,7 @@ SELECT id FROM trades WHERE ticker = :ticker AND status = 'open' FOR UPDATE NOWA
 If a row exists → skip the insert (another process already has an open trade).
 This is the DB-level duplicate guard from ARCH-006.
 
-Status: **Tracked — implement with ARCH-006**
+Status: **Implemented** — add_trade() checks DB for existing open trade on same ticker
 
 ### BUG-038: QQQ 634 Call closed 3 times — negative position (-6 contracts)
 The QQQ 634 call was rolled (ENH-007 rolling logic), but after rolling, the old
@@ -378,7 +378,7 @@ in-memory list instead of checking the DB/IB for actual position state.
 - Use "reduce only" or check position direction to prevent naked shorts
 - After closing a trade, REMOVE it from exit_manager memory AND mark closed in DB atomically
 
-Status: **Not fixed — CRITICAL (can create unlimited naked short exposure)**
+Status: **Fixed** — ARCH-001 (DB source of truth) + ARCH-005 (single close authority) + atomic close with DB lock
 
 ### BUG-039: No "sell-to-close" / position existence check before selling
 The bot sends raw SELL orders without verifying a position exists. IB executes
@@ -397,7 +397,7 @@ the sell regardless, creating naked short options positions.
 **This is a safety guard** — even if all other logic is perfect, this prevents
 the worst-case scenario of accidentally selling naked options.
 
-Status: **Not fixed — CRITICAL safety requirement**
+Status: **Fixed** — get_ib_position_qty() checks before every sell. close_position_on_ib() takes max_qty param. Direction mismatch aborts.
 
 ---
 

@@ -703,6 +703,69 @@ class IBClient:
                     return True  # Still active
         return False  # All cancelled or not found
 
+    # ── Orphaned Order Cleanup ─────────────────────────────────
+    def cleanup_orphaned_orders(self) -> int:
+        """Cancel all open IB orders that don't match a DB open trade.
+        Returns count of orders cancelled. Call on startup."""
+        try:
+            return self._submit_to_ib(self._ib_cleanup_orphans, timeout=30)
+        except Exception as e:
+            log.warning(f"Orphaned order cleanup failed: {e}")
+            return 0
+
+    def _ib_cleanup_orphans(self) -> int:
+        """Runs on IB thread. Finds and cancels unmatched orders."""
+        # Get all open trade IDs from DB
+        db_order_ids = set()
+        try:
+            from db.connection import get_session
+            from sqlalchemy import text
+            session = get_session()
+            if session:
+                rows = session.execute(
+                    text("SELECT ib_order_id FROM trades WHERE status='open' AND ib_order_id IS NOT NULL "
+                         "UNION SELECT ib_tp_perm_id FROM trades WHERE status='open' AND ib_tp_perm_id IS NOT NULL "
+                         "UNION SELECT ib_sl_perm_id FROM trades WHERE status='open' AND ib_sl_perm_id IS NOT NULL")
+                ).fetchall()
+                db_order_ids = {int(r[0]) for r in rows if r[0]}
+                session.close()
+        except Exception as e:
+            log.warning(f"Could not query DB for order IDs: {e}")
+            return 0
+
+        # Check all open IB orders
+        cancelled = 0
+        for trade in self.ib.openTrades():
+            order_id = trade.order.orderId
+            perm_id = trade.order.permId
+            status = trade.orderStatus.status
+
+            # Skip if matched to a DB trade
+            if order_id in db_order_ids or perm_id in db_order_ids:
+                continue
+
+            # Skip already-cancelled orders
+            if status in ("Cancelled", "Inactive", "ApiCancelled"):
+                continue
+
+            # Orphan — cancel it
+            symbol = ""
+            if trade.contract and trade.contract.localSymbol:
+                symbol = trade.contract.localSymbol.strip()
+            log.warning(f"[CLEANUP] Cancelling orphaned order: orderId={order_id} "
+                        f"permId={perm_id} status={status} symbol={symbol}")
+            try:
+                self.ib.cancelOrder(trade.order)
+                cancelled += 1
+            except Exception as e:
+                log.warning(f"[CLEANUP] Failed to cancel orderId={order_id}: {e}")
+
+        if cancelled:
+            log.info(f"[CLEANUP] Cancelled {cancelled} orphaned order(s)")
+        else:
+            log.info("[CLEANUP] No orphaned orders found")
+        return cancelled
+
     # ── IB Reconciliation ─────────────────────────────────────
     def get_ib_positions_raw(self) -> list:
         """Get raw IB positions for reconciliation. Thread-safe.

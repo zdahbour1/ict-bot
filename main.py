@@ -97,6 +97,14 @@ def main():
         except Exception:
             pass
 
+    # ── Cleanup orphaned IB orders (not matched to any DB trade) ──
+    try:
+        cancelled = client.cleanup_orphaned_orders()
+        if cancelled:
+            add_system_log("bot", "info", f"Startup: cancelled {cancelled} orphaned IB order(s)")
+    except Exception as e:
+        log.warning(f"Orphaned order cleanup failed: {e}")
+
     exit_manager.start()
 
     # ── Scanners NOT auto-started — user must click "Start Scans" ──
