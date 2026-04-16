@@ -50,12 +50,16 @@ def cancel_bracket_orders(client, trade: dict) -> bool:
         except Exception:
             pass
 
-    # After 3 seconds, brackets may still be active — warn but continue
-    log.warning(f"[{ticker}] Bracket cancel not confirmed after 3s — "
-                f"proceeding with caution")
-    trade["ib_tp_order_id"] = None
-    trade["ib_sl_order_id"] = None
-    return True
+    # After 3 seconds, brackets STILL active — ABORT. Do NOT proceed.
+    # Assume nothing: if we can't confirm cancellation, it's not safe to sell.
+    log.error(f"[{ticker}] Bracket cancel NOT confirmed after 3s — "
+              f"ABORTING close. Will retry on next cycle.")
+    from strategy.error_handler import handle_error
+    handle_error(f"exit_executor-{ticker}", "bracket_cancel_timeout",
+                 RuntimeError(f"Bracket orders still active after 3s cancel attempt"),
+                 context={"ticker": ticker, "tp_id": tp_id, "sl_id": sl_id},
+                 critical=True)
+    return False  # Caller must check return value and abort if False
 
 
 def get_ib_position_qty(client, trade: dict) -> int:
@@ -148,8 +152,12 @@ def execute_exit(client, trade: dict, reason: str) -> float | None:
     # Step 1: Cancel bracket orders and VERIFY cancelled
     has_brackets = bool(trade.get("ib_tp_order_id") or trade.get("ib_sl_order_id"))
     if has_brackets:
-        cancel_bracket_orders(client, trade)
-        # cancel_bracket_orders already waits up to 3s for verification
+        brackets_cancelled = cancel_bracket_orders(client, trade)
+        if not brackets_cancelled:
+            # Brackets still active — ABORT. Do not proceed to sell.
+            # Will retry on the next exit_manager cycle.
+            log.error(f"[{ticker}] ABORTING exit — brackets not confirmed cancelled")
+            return None
 
     # Step 2: Check ACTUAL position on IB (after brackets confirmed cancelled)
     ib_qty = get_ib_position_qty(client, trade)
