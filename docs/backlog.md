@@ -159,6 +159,52 @@ Status: **Planned — implement after ARCH-001/002 testing is stable**
 
 Status: **Planned — implement alongside ARCH-003 refactoring**
 
+### BUG-042: Option rolling leaves old trade open in DB + creates negative positions (AMD 265→270)
+**Observed**: AMD 265 was rolled to AMD 270. IB closed 265 and opened 270 correctly.
+But DB record for 265 was never marked closed (still status='open'). Exit manager
+sees 265 as open, tries to close it every 5s, finds -2 qty (naked short from the
+roll's sell) → direction mismatch error repeating every 5 seconds.
+
+**Root cause analysis needed**: The `_atomic_close` with `should_roll=True` calls
+`execute_roll()` which internally calls `execute_exit()` to close on IB. But there
+are two separate issues:
+1. The `execute_roll()` closes the IB position but may the `finalize_close()` not be
+   completing properly — possibly the `execute_roll` throws or `safe_call` swallows
+   the error, and `finalize_close` is called with a session that's in a bad state
+2. The exit_manager may be processing the SAME AMD trade on the NEXT cycle (5s later)
+   before the first close completes — the DB cache hasn't refreshed yet, so the old
+   trade is still visible
+
+**Additional factor**: The `get_ib_position_qty()` in `execute_exit()` uses the
+265 conId to check IB, but after rolling, the 265 position may show as -2 (sold
+during the roll) while the 270 position is +2 (new position). The safety guard
+sees -2 for LONG → direction mismatch → refuses to sell → trade stays open in DB.
+
+**Fix needed**:
+- Rolling must be truly atomic: lock DB → close IB → mark DB closed → open new → all in one flow
+- The 265 DB record MUST be marked closed regardless of whether the 270 open succeeds
+- Need to verify why finalize_close() didn't update the DB for trade 103
+
+Status: **Not fixed — CRITICAL (creates repeated errors + negative positions)**
+
+### BUG-043: ENH-007/BUG-038 overlap — rolling config should be in settings table
+ROLL_ENABLED and ROLL_THRESHOLD are hardcoded in config.py. They need to be in the
+settings table so users can adjust from the dashboard. Also, BUG-038 noted that the
+roll trigger should be at (bracket_TP - 10%) instead of fixed 70% of TP, to ensure
+the bot rolls BEFORE the IB bracket order fires.
+
+**Current config (hardcoded)**:
+- ROLL_ENABLED = True (config.py line 169)
+- ROLL_THRESHOLD = 0.70 (config.py line 170)
+
+**Required**:
+- Add to settings table: ROLL_ENABLED, ROLL_THRESHOLD
+- Settings tab should show these under "exit_rules" category
+- Roll trigger should be: (bracket_TP_price - 10%) converted to P&L percentage
+  instead of fixed 70% of PROFIT_TARGET
+
+Status: **Not fixed — Medium priority, tracked**
+
 ### BUG-038: QQQ 634 Call closed 3 times — negative position (-6 contracts)
 The QQQ 634 call was rolled (ENH-007 rolling logic), but after rolling, the old
 position kept being "closed" repeatedly. Each close sold 2 more contracts, resulting
