@@ -26,11 +26,13 @@ def startup_reconciliation_direct(client, exit_manager):
     """
     log.info("=" * 50)
     log.info("Running reconciliation (direct mode)...")
+    _update_thread("running", "Startup reconciliation...")
     try:
         ib_positions = client._ib_get_positions_raw()
     except Exception as e:
         log.error(f"Reconciliation ABORTED — can't get IB positions: {e}")
         _log_to_db("error", f"Aborted (direct): {e}")
+        _update_thread("error", f"Aborted: {e}")
         return
     _reconcile(client, exit_manager, ib_positions)
 
@@ -40,11 +42,14 @@ def periodic_reconciliation(client, exit_manager):
     Run via worker queue during normal operation.
     Full two-pass reconciliation — same logic as startup.
     """
+    _update_thread("running", "Fetching IB positions...")
     try:
         ib_positions = client.get_ib_positions_raw()
     except Exception as e:
+        _update_thread("idle", f"Skipped — IB unavailable: {e}")
         log.debug(f"Periodic reconciliation skipped — IB positions unavailable: {e}")
         return
+    _update_thread("running", f"Reconciling {len(ib_positions)} IB positions...")
     _reconcile(client, exit_manager, ib_positions)
 
 
@@ -182,11 +187,11 @@ def _reconcile(client, exit_manager, ib_positions):
     # ── Summary ──
     total_ib = len(ib_by_con_id)
     total_db = len(db_open_trades)
-    log.info(f"[RECONCILE] Done: {closed_count} closed, {adopted_count} adopted, "
-             f"{total_ib - adopted_count} matched. "
-             f"(IB={total_ib}, DB was={total_db}, DB now={total_db - closed_count + adopted_count})")
-    _log_to_db("info", f"Reconciliation: closed={closed_count}, adopted={adopted_count}, "
-               f"IB={total_ib}, DB={total_db}")
+    summary = (f"closed={closed_count}, adopted={adopted_count}, "
+               f"IB={total_ib}, DB was={total_db}, DB now={total_db - closed_count + adopted_count}")
+    log.info(f"[RECONCILE] Done: {summary}")
+    _log_to_db("info", f"Reconciliation: {summary}")
+    _update_thread("idle", f"Done: {summary}")
     log.info("=" * 50)
 
     exit_manager.invalidate_cache()  # Force refresh from DB on next access
@@ -259,5 +264,14 @@ def _log_to_db(level, message):
     try:
         from db.writer import add_system_log
         add_system_log("reconciliation", level, message)
+    except Exception:
+        pass
+
+
+def _update_thread(status, message):
+    """Update reconciliation thread_status for dashboard visibility."""
+    try:
+        from db.writer import update_thread_status
+        update_thread_status("reconciliation", None, status, message)
     except Exception:
         pass
