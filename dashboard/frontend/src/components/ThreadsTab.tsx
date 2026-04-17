@@ -110,8 +110,19 @@ export default function ThreadsTab() {
     setThreadLogPopup({ threadName, ticker });
     setLoadingThreadLogs(true);
     try {
-      // Fetch logs for all components related to this ticker/thread
+      // Build list of component names to search for this thread
       const components = [threadName];
+
+      // Map thread names to their system_log component names
+      if (threadName === 'bot-main') {
+        components.push('bot');
+      } else if (threadName === 'exit_manager') {
+        components.push('exit_manager');
+      } else if (threadName === 'reconciliation') {
+        // already correct
+      }
+
+      // For ticker-based threads, search all related components
       if (ticker) {
         components.push(`scanner-${ticker}`, `exit_executor-${ticker}`,
           `option_selector-${ticker}`, `trade_entry-${ticker}`);
