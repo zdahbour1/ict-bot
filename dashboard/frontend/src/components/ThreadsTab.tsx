@@ -100,6 +100,43 @@ export default function ThreadsTab() {
     setLoadingErrors(false);
   };
 
+  // Per-thread log viewer
+  const [threadLogPopup, setThreadLogPopup] = useState<{ threadName: string; ticker: string } | null>(null);
+  const [threadLogs, setThreadLogs] = useState<SystemLogEntry[]>([]);
+  const [loadingThreadLogs, setLoadingThreadLogs] = useState(false);
+  const [threadLogFilter, setThreadLogFilter] = useState<string>('all');
+
+  const showThreadLogs = async (threadName: string, ticker: string) => {
+    setThreadLogPopup({ threadName, ticker });
+    setLoadingThreadLogs(true);
+    try {
+      // Fetch logs for all components related to this ticker/thread
+      const components = [threadName];
+      if (ticker) {
+        components.push(`scanner-${ticker}`, `exit_executor-${ticker}`,
+          `option_selector-${ticker}`, `trade_entry-${ticker}`);
+      }
+      const allLogs: SystemLogEntry[] = [];
+      for (const comp of components) {
+        const levelParam = threadLogFilter !== 'all' ? `&level=${threadLogFilter}` : '';
+        const res = await fetch(`/api/system-log?component=${comp}&limit=30${levelParam}`);
+        const data = await res.json();
+        allLogs.push(...(data.logs || []));
+      }
+      // Sort by time descending, dedup by id
+      const seen = new Set<number>();
+      const deduped = allLogs.filter(l => { if (seen.has(l.id)) return false; seen.add(l.id); return true; });
+      deduped.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      setThreadLogs(deduped.slice(0, 50));
+    } catch { setThreadLogs([]); }
+    setLoadingThreadLogs(false);
+  };
+
+  // Refresh thread logs when filter changes
+  useEffect(() => {
+    if (threadLogPopup) showThreadLogs(threadLogPopup.threadName, threadLogPopup.ticker);
+  }, [threadLogFilter]);
+
   const [reconciling, setReconciling] = useState(false);
   const triggerReconcile = async () => {
     setReconciling(true);
@@ -172,6 +209,20 @@ export default function ThreadsTab() {
           );
         }
         return <span>0</span>;
+      },
+    }),
+    col.display({
+      id: 'logs',
+      header: 'Logs',
+      cell: ({ row }) => {
+        const threadName = row.original.thread_name;
+        const ticker = row.original.ticker || '';
+        return (
+          <button onClick={() => showThreadLogs(threadName, ticker)}
+            className="text-blue-400 underline cursor-pointer hover:text-blue-300 text-xs">
+            View
+          </button>
+        );
       },
     }),
     col.accessor('last_message', {
@@ -317,6 +368,60 @@ export default function ThreadsTab() {
                   })}
                 </tbody>
               </table>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Thread Log Popup */}
+      {threadLogPopup && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => setThreadLogPopup(null)}>
+          <div className="bg-[#161b22] border border-[#30363d] rounded-xl p-6 w-[900px] max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold">
+                Thread Log — <span className="text-blue-400">{threadLogPopup.ticker || threadLogPopup.threadName}</span>
+              </h3>
+              <div className="flex items-center gap-2">
+                {['all', 'error', 'warn', 'info'].map(level => (
+                  <button key={level} onClick={() => setThreadLogFilter(level)}
+                    className={`px-2 py-0.5 text-xs rounded ${threadLogFilter === level ? 'bg-blue-500/20 text-blue-400' : 'text-gray-500 hover:text-gray-300'}`}>
+                    {level === 'all' ? 'All' : level.charAt(0).toUpperCase() + level.slice(1)}
+                  </button>
+                ))}
+                <button onClick={() => showThreadLogs(threadLogPopup.threadName, threadLogPopup.ticker)}
+                  className="text-xs text-gray-500 hover:text-white ml-2">Refresh</button>
+                <button onClick={() => setThreadLogPopup(null)} className="text-gray-500 hover:text-white text-xl ml-2">&times;</button>
+              </div>
+            </div>
+            {loadingThreadLogs ? (
+              <div className="text-gray-500 py-4 text-center">Loading logs...</div>
+            ) : threadLogs.length === 0 ? (
+              <div className="text-gray-500 py-4 text-center">No log entries found</div>
+            ) : (
+              <div className="space-y-1">
+                {threadLogs.map(log => {
+                  const levelColors: Record<string, string> = {
+                    error: 'text-red-400 bg-red-500/10',
+                    warn: 'text-yellow-400 bg-yellow-500/10',
+                    info: 'text-blue-400 bg-blue-500/10',
+                    debug: 'text-gray-500 bg-gray-500/10',
+                  };
+                  return (
+                    <div key={log.id} className="bg-[#0d1117] border border-[#21262d] rounded px-3 py-2">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-xs text-gray-500">
+                          {log.created_at ? new Date(log.created_at).toLocaleTimeString() : '-'}
+                        </span>
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${levelColors[log.level] || 'text-gray-400'}`}>
+                          {log.level.toUpperCase()}
+                        </span>
+                        <span className="text-xs text-gray-500 font-mono">{log.component}</span>
+                      </div>
+                      <div className="text-sm text-gray-300">{log.message}</div>
+                    </div>
+                  );
+                })}
+              </div>
             )}
           </div>
         </div>
