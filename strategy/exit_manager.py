@@ -288,10 +288,11 @@ class ExitManager:
                       reason: str, pnl_pct: float, should_roll: bool,
                       reason_detail: str = ""):
         """
-        Atomic close operation: DB lock → IB work → enrich → DB update → commit.
+        Atomic close: lock DB → read CURRENT state → IB work → update DB → release.
 
-        The DB row is locked (SELECT FOR UPDATE NOWAIT) for the entire duration.
-        No other process can close or modify this trade until we commit/rollback.
+        CRITICAL: After locking, we read the CURRENT DB state — NOT the stale
+        trade dict from cache. The trade dict may be seconds old. In a multi-threaded
+        system with IB firing orders independently, stale data causes double-closes.
         """
         from db.writer import lock_trade_for_close, finalize_close, release_trade_lock
 
@@ -302,64 +303,90 @@ class ExitManager:
             log.warning(f"[{ticker}] Cannot atomic close — no db_id")
             return
 
-        # Step 1: Lock the DB record
+        # Step 1: Lock the DB record (NOWAIT — skip if another thread has it)
         session, locked_data = lock_trade_for_close(trade_id)
         if not session:
-            log.info(f"[{ticker}] Trade {trade_id} already closed by another process — skipping")
+            log.info(f"[{ticker}] Trade {trade_id} already closed or locked — skipping")
             self.invalidate_cache()
             return
 
+        # Step 2: Build live_trade from LOCKED DB data — this is the CURRENT truth
+        # Do NOT rely on the stale cached trade dict for any state decisions
+        live_trade = {
+            "db_id": locked_data["id"],
+            "ticker": locked_data["ticker"],
+            "symbol": locked_data["symbol"],
+            "contracts": locked_data["contracts_open"],
+            "entry_price": locked_data["entry_price"],
+            "direction": locked_data["direction"],
+            "ib_con_id": locked_data["ib_con_id"],
+            "ib_order_id": locked_data["ib_order_id"],
+            "ib_perm_id": locked_data["ib_perm_id"],
+            "ib_tp_order_id": locked_data["ib_tp_order_id"],
+            "ib_sl_order_id": locked_data["ib_sl_order_id"],
+            # These come from cache — acceptable for exit conditions/enrichment
+            "peak_pnl_pct": trade.get("peak_pnl_pct", 0),
+            "dynamic_sl_pct": trade.get("dynamic_sl_pct", -0.6),
+            "entry_time": trade.get("entry_time"),
+        }
+
+        log.info(f"[{ticker}] ATOMIC CLOSE: db_id={trade_id} LOCKED. "
+                 f"DB state: {locked_data['contracts_open']} contracts, "
+                 f"conId={locked_data['ib_con_id']}, "
+                 f"direction={locked_data['direction']}, "
+                 f"symbol={locked_data['symbol']}")
+
         try:
-            # Step 2: IB work (cancel brackets, verify, sell)
+            # Step 3: IB work using live_trade (current DB state)
             if should_roll:
                 rolled = safe_call(
-                    execute_roll, self.client, trade, pnl_pct,
+                    execute_roll, self.client, live_trade, pnl_pct,
                     component="exit_manager", operation="execute_roll",
                     context={"ticker": ticker}
                 )
             else:
-                execute_exit(self.client, trade, reason)
+                execute_exit(self.client, live_trade, reason)
                 rolled = None
 
-            # Step 3: Collect enrichment
+            # Step 4: Collect enrichment
             exit_enrichment = safe_call(
-                collect_exit_enrichment, self.client, trade,
+                collect_exit_enrichment, self.client, live_trade,
                 component="exit_manager", operation="collect_exit_enrichment",
                 default={}, context={"ticker": ticker}
             )
 
-            # Add reason_detail to enrichment for analytics drill-down
             if reason_detail:
                 exit_enrichment["reason_detail"] = reason_detail
             if should_roll:
                 exit_enrichment["roll_pnl_pct"] = round(pnl_pct * 100, 1)
-                exit_enrichment["roll_from_symbol"] = trade.get("symbol", "")
+                exit_enrichment["roll_from_symbol"] = live_trade.get("symbol", "")
 
-            # Step 4: CSV log
-            log_trade_result(trade, current_price, result, reason, exit_enrichment)
+            # Step 5: CSV log
+            log_trade_result(live_trade, current_price, result, reason, exit_enrichment)
 
-            # Step 5: Finalize in DB and release lock
+            # Step 6: Finalize in DB and release lock
             finalize_close(session, trade_id, current_price, result, reason, exit_enrichment)
+            log.info(f"[{ticker}] ATOMIC CLOSE COMPLETE: db_id={trade_id} → {result} ({reason})")
 
-            # Post-close: send email, add rolled trade, invalidate cache
+            # Post-close actions (after lock released)
             if not should_roll:
-                safe_call(send_trade_result_email, trade, result, current_price,
+                safe_call(send_trade_result_email, live_trade, result, current_price,
                           component="exit_manager", operation="send_trade_result_email",
                           context={"ticker": ticker})
 
             if should_roll and rolled:
                 self.add_trade(rolled)
                 log.info(f"[{ticker}] Roll complete: "
-                         f"closed {trade.get('symbol')} → opened {rolled.get('symbol')}")
+                         f"closed {live_trade.get('symbol')} → opened {rolled.get('symbol')}")
 
             self.invalidate_cache()
 
         except Exception as e:
-            # IB work failed — release lock, trade stays open for retry
             release_trade_lock(session)
             handle_error("exit_manager", "atomic_close", e,
                          context={"trade_id": trade_id, "ticker": ticker},
                          critical=True)
+            self.invalidate_cache()
 
     def _process_ui_commands(self):
         """Process close commands from the dashboard using atomic close."""

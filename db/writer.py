@@ -191,7 +191,8 @@ def lock_trade_for_close(trade_id: int):
     try:
         # NOWAIT: fail immediately if another process holds the lock
         row = session.execute(
-            text("SELECT id, entry_price, contracts_entered, contracts_open, ticker, symbol "
+            text("SELECT id, entry_price, contracts_entered, contracts_open, ticker, symbol, "
+                 "ib_con_id, ib_order_id, ib_perm_id, ib_tp_perm_id, ib_sl_perm_id, direction "
                  "FROM trades WHERE id = :id AND status = 'open' FOR UPDATE NOWAIT"),
             {"id": trade_id}
         ).fetchone()
@@ -205,6 +206,12 @@ def lock_trade_for_close(trade_id: int):
             "id": row[0], "entry_price": float(row[1]),
             "contracts_entered": int(row[2]), "contracts_open": int(row[3]),
             "ticker": row[4], "symbol": row[5],
+            "ib_con_id": int(row[6]) if row[6] else None,
+            "ib_order_id": int(row[7]) if row[7] else None,
+            "ib_perm_id": int(row[8]) if row[8] else None,
+            "ib_tp_order_id": int(row[9]) if row[9] else None,
+            "ib_sl_order_id": int(row[10]) if row[10] else None,
+            "direction": row[11] or "LONG",
         }
         log.debug(f"DB: locked trade {trade_id} for close")
         return session, trade_data
