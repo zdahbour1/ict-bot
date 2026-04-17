@@ -436,6 +436,36 @@ Export trade data and analytics to Excel/CSV from dashboard.
 ### ENH-013: Mobile Responsive Design
 Dashboard usable on phone/tablet.
 
+### ENH-018: Authentication — Login Screen + 2FA
+Secure dashboard with username/password login and TOTP two-factor authentication.
+Role-based access: admin, trader, viewer. JWT tokens with httpOnly cookies.
+Spec: docs/authentication.md
+Status: Design documented, not started
+
+### ENH-019: Backtest Framework
+Run ICT strategy against historical data, store results in DB, visualize in dashboard.
+Compare configurations side-by-side. Reuse live trading signal + exit code.
+Spec: docs/backtest_framework.md, docs/backtest_wireframes.md
+Status: Design documented, not started
+
+### ENH-020: Cloud Deployment — Installable Image
+Docker-based deployment to AWS/GCP/Azure. GitHub Actions CI/CD pipeline.
+Install script, IB Gateway in Docker, SSL, environment configuration.
+Spec: docs/cloud_deployment.md
+Status: Design documented, not started
+
+### ENH-021: Automated Testing Framework
+pytest-based test suite with CI/CD integration. Unit, integration, E2E tests.
+Test results stored in DB, viewable in dashboard. Pre-commit hooks.
+Spec: docs/testing_framework.md
+Status: Design documented, not started
+
+### ENH-022: Code Profiling & Performance Monitoring
+cProfile, line_profiler, memory_profiler integration. Performance monitoring
+endpoint. Optimization areas identified: DB cache, IB streaming, exit evaluation.
+Spec: docs/testing_framework.md (profiling section)
+Status: Design documented, not started
+
 ---
 
 ## COMPLETED
