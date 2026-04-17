@@ -189,8 +189,9 @@ def main():
                             try:
                                 from db.writer import set_bot_error
                                 set_bot_error(None)  # Clear the signal
-                                from strategy.reconciliation import startup_reconciliation_direct
-                                startup_reconciliation_direct(client, exit_manager)
+                                from strategy.reconciliation import periodic_reconciliation
+                                periodic_reconciliation(client, exit_manager)
+                                exit_manager.invalidate_cache()
                                 add_system_log("reconciliation", "info", "Manual reconciliation completed")
                             except Exception as e:
                                 log.error(f"Manual reconciliation failed: {e}")
