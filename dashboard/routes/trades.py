@@ -1,9 +1,11 @@
-"""Trades API — list, detail, close, close-all."""
+"""Trades API — list, detail, close, close-all, notes, export."""
 from fastapi import APIRouter, Query, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
 from db.connection import get_session
 from db.models import Trade, TradeCommand
+import io
 
 router = APIRouter(tags=["trades"])
 
@@ -35,6 +37,7 @@ def _trade_to_dict(t: Trade) -> dict:
         "error_message": t.error_message,
         "entry_enrichment": t.entry_enrichment or {},
         "exit_enrichment": t.exit_enrichment or {},
+        "notes": t.notes,
     }
 
 
@@ -82,6 +85,27 @@ def get_trade(trade_id: int):
         result = _trade_to_dict(trade)
         session.close()
         return result
+    finally:
+        session.close()
+
+
+class NotesUpdate(BaseModel):
+    notes: str = ""
+
+
+@router.put("/trades/{trade_id}/notes")
+def update_trade_notes(trade_id: int, body: NotesUpdate):
+    """Update notes for a trade."""
+    session = get_session()
+    if not session:
+        raise HTTPException(503, "Database not available")
+    try:
+        trade = session.query(Trade).filter(Trade.id == trade_id).first()
+        if not trade:
+            raise HTTPException(404, f"Trade {trade_id} not found")
+        trade.notes = body.notes
+        session.commit()
+        return {"status": "ok", "trade_id": trade_id, "notes": body.notes}
     finally:
         session.close()
 
@@ -227,5 +251,92 @@ async def close_all_trades():
         session.commit()
         session.close()
         return {"status": "processed", "trades": results, "count": len(results)}
+    finally:
+        session.close()
+
+
+@router.get("/trades/export")
+def export_trades(
+    status: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+):
+    """Export trades to Excel (.xlsx). Supports filtering by status and date range."""
+    try:
+        import openpyxl
+        from openpyxl.styles import PatternFill, Font, Alignment
+    except ImportError:
+        raise HTTPException(500, "openpyxl not installed — run: pip install openpyxl")
+
+    session = get_session()
+    if not session:
+        raise HTTPException(503, "Database not available")
+    try:
+        q = session.query(Trade)
+        if status:
+            q = q.filter(Trade.status == status)
+        if start:
+            q = q.filter(Trade.entry_time >= start)
+        if end:
+            q = q.filter(Trade.entry_time <= end + "T23:59:59")
+        trades = q.order_by(Trade.entry_time.desc()).all()
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Trades"
+
+        # Headers
+        headers = ["ID", "Ticker", "Symbol", "Direction", "Contracts", "Entry Price",
+                    "Exit Price", "P&L %", "P&L $", "Peak P&L %", "Status",
+                    "Exit Reason", "Exit Result", "Signal Type", "Entry Time",
+                    "Exit Time", "Notes"]
+        header_fill = PatternFill("solid", fgColor="1F3864")
+        header_font = Font(color="FFFFFF", bold=True, size=10)
+        for col_idx, h in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col_idx, value=h)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center")
+
+        # Data rows
+        win_fill = PatternFill("solid", fgColor="C6EFCE")
+        loss_fill = PatternFill("solid", fgColor="FFC7CE")
+        for row_idx, t in enumerate(trades, 2):
+            pnl_pct = float(t.pnl_pct * 100) if t.pnl_pct else 0
+            pnl_usd = float(t.pnl_usd) if t.pnl_usd else 0
+            peak = float(t.peak_pnl_pct * 100) if t.peak_pnl_pct else 0
+            row_data = [
+                t.id, t.ticker, t.symbol, t.direction, t.contracts_entered,
+                float(t.entry_price) if t.entry_price else None,
+                float(t.exit_price) if t.exit_price else None,
+                round(pnl_pct, 2), round(pnl_usd, 2), round(peak, 2),
+                t.status, t.exit_reason, t.exit_result, t.signal_type,
+                t.entry_time.strftime("%Y-%m-%d %H:%M") if t.entry_time else None,
+                t.exit_time.strftime("%Y-%m-%d %H:%M") if t.exit_time else None,
+                t.notes,
+            ]
+            fill = win_fill if t.exit_result == "WIN" else loss_fill if t.exit_result == "LOSS" else None
+            for col_idx, val in enumerate(row_data, 1):
+                cell = ws.cell(row=row_idx, column=col_idx, value=val)
+                if fill:
+                    cell.fill = fill
+
+        # Auto-width columns
+        for col in ws.columns:
+            max_len = max(len(str(cell.value or "")) for cell in col)
+            ws.column_dimensions[col[0].column_letter].width = min(max_len + 2, 30)
+        ws.freeze_panes = "A2"
+
+        # Stream the file
+        buffer = io.BytesIO()
+        wb.save(buffer)
+        buffer.seek(0)
+        session.close()
+
+        return StreamingResponse(
+            buffer,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": "attachment; filename=trades_export.xlsx"}
+        )
     finally:
         session.close()

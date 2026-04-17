@@ -24,6 +24,7 @@ export interface Trade {
   exit_reason: string | null;
   exit_result: 'WIN' | 'LOSS' | 'SCRATCH' | null;
   error_message: string | null;
+  notes: string | null;
 }
 
 export interface ThreadStatus {

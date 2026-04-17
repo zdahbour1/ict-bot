@@ -28,8 +28,16 @@ def check_tp_to_trail(trade: dict, pnl_pct: float, entry_price: float) -> bool:
     if pnl_pct >= config.PROFIT_TARGET and not trade.get("_tp_trailed"):
         trade["dynamic_sl_pct"] = config.PROFIT_TARGET - config.STOP_LOSS
         trade["_tp_trailed"] = True
-        log.info(f"[{trade.get('ticker')}] TP hit at {pnl_pct:+.1%} — "
-                 f"converting to trail at {trade['dynamic_sl_pct']:+.0%}")
+        log.info(f"[{trade.get('ticker')}] TP-TO-TRAIL: TP hit at {pnl_pct:+.1%} — "
+                 f"converting SL to trail at {trade['dynamic_sl_pct']:+.0%}")
+        # Log to system_log for dashboard visibility
+        try:
+            from db.writer import add_system_log
+            ticker = trade.get('ticker', 'UNK')
+            add_system_log(f"exit_conditions-{ticker}", "info",
+                          f"TP-TO-TRAIL: P&L={pnl_pct:+.1%}, new SL={trade['dynamic_sl_pct']:+.0%}")
+        except Exception:
+            pass
         return True
     return False
 

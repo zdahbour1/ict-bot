@@ -62,6 +62,7 @@ class Trade(Base):
 
     entry_enrichment = Column(JSONB, default={})
     exit_enrichment = Column(JSONB, default={})
+    notes = Column(Text)
 
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow)

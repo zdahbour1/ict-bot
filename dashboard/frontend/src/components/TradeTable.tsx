@@ -137,6 +137,35 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
       header: 'Error',
       cell: info => info.getValue() ? <span className="text-red-400 text-xs truncate max-w-32 block">{info.getValue()}</span> : '-',
     }),
+    col.accessor('notes' as any, {
+      header: 'Notes',
+      cell: info => {
+        const tradeId = info.row.original.id;
+        const currentNotes = (info.getValue() as string) || '';
+        return (
+          <input
+            type="text"
+            defaultValue={currentNotes}
+            placeholder="..."
+            className="bg-transparent border-b border-transparent hover:border-[#30363d] focus:border-blue-500
+                       text-xs text-gray-400 w-24 px-1 py-0.5 outline-none"
+            onBlur={async (e) => {
+              const newNotes = e.target.value;
+              if (newNotes !== currentNotes) {
+                try {
+                  await fetch(`/api/trades/${tradeId}/notes`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ notes: newNotes }),
+                  });
+                } catch { /* silent */ }
+              }
+            }}
+            onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+          />
+        );
+      },
+    }),
     col.display({
       id: 'actions',
       header: 'Actions',
@@ -187,6 +216,13 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
             refreshing ? 'bg-blue-600 border-blue-600 text-white' : 'bg-[#21262d] border-[#30363d] text-gray-400 hover:text-white'
           }`}>
           {refreshing ? 'Refreshing...' : 'Refresh'}
+        </button>
+        <button onClick={() => {
+          const url = `/api/trades/export?status=${statusFilter || ''}`;
+          window.open(url, '_blank');
+        }}
+          className="px-3 py-1.5 text-sm bg-[#21262d] border border-[#30363d] text-gray-400 rounded-md hover:text-white">
+          Export Excel
         </button>
         {lastUpdated && <span className="text-xs text-gray-500">Updated: {lastUpdated.toLocaleTimeString()}</span>}
         <select value={periodFilter} onChange={e => setPeriodFilter(e.target.value)}
