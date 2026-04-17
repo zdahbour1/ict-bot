@@ -460,6 +460,14 @@ Test results stored in DB, viewable in dashboard. Pre-commit hooks.
 Spec: docs/testing_framework.md
 Status: Design documented, not started
 
+### ENH-024: Strategy Plugin Framework — Multi-Scanner Architecture
+Pluggable strategy system where each strategy implements BaseStrategy interface.
+Strategies produce Signal objects, trade engine executes them. Fully decoupled.
+Includes two new recommended strategies: ORB (Opening Range Breakout) and
+VWAP Mean Reversion. All strategies configurable from dashboard Settings tab.
+Spec: docs/strategy_plugin_framework.md
+Status: Design documented, not started
+
 ### ENH-023: Futures Options Support (MNQ, NQ, ES, MES, GC, CL)
 Trade options on futures contracts. Requires: FOP contract creation, different exchanges
 (GLOBEX, NYMEX, COMEX), multiplier-aware P&L, extended trading hours, futures data feed.
