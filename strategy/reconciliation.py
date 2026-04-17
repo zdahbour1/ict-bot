@@ -56,18 +56,18 @@ def _reconcile(client, exit_manager, ib_positions):
     Pass 2: For each IB position → verify it exists in DB.
     """
     # ── Build IB position lookup by conId ──
+    # Include ALL positions — positive AND negative. Reconciliation mirrors
+    # IB reality into DB. Negative positions are bugs but DB must reflect them
+    # so the system knows they exist and doesn't open duplicates.
     ib_by_con_id = {}
     for p in ib_positions:
         con_id = p.get("conId")
         qty = p.get("qty", 0)
-        if con_id and qty > 0:
-            # Only include LONG positions (positive qty)
+        if con_id and qty != 0:
             ib_by_con_id[con_id] = p
-        elif con_id and qty < 0:
-            # NEGATIVE position = naked short from prior bug. Log but do NOT adopt.
-            log.error(f"[RECONCILE] NEGATIVE POSITION on IB: {p.get('ticker')} "
-                      f"{p.get('symbol')} conId={con_id} qty={qty} — "
-                      f"this is a bug, NOT a legitimate trade. Must be closed manually in TWS.")
+            if qty < 0:
+                log.warning(f"[RECONCILE] NEGATIVE position on IB: {p.get('ticker')} "
+                            f"{p.get('symbol')} conId={con_id} qty={qty}")
 
     # ── Get all open trades from DATABASE (not just in-memory) ──
     db_open_trades = _get_db_open_trades()

@@ -96,20 +96,28 @@ class ExitManager:
         trade["dynamic_sl_pct"] = trade.get("dynamic_sl_pct", -config.STOP_LOSS)
         ticker = trade.get("ticker", "UNK")
 
-        # ARCH-006: Check for existing open trade on same ticker
+        # ARCH-006: Check for existing open trade on same ticker OR same conId
+        con_id = trade.get("ib_con_id")
         try:
             from sqlalchemy import text
             from db.connection import get_session
             session = get_session()
             if session:
-                existing = session.execute(
-                    text("SELECT id FROM trades WHERE ticker = :ticker AND status = 'open' LIMIT 1"),
-                    {"ticker": ticker}
-                ).fetchone()
+                # Check by conId first (exact match), then by ticker
+                if con_id:
+                    existing = session.execute(
+                        text("SELECT id FROM trades WHERE ib_con_id = :cid AND status = 'open' LIMIT 1"),
+                        {"cid": con_id}
+                    ).fetchone()
+                else:
+                    existing = session.execute(
+                        text("SELECT id FROM trades WHERE ticker = :ticker AND status = 'open' LIMIT 1"),
+                        {"ticker": ticker}
+                    ).fetchone()
                 session.close()
                 if existing:
                     log.warning(f"[{ticker}] DUPLICATE GUARD: open trade already exists "
-                                f"(db_id={existing[0]}) — skipping add_trade")
+                                f"(db_id={existing[0]}, conId={con_id}) — skipping add_trade")
                     return
         except Exception as e:
             log.warning(f"[{ticker}] Duplicate check failed: {e} — proceeding with insert")
