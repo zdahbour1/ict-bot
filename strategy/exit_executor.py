@@ -22,6 +22,22 @@ log = logging.getLogger(__name__)
 PT = pytz.timezone("America/Los_Angeles")
 
 
+def _trace(ticker: str, message: str, level: str = "info"):
+    """Log to BOTH Python logger AND system_log DB for dashboard visibility."""
+    component = f"exit_executor-{ticker}"
+    if level == "error":
+        log.error(f"[{ticker}] {message}")
+    elif level == "warn":
+        log.warning(f"[{ticker}] {message}")
+    else:
+        log.info(f"[{ticker}] {message}")
+    try:
+        from db.writer import add_system_log
+        add_system_log(component, level, message[:500])
+    except Exception:
+        pass
+
+
 def cancel_all_brackets_for_contract(client, trade: dict) -> bool:
     """
     Find and cancel ALL open orders on IB for this contract.
@@ -43,7 +59,31 @@ def cancel_all_brackets_for_contract(client, trade: dict) -> bool:
         open_orders = []
 
     if not open_orders:
-        log.info(f"[{ticker}] CLOSE STEP 1 RESULT: No open orders found — safe to proceed")
+        # No orders found. But if we EXPECTED brackets (stored IDs), they may have
+        # JUST FIRED. IB takes 1-2 seconds to update positions after a bracket fill.
+        # Wait and re-check position — if qty is now 0, bracket closed it.
+        expected_brackets = bool(trade.get("ib_tp_order_id") or trade.get("ib_sl_order_id"))
+        if expected_brackets:
+            log.warning(f"[{ticker}] CLOSE STEP 1: No orders found but brackets were expected "
+                        f"(TP={trade.get('ib_tp_order_id')}, SL={trade.get('ib_sl_order_id')}). "
+                        f"Bracket may have JUST FIRED. Waiting 2s for IB to update positions...")
+            time.sleep(2)
+            # Re-check position — if 0, bracket already closed it
+            try:
+                qty_after_wait = client.get_position_quantity(con_id) if con_id else 0
+                if qty_after_wait == 0:
+                    log.info(f"[{ticker}] CLOSE STEP 1 RESULT: Position now 0 — bracket fired. "
+                             f"No sell needed, will update DB only.")
+                    trade["ib_tp_order_id"] = None
+                    trade["ib_sl_order_id"] = None
+                    trade["_bracket_fired"] = True  # Signal to caller
+                    return True
+                log.info(f"[{ticker}] CLOSE STEP 1 RESULT: Position still {qty_after_wait} after wait — "
+                         f"proceeding with close")
+            except Exception:
+                pass
+        else:
+            log.info(f"[{ticker}] CLOSE STEP 1 RESULT: No open orders found — safe to proceed")
         trade["ib_tp_order_id"] = None
         trade["ib_sl_order_id"] = None
         return True
@@ -164,17 +204,22 @@ def execute_exit(client, trade: dict, reason: str) -> float | None:
     symbol = trade.get("symbol", "?")
     con_id = trade.get("ib_con_id", "?")
 
-    log.info(f"{'='*60}")
-    log.info(f"[{ticker}] EXECUTE EXIT START — reason={reason}")
-    log.info(f"[{ticker}]   db_id={db_id} symbol={symbol} conId={con_id}")
-    log.info(f"[{ticker}]   direction={trade.get('direction')} contracts={trade.get('contracts')}")
-    log.info(f"[{ticker}]   stored bracket IDs: TP={trade.get('ib_tp_order_id')} SL={trade.get('ib_sl_order_id')}")
+    _trace(ticker, f"EXECUTE EXIT START — reason={reason} db_id={db_id} "
+           f"symbol={symbol} conId={con_id} direction={trade.get('direction')} "
+           f"contracts={trade.get('contracts')} "
+           f"bracket TP={trade.get('ib_tp_order_id')} SL={trade.get('ib_sl_order_id')}")
 
     # Step 1-3: Cancel ALL brackets and verify
     brackets_clear = cancel_all_brackets_for_contract(client, trade)
     if not brackets_clear:
         log.error(f"[{ticker}] EXECUTE EXIT ABORTED — brackets not cleared")
         log.info(f"{'='*60}")
+        return None
+
+    # If bracket just fired (detected in step 1), skip sell entirely
+    if trade.get("_bracket_fired"):
+        _trace(ticker, "EXECUTE EXIT: Bracket already fired — position closed by IB. "
+               "Skipping sell, will update DB only.")
         return None
 
     # Step 4: Check position
@@ -202,8 +247,7 @@ def execute_exit(client, trade: dict, reason: str) -> float | None:
     # Step 5: Sell
     close_position_on_ib(client, trade, ib_qty)
 
-    log.info(f"[{ticker}] EXECUTE EXIT COMPLETE — {reason}")
-    log.info(f"{'='*60}")
+    _trace(ticker, f"EXECUTE EXIT COMPLETE — {reason}")
     return None
 
 
