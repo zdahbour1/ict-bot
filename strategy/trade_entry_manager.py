@@ -109,18 +109,84 @@ class TradeEntryManager:
 
         return True, "ok"
 
+    def _ib_preflight_check(self) -> tuple[bool, str]:
+        """
+        Check IB directly for existing positions or open orders for this ticker.
+        This is a SAFETY NET — even if DB shows no open trades, IB might have
+        positions or bracket orders from a prior session, crash recovery, etc.
+
+        Returns (clear, reason). If not clear, caller should reconcile and retry.
+        """
+        try:
+            # Check 1: Any positions on IB for this ticker?
+            positions = self.client.get_ib_positions_raw()
+            for p in positions:
+                if p.get("ticker") == self.ticker and p.get("qty", 0) != 0:
+                    qty = p.get("qty", 0)
+                    con_id = p.get("conId")
+                    symbol = p.get("symbol", "")
+                    log.warning(f"[{self.ticker}] IB PRE-FLIGHT: Found existing position! "
+                                f"qty={qty} conId={con_id} symbol={symbol}")
+                    handle_error(f"trade_entry-{self.ticker}", "ib_preflight_position_exists",
+                                 RuntimeError(f"Position exists on IB: qty={qty} conId={con_id}"),
+                                 context={"ticker": self.ticker, "qty": qty,
+                                          "conId": con_id, "symbol": symbol})
+                    return False, f"IB position exists: qty={qty} conId={con_id}"
+
+            # Check 2: Any open orders on IB for this ticker?
+            open_orders = self.client.find_open_orders_for_contract(None, "")
+            ticker_orders = []
+            for o in open_orders:
+                # Match by ticker symbol in the contract
+                order_symbol = o.get("symbol", "")
+                if self.ticker in order_symbol or (o.get("conId") and
+                        any(p.get("ticker") == self.ticker and p.get("conId") == o["conId"]
+                            for p in positions)):
+                    ticker_orders.append(o)
+
+            if ticker_orders:
+                log.warning(f"[{self.ticker}] IB PRE-FLIGHT: Found {len(ticker_orders)} open order(s)! "
+                            f"{[f'orderId={o['orderId']} type={o['orderType']} status={o['status']}' for o in ticker_orders]}")
+                handle_error(f"trade_entry-{self.ticker}", "ib_preflight_orders_exist",
+                             RuntimeError(f"{len(ticker_orders)} open orders on IB for {self.ticker}"),
+                             context={"ticker": self.ticker, "orders": ticker_orders})
+                return False, f"{len(ticker_orders)} open orders on IB"
+
+            return True, "ok"
+
+        except Exception as e:
+            # If we can't check IB, don't block the trade — log and proceed
+            log.warning(f"[{self.ticker}] IB pre-flight check failed: {e} — proceeding")
+            return True, "ok (preflight failed, proceeding)"
+
     # ── Trade execution ───────────────────────────────────
 
     def enter(self, signal: Signal, bars_1m: pd.DataFrame = None) -> dict | None:
         """
         Attempt to enter a trade for the given signal.
 
-        Returns:
-            trade dict if successful, None if entry was blocked or failed.
+        Pre-flight checks:
+        1. can_enter() — DB check (open trades, limits, cooldown)
+        2. _ib_preflight_check() — IB check (positions, open orders)
+        Only if BOTH pass do we place the order.
         """
         allowed, reason = self.can_enter()
         if not allowed:
             log.info(f"[{self.ticker}] Entry blocked: {reason}")
+            return None
+
+        # IB pre-flight: check IB directly for existing positions/orders
+        ib_clear, ib_reason = self._ib_preflight_check()
+        if not ib_clear:
+            log.warning(f"[{self.ticker}] Entry blocked by IB pre-flight: {ib_reason}")
+            # Trigger reconciliation to sync DB with IB reality
+            try:
+                from strategy.reconciliation import periodic_reconciliation
+                log.info(f"[{self.ticker}] Triggering reconciliation due to IB/DB mismatch...")
+                periodic_reconciliation(self.client, self.exit_manager)
+                self.exit_manager.invalidate_cache()
+            except Exception as e:
+                log.warning(f"[{self.ticker}] Reconciliation failed: {e}")
             return None
 
         self._entry_pending = True
