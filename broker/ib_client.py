@@ -757,7 +757,33 @@ class IBClient:
                     "side": fill.execution.side,
                     "time": str(fill.execution.time),
                     "order_id": fill.execution.orderId,
+                    "conId": fill.contract.conId if fill.contract else None,
                 }
+        return None
+
+    def check_fill_by_conid(self, con_id: int) -> dict | None:
+        """Check recent fills for a specific conId. More precise than symbol search."""
+        if not con_id:
+            return None
+        try:
+            return self._submit_to_ib(self._ib_check_fill_by_conid, con_id, timeout=10)
+        except Exception:
+            return None
+
+    def _ib_check_fill_by_conid(self, con_id: int) -> dict | None:
+        """Search fills by exact conId match. Returns most recent SELL fill."""
+        for fill in reversed(self.ib.fills()):
+            if fill.contract and fill.contract.conId == con_id:
+                if fill.execution.side == "SLD":  # Sell fill
+                    return {
+                        "symbol": (fill.contract.localSymbol or "").strip(),
+                        "qty": float(fill.execution.shares),
+                        "price": float(fill.execution.price),
+                        "side": fill.execution.side,
+                        "time": str(fill.execution.time),
+                        "order_id": fill.execution.orderId,
+                        "conId": con_id,
+                    }
         return None
 
     # ── Positions ─────────────────────────────────────────────

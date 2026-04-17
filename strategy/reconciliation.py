@@ -243,16 +243,61 @@ def _get_db_open_con_ids() -> set:
 
 
 def _get_exit_price(client, ticker, db_trade) -> float:
-    """Try to find exit price from IB fills, fall back to entry price."""
-    exit_price = db_trade.get("entry_price", 0)
+    """
+    Find the actual exit price from IB.
+
+    Search order:
+    1. IB fills by conId (exact match — most reliable)
+    2. IB fills by ticker (broader match)
+    3. Fall back to last known current_price from DB (stale but better than entry)
+    4. Fall back to entry_price (worst case)
+    """
+    con_id = db_trade.get("ib_con_id")
+
+    # Try conId-based fill search first (most precise)
+    if con_id:
+        try:
+            fill = client.check_fill_by_conid(con_id)
+            if fill and fill.get("price"):
+                log.info(f"[RECONCILE] Found IB fill by conId={con_id} for {ticker}: "
+                         f"${fill['price']:.2f}")
+                return fill["price"]
+        except Exception:
+            pass
+
+    # Try ticker-based fill search
     try:
         fill = client.check_recent_fills(ticker)
         if fill and fill.get("price"):
-            exit_price = fill["price"]
-            log.info(f"[RECONCILE] Found IB fill for {ticker}: ${exit_price:.2f}")
+            log.info(f"[RECONCILE] Found IB fill by ticker for {ticker}: ${fill['price']:.2f}")
+            return fill["price"]
     except Exception:
         pass
-    return exit_price
+
+    # Fall back to last live price from DB (updated every 5s by exit_manager)
+    # This is the price BEFORE the trade closed — not ideal but better than entry
+    try:
+        from db.connection import get_session
+        from sqlalchemy import text
+        session = get_session()
+        if session:
+            row = session.execute(
+                text("SELECT current_price FROM trades WHERE id = :id"),
+                {"id": db_trade.get("id")}
+            ).fetchone()
+            session.close()
+            if row and row[0] and float(row[0]) > 0:
+                price = float(row[0])
+                log.warning(f"[RECONCILE] No IB fill found for {ticker} — "
+                            f"using last DB current_price: ${price:.2f}")
+                return price
+    except Exception:
+        pass
+
+    # Last resort — entry price
+    entry = db_trade.get("entry_price", 0)
+    log.warning(f"[RECONCILE] No exit price found for {ticker} — using entry_price: ${entry}")
+    return entry
 
 
     # _remove_from_exit_manager removed — ARCH-001: DB is source of truth.
