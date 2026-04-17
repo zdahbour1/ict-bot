@@ -460,6 +460,14 @@ Test results stored in DB, viewable in dashboard. Pre-commit hooks.
 Spec: docs/testing_framework.md
 Status: Design documented, not started
 
+### ENH-023: Futures Options Support (MNQ, NQ, ES, MES, GC, CL)
+Trade options on futures contracts. Requires: FOP contract creation, different exchanges
+(GLOBEX, NYMEX, COMEX), multiplier-aware P&L, extended trading hours, futures data feed.
+Most strategy code is instrument-agnostic (signals, exit conditions) — changes concentrated
+in contract creation, P&L calculation, and trading hours.
+Spec: docs/futures_options_support.md
+Status: Design documented, not started
+
 ### ENH-022: Code Profiling & Performance Monitoring
 cProfile, line_profiler, memory_profiler integration. Performance monitoring
 endpoint. Optimization areas identified: DB cache, IB streaming, exit evaluation.
