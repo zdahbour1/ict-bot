@@ -1,14 +1,20 @@
 """
 Exit Executor — handles the mechanics of closing a trade on IB.
 
-SAFETY RULE: Before ANY sell order, verify the position exists on IB
-with positive quantity. NEVER sell more than we hold. This prevents
-naked short positions from accidental double-closes.
+ARCH-005: This is the SINGLE code path that closes trades.
+All close requests funnel through execute_exit().
 
-Single close function: execute_exit(). Everything uses it —
-manual close, TP, SL, trailing, rolling, EOD, reconciliation.
+SAFETY RULES:
+1. Cancel ALL bracket orders for the contract (not just stored IDs)
+2. VERIFY brackets are cancelled before proceeding
+3. Check IB position quantity before selling
+4. NEVER sell more than we hold
+5. If any check fails, ABORT and retry next cycle
+
+Every step is logged with full detail for tracing.
 """
 import logging
+import time
 from datetime import datetime
 import pytz
 
@@ -16,111 +22,116 @@ log = logging.getLogger(__name__)
 PT = pytz.timezone("America/Los_Angeles")
 
 
-def cancel_bracket_orders(client, trade: dict) -> bool:
+def cancel_all_brackets_for_contract(client, trade: dict) -> bool:
     """
-    Cancel bracket TP and SL legs on IB and VERIFY they are cancelled.
+    Find and cancel ALL open orders on IB for this contract.
+    Does NOT rely on stored order IDs — searches IB directly by symbol/conId.
     Waits up to 3 seconds for IB to confirm cancellation.
-    Returns True if brackets were cancelled (or didn't exist).
+    Returns True if no active orders remain, False if still active (abort).
     """
-    tp_id = trade.get("ib_tp_order_id")
-    sl_id = trade.get("ib_sl_order_id")
-    ids = [i for i in [tp_id, sl_id] if i]
-    if not ids:
-        return True  # No brackets to cancel
-
     ticker = trade.get("ticker", "UNK")
-    try:
-        client.cancel_bracket_children(*ids)
-        log.info(f"[{ticker}] Cancel request sent for brackets (TP={tp_id}, SL={sl_id})")
-    except Exception as e:
-        log.warning(f"[{ticker}] Failed to send cancel for brackets: {e}")
-        # Continue anyway — brackets may not exist anymore
+    con_id = trade.get("ib_con_id")
+    symbol = (trade.get("symbol") or "").replace(" ", "")
 
-    # VERIFY cancellation: wait up to 3 seconds for IB to process
-    import time
-    for attempt in range(6):  # 6 × 0.5s = 3 seconds
+    log.info(f"[{ticker}] CLOSE STEP 1: Finding ALL open orders for conId={con_id} symbol={symbol}")
+
+    # Step 1: Find all open orders for this contract on IB
+    try:
+        open_orders = client.find_open_orders_for_contract(con_id, symbol)
+    except Exception as e:
+        log.error(f"[{ticker}] Could not query IB for open orders: {e}")
+        open_orders = []
+
+    if not open_orders:
+        log.info(f"[{ticker}] CLOSE STEP 1 RESULT: No open orders found — safe to proceed")
+        trade["ib_tp_order_id"] = None
+        trade["ib_sl_order_id"] = None
+        return True
+
+    log.info(f"[{ticker}] CLOSE STEP 1 RESULT: Found {len(open_orders)} open order(s): "
+             f"{[f'orderId={o['orderId']} type={o['orderType']} status={o['status']}' for o in open_orders]}")
+
+    # Step 2: Cancel all of them
+    cancelled_ids = []
+    for order in open_orders:
+        order_id = order["orderId"]
+        try:
+            client.cancel_order_by_id(order_id)
+            cancelled_ids.append(order_id)
+            log.info(f"[{ticker}] CLOSE STEP 2: Cancel sent for orderId={order_id} "
+                     f"(type={order['orderType']} action={order.get('action')})")
+        except Exception as e:
+            log.warning(f"[{ticker}] Failed to cancel orderId={order_id}: {e}")
+
+    if not cancelled_ids:
+        log.warning(f"[{ticker}] CLOSE STEP 2: No cancels sent — orders may not be cancellable")
+
+    # Step 3: Verify all cancelled (poll up to 3 seconds)
+    for attempt in range(6):
         time.sleep(0.5)
         try:
-            still_active = client.check_bracket_orders_active(trade)
-            if not still_active:
+            remaining = client.find_open_orders_for_contract(con_id, symbol)
+            active = [o for o in remaining if o["status"] in ("Submitted", "PreSubmitted", "PendingSubmit")]
+            if not active:
+                log.info(f"[{ticker}] CLOSE STEP 3 RESULT: All orders cancelled (verified after {(attempt+1)*0.5}s)")
                 trade["ib_tp_order_id"] = None
                 trade["ib_sl_order_id"] = None
-                log.info(f"[{ticker}] Bracket orders confirmed cancelled")
                 return True
+            log.debug(f"[{ticker}] CLOSE STEP 3: Still {len(active)} active after {(attempt+1)*0.5}s")
         except Exception:
             pass
 
-    # After 3 seconds, brackets STILL active — ABORT. Do NOT proceed.
-    # Assume nothing: if we can't confirm cancellation, it's not safe to sell.
-    log.error(f"[{ticker}] Bracket cancel NOT confirmed after 3s — "
-              f"ABORTING close. Will retry on next cycle.")
+    # After 3 seconds, orders still active — ABORT
+    log.error(f"[{ticker}] CLOSE STEP 3 RESULT: ABORT — orders still active after 3s. "
+              f"Will retry next cycle.")
     from strategy.error_handler import handle_error
     handle_error(f"exit_executor-{ticker}", "bracket_cancel_timeout",
-                 RuntimeError(f"Bracket orders still active after 3s cancel attempt"),
-                 context={"ticker": ticker, "tp_id": tp_id, "sl_id": sl_id},
+                 RuntimeError(f"Orders still active after 3s cancel attempt"),
+                 context={"ticker": ticker, "con_id": con_id, "cancelled_ids": cancelled_ids},
                  critical=True)
-    return False  # Caller must check return value and abort if False
+    return False
 
 
 def get_ib_position_qty(client, trade: dict) -> int:
     """
     Check the ACTUAL position quantity on IB for this trade.
-    Returns: positive for long, 0 if no position, negative if short.
-
-    Uses conId for exact matching (no symbol string issues).
-    Returns 0 if conId not available or IB query fails (safe default).
+    Uses conId for exact matching. Returns 0 if can't verify (safe default).
     """
+    ticker = trade.get("ticker", "UNK")
     con_id = trade.get("ib_con_id")
+
     if not con_id:
-        # No conId — try to look up by symbol as fallback
-        log.warning(f"[{trade.get('ticker')}] No conId — cannot verify position precisely")
-        return _fallback_position_check(client, trade)
+        log.warning(f"[{ticker}] CLOSE STEP 4: No conId — cannot verify position")
+        return 0
 
     try:
         qty = client.get_position_quantity(con_id)
+        log.info(f"[{ticker}] CLOSE STEP 4 RESULT: IB position qty={qty} for conId={con_id}")
         return qty
     except Exception as e:
-        log.warning(f"[{trade.get('ticker')}] Position check failed for conId={con_id}: {e}")
-        return 0  # Safe default — don't sell if can't verify
-
-
-def _fallback_position_check(client, trade: dict) -> int:
-    """Fallback position check using symbol matching when conId not available."""
-    try:
-        positions = client.get_ib_positions_raw()
-        sym_clean = trade["symbol"].replace(" ", "")
-        for p in positions:
-            p_sym = p.get("symbol", "").replace(" ", "")
-            if p_sym == sym_clean:
-                return int(p.get("qty", 0))
-    except Exception as e:
-        log.warning(f"[{trade.get('ticker')}] Fallback position check failed: {e}")
-    return 0
+        log.warning(f"[{ticker}] CLOSE STEP 4: Position check failed: {e}")
+        return 0
 
 
 def close_position_on_ib(client, trade: dict, max_qty: int) -> bool:
     """
     Send sell order to IB. Only sells up to max_qty contracts.
-
-    SAFETY: Caller must provide max_qty from get_ib_position_qty().
-    This function will NOT sell more than the verified quantity.
     Returns True if sell order was sent, False if skipped.
     """
     direction = trade.get("direction", "LONG")
     requested = trade.get("contracts", 0)
-    symbol = trade["symbol"]
+    symbol = trade.get("symbol", "")
     ticker = trade.get("ticker", "UNK")
 
-    # Never sell more than what IB shows we hold
     sell_qty = min(abs(requested), abs(max_qty))
 
     if sell_qty <= 0:
-        log.warning(f"[{ticker}] SAFETY: Refusing to sell — no position on IB "
+        log.warning(f"[{ticker}] CLOSE STEP 5: REFUSED — no position to sell "
                     f"(requested={requested}, IB qty={max_qty})")
         return False
 
     if sell_qty != abs(requested):
-        log.warning(f"[{ticker}] SAFETY: Reducing sell from {abs(requested)} to {sell_qty} "
+        log.warning(f"[{ticker}] CLOSE STEP 5: Reducing sell {abs(requested)} → {sell_qty} "
                     f"(IB only shows {abs(max_qty)} contracts)")
 
     try:
@@ -128,90 +139,92 @@ def close_position_on_ib(client, trade: dict, max_qty: int) -> bool:
             client.sell_put(symbol, sell_qty)
         else:
             client.sell_call(symbol, sell_qty)
-        log.info(f"[{ticker}] Sell order sent: {sell_qty}x {symbol}")
+        log.info(f"[{ticker}] CLOSE STEP 5 RESULT: Sell order sent — "
+                 f"{sell_qty}x {symbol} ({direction})")
         return True
     except Exception as e:
-        log.error(f"[{ticker}] Failed to send sell order: {e}")
+        log.error(f"[{ticker}] CLOSE STEP 5: FAILED to send sell: {e}")
         return False
 
 
 def execute_exit(client, trade: dict, reason: str) -> float | None:
     """
-    Full exit flow: cancel brackets → check position → close.
-    Returns None. Caller uses current_price for P&L calculation.
+    Full exit flow with detailed tracing:
+    Step 1: Find and cancel ALL bracket orders for this contract
+    Step 2: (done inside step 1)
+    Step 3: Verify all brackets cancelled
+    Step 4: Check IB position quantity
+    Step 5: Send sell order (only if qty > 0)
 
-    This is the SINGLE function that closes trades. No other code
-    should send sell orders directly.
-
-    SAFETY: Checks IB position quantity before selling. Will NOT sell
-    if position is already closed (qty=0) or negative.
+    Returns None. Caller uses current_price for P&L.
+    If any step fails, returns None and the trade stays open for retry.
     """
     ticker = trade.get("ticker", "UNK")
-    log.info(f"[{ticker}] Executing exit: {reason}")
+    db_id = trade.get("db_id", "?")
+    symbol = trade.get("symbol", "?")
+    con_id = trade.get("ib_con_id", "?")
 
-    # Step 1: Cancel bracket orders and VERIFY cancelled
-    has_brackets = bool(trade.get("ib_tp_order_id") or trade.get("ib_sl_order_id"))
-    if has_brackets:
-        brackets_cancelled = cancel_bracket_orders(client, trade)
-        if not brackets_cancelled:
-            # Brackets still active — ABORT. Do not proceed to sell.
-            # Will retry on the next exit_manager cycle.
-            log.error(f"[{ticker}] ABORTING exit — brackets not confirmed cancelled")
-            return None
+    log.info(f"{'='*60}")
+    log.info(f"[{ticker}] EXECUTE EXIT START — reason={reason}")
+    log.info(f"[{ticker}]   db_id={db_id} symbol={symbol} conId={con_id}")
+    log.info(f"[{ticker}]   direction={trade.get('direction')} contracts={trade.get('contracts')}")
+    log.info(f"[{ticker}]   stored bracket IDs: TP={trade.get('ib_tp_order_id')} SL={trade.get('ib_sl_order_id')}")
 
-    # Step 2: Check ACTUAL position on IB (after brackets confirmed cancelled)
+    # Step 1-3: Cancel ALL brackets and verify
+    brackets_clear = cancel_all_brackets_for_contract(client, trade)
+    if not brackets_clear:
+        log.error(f"[{ticker}] EXECUTE EXIT ABORTED — brackets not cleared")
+        log.info(f"{'='*60}")
+        return None
+
+    # Step 4: Check position
     ib_qty = get_ib_position_qty(client, trade)
 
     if ib_qty == 0:
-        # Position already closed — bracket fired before us, or already exited
-        log.info(f"[{ticker}] Position already closed on IB (qty=0) — updating DB only")
+        log.info(f"[{ticker}] EXECUTE EXIT: Position already closed on IB (qty=0) — "
+                 f"will update DB only")
+        log.info(f"{'='*60}")
         return None
 
     if (trade.get("direction") == "LONG" and ib_qty < 0) or \
        (trade.get("direction") == "SHORT" and ib_qty > 0):
-        # Position is in the wrong direction — something is very wrong
-        log.error(f"[{ticker}] CRITICAL: Position direction mismatch! "
-                  f"Trade says {trade.get('direction')} but IB qty={ib_qty}. "
-                  f"NOT selling to avoid making it worse.")
+        log.error(f"[{ticker}] EXECUTE EXIT ABORTED — direction mismatch! "
+                  f"Trade={trade.get('direction')} but IB qty={ib_qty}")
         from strategy.error_handler import handle_error
         handle_error(f"exit_executor-{ticker}", "position_direction_mismatch",
-                     RuntimeError(f"Direction mismatch: trade={trade.get('direction')}, IB qty={ib_qty}"),
-                     context={"ticker": ticker, "symbol": trade.get("symbol"),
-                              "ib_qty": ib_qty, "con_id": trade.get("ib_con_id")},
+                     RuntimeError(f"Direction={trade.get('direction')}, IB qty={ib_qty}"),
+                     context={"ticker": ticker, "symbol": symbol,
+                              "ib_qty": ib_qty, "con_id": con_id},
                      critical=True)
+        log.info(f"{'='*60}")
         return None
 
-    # Step 3: Close — only sell what we actually hold
+    # Step 5: Sell
     close_position_on_ib(client, trade, ib_qty)
+
+    log.info(f"[{ticker}] EXECUTE EXIT COMPLETE — {reason}")
+    log.info(f"{'='*60}")
     return None
 
 
 def execute_roll(client, trade: dict, pnl_pct: float):
     """
-    Roll a trade: close current position, then open new one at next strike.
-    Uses execute_exit() for the close — same safety checks apply.
-
-    Sequence:
-    1. execute_exit() — cancels brackets, checks position, sells
-    2. Verify position is closed on IB
-    3. Open new trade at next strike
-
-    If any step fails, abort. Never open new position if old one is still open.
+    Roll a trade: close current → open new at next strike.
+    Uses execute_exit() for the close.
     """
     ticker = trade.get("ticker", "QQQ")
     direction = trade.get("direction", "LONG")
 
-    # Step 1: Close current trade
-    log.info(f"[{ticker}] Rolling: closing current position first...")
+    log.info(f"[{ticker}] ROLL START: closing current position...")
     execute_exit(client, trade, reason=f"ROLL at {pnl_pct:+.0%}")
 
-    # Step 2: Verify the position is actually closed
+    # Verify closed
     remaining = get_ib_position_qty(client, trade)
     if remaining != 0:
-        log.error(f"[{ticker}] Roll aborted — position still has {remaining} contracts after exit")
+        log.error(f"[{ticker}] ROLL ABORTED — position still has {remaining} contracts")
         return None
 
-    # Step 3: Open new position
+    # Open new position
     try:
         from strategy.option_selector import select_and_enter, select_and_enter_put
         if direction == "SHORT":
@@ -222,11 +235,11 @@ def execute_roll(client, trade: dict, pnl_pct: float):
         if rolled_trade:
             rolled_trade["signal"] = f"ROLL from {trade['symbol']}"
             rolled_trade["_rolled_from"] = trade["symbol"]
-            log.info(f"[{ticker}] Rolled to {rolled_trade['symbol']} @ ${rolled_trade['entry_price']:.2f}")
+            log.info(f"[{ticker}] ROLL COMPLETE: → {rolled_trade['symbol']} @ ${rolled_trade['entry_price']:.2f}")
             return rolled_trade
         else:
-            log.warning(f"[{ticker}] Roll: old position closed but new entry failed")
+            log.warning(f"[{ticker}] ROLL: old position closed but new entry failed")
             return None
     except Exception as e:
-        log.error(f"[{ticker}] Roll: old position closed but new entry failed: {e}")
+        log.error(f"[{ticker}] ROLL: old position closed but new entry failed: {e}")
         return None

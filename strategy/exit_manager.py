@@ -24,7 +24,7 @@ import pytz
 
 from alerts.emailer import send_trade_result_email
 from strategy.exit_conditions import evaluate_exit, update_trailing_stop
-from strategy.exit_executor import execute_exit, execute_roll, cancel_bracket_orders, get_ib_position_qty
+from strategy.exit_executor import execute_exit, execute_roll
 from strategy.trade_logger import log_trade_result, collect_exit_enrichment
 from strategy.reconciliation import periodic_reconciliation
 from strategy.error_handler import handle_error, safe_call
@@ -252,11 +252,14 @@ class ExitManager:
                                               "sl_order_id": trade.get("ib_sl_order_id")})
 
                 log.info(
-                    f"Monitoring {trade['symbol']} | "
+                    f"[{trade.get('ticker')}] MONITOR db_id={trade.get('db_id')} "
+                    f"{trade.get('symbol')} | "
                     f"${current_price:.2f} | "
                     f"P&L:{pnl_pct:+.1%} | "
                     f"Peak:{trade.get('peak_pnl_pct', 0):+.1%} | "
-                    f"SL:{trade.get('dynamic_sl_pct', 0):+.1%}"
+                    f"SL:{trade.get('dynamic_sl_pct', 0):+.1%} | "
+                    f"conId={trade.get('ib_con_id')} "
+                    f"TP_id={trade.get('ib_tp_order_id')} SL_id={trade.get('ib_sl_order_id')}"
                 )
 
                 # ── Evaluate exit conditions ──────────

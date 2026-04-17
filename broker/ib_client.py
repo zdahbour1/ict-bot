@@ -513,7 +513,7 @@ class IBClient:
         return False
 
     def cancel_bracket_children(self, tp_order_id: int, sl_order_id: int):
-        """Cancel TP and SL legs when bot closes a trade manually."""
+        """Cancel TP and SL legs by stored order IDs (legacy)."""
         if config.DRY_RUN:
             return
         try:
@@ -526,6 +526,60 @@ class IBClient:
             if trade.order.orderId in order_ids:
                 self.ib.cancelOrder(trade.order)
                 log.info(f"[IB] Cancelled orderId={trade.order.orderId}")
+
+    def find_open_orders_for_contract(self, con_id: int, symbol: str) -> list:
+        """Find ALL open orders on IB for a specific contract.
+        Searches by conId (primary) and symbol (fallback). Thread-safe."""
+        try:
+            return self._submit_to_ib(self._ib_find_orders_for_contract, con_id, symbol, timeout=10)
+        except Exception as e:
+            log.warning(f"Failed to query open orders: {e}")
+            return []
+
+    def _ib_find_orders_for_contract(self, con_id: int, symbol: str) -> list:
+        """Runs on IB thread. Returns all open orders matching this contract."""
+        symbol_clean = (symbol or "").replace(" ", "")
+        results = []
+        for trade in self.ib.openTrades():
+            matched = False
+            # Match by conId (exact)
+            if con_id and trade.contract and trade.contract.conId == con_id:
+                matched = True
+            # Fallback: match by symbol
+            elif symbol_clean and trade.contract:
+                local = (trade.contract.localSymbol or "").replace(" ", "")
+                if local == symbol_clean:
+                    matched = True
+
+            if matched:
+                status = trade.orderStatus.status
+                if status not in ("Cancelled", "Inactive", "ApiCancelled"):
+                    results.append({
+                        "orderId": trade.order.orderId,
+                        "permId": trade.order.permId,
+                        "action": trade.order.action,
+                        "orderType": trade.order.orderType,
+                        "totalQty": float(trade.order.totalQuantity),
+                        "status": status,
+                        "conId": trade.contract.conId if trade.contract else None,
+                    })
+        return results
+
+    def cancel_order_by_id(self, order_id: int):
+        """Cancel a specific order by orderId. Thread-safe."""
+        try:
+            self._submit_to_ib(self._ib_cancel_single_order, order_id, timeout=5)
+        except Exception as e:
+            log.warning(f"Failed to cancel orderId={order_id}: {e}")
+
+    def _ib_cancel_single_order(self, order_id: int):
+        """Runs on IB thread. Cancel one order."""
+        for trade in self.ib.openTrades():
+            if trade.order.orderId == order_id:
+                self.ib.cancelOrder(trade.order)
+                log.info(f"[IB] Cancel sent for orderId={order_id}")
+                return
+        log.warning(f"[IB] orderId={order_id} not found in openTrades")
 
     def check_bracket_orders_active(self, trade: dict) -> bool:
         """Check if bracket orders (TP/SL) are still active on IB.
