@@ -24,6 +24,25 @@ import config
 log = logging.getLogger(__name__)
 
 
+def _check_not_flex(contract, option_symbol: str):
+    """Reject Flex options before order placement. IB rejects these with code 201.
+    Flex options have secType='FOP' or tradingClass different from symbol."""
+    sec_type = getattr(contract, 'secType', '') or ''
+    trading_class = getattr(contract, 'tradingClass', '') or ''
+    symbol = getattr(contract, 'symbol', '') or ''
+
+    if sec_type == 'FOP':
+        raise RuntimeError(f"Flex option detected for {option_symbol} — "
+                           f"secType={sec_type} tradingClass={trading_class}. "
+                           f"IB does not allow standard orders on Flex options.")
+
+    # Some Flex contracts have secType='OPT' but unusual tradingClass
+    # IB error message mentions "IB-cleared orders are not allowed for Flex options"
+    # Log the contract details for debugging
+    log.debug(f"[FLEX CHECK] {option_symbol}: secType={sec_type} "
+              f"tradingClass={trading_class} symbol={symbol}")
+
+
 class IBClient:
     """
     IB API client. Wraps an IBConnection from the connection pool.
@@ -339,6 +358,9 @@ class IBClient:
         if not contract or not contract.conId:
             raise RuntimeError(f"Contract validation failed for {option_symbol} — order NOT placed")
 
+        # ── Flex option check — IB rejects these with code 201 ──
+        _check_not_flex(contract, option_symbol)
+
         order = MarketOrder(action, contracts)
         if config.IB_ACCOUNT:
             order.account = config.IB_ACCOUNT
@@ -410,6 +432,9 @@ class IBClient:
         contract = self._occ_to_contract(option_symbol)
         if not contract or not contract.conId:
             raise RuntimeError(f"Contract validation failed for {option_symbol}")
+
+        # ── Flex option check — IB rejects these with code 201 ──
+        _check_not_flex(contract, option_symbol)
 
         # Exit side is opposite of entry
         exit_action = "SELL" if action == "BUY" else "BUY"

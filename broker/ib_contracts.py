@@ -112,6 +112,15 @@ def ib_get_atm_symbol(ib, ticker: str, option_type: str,
             opt_contract = Option(ticker, exp, strike, right, exchange)
             result = ib.qualifyContracts(opt_contract)
             if result and opt_contract.conId:
+                # Check for Flex options — IB rejects these with code 201
+                # Flex options have tradingClass different from the ticker symbol
+                trading_class = getattr(opt_contract, 'tradingClass', '') or ''
+                sec_type = getattr(opt_contract, 'secType', '') or ''
+                if trading_class and trading_class != ticker and sec_type == 'FOP':
+                    log.warning(f"[{ticker}] Skipping Flex option: ${strike} {right} on {exchange} "
+                                f"(tradingClass={trading_class}, secType={sec_type})")
+                    continue
+
                 qualified = result
                 winning_strike = strike
                 if strike != atm_strike:
@@ -119,7 +128,8 @@ def ib_get_atm_symbol(ib, ticker: str, option_type: str,
                              f"on {exchange} (conId={opt_contract.conId})")
                 else:
                     log.info(f"[{ticker}] Option qualified on {exchange}: "
-                             f"{ticker} {exp} ${strike} {right} conId={opt_contract.conId}")
+                             f"{ticker} {exp} ${strike} {right} conId={opt_contract.conId}"
+                             f" tradingClass={trading_class}")
                 break
         if qualified:
             break
