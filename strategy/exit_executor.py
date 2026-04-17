@@ -38,98 +38,93 @@ def _trace(ticker: str, message: str, level: str = "info"):
         pass
 
 
-def cancel_all_brackets_for_contract(client, trade: dict) -> bool:
+def cancel_all_orders_and_verify(client, trade: dict) -> bool:
     """
-    Find and cancel ALL open orders on IB for this contract.
-    Does NOT rely on stored order IDs — searches IB directly by symbol/conId.
-    Waits up to 3 seconds for IB to confirm cancellation.
-    Returns True if no active orders remain, False if still active (abort).
+    STEP 1: Find ALL open orders for this contract on IB.
+    STEP 2: Cancel every one of them.
+    STEP 3: Verify all cancelled.
+
+    This runs FIRST, before checking position. By cancelling all orders first,
+    we eliminate any other process (IB bracket) that could close the trade
+    while we're working on it.
+
+    If no orders found but brackets were expected → bracket may have just fired.
+    Wait 2s, re-check position. If qty=0 → bracket closed it, set _bracket_fired flag.
+
+    Returns True if safe to proceed, False if should abort.
     """
     ticker = trade.get("ticker", "UNK")
     con_id = trade.get("ib_con_id")
     symbol = (trade.get("symbol") or "").replace(" ", "")
 
-    log.info(f"[{ticker}] CLOSE STEP 1: Finding ALL open orders for conId={con_id} symbol={symbol}")
+    _trace(ticker, f"STEP 1: Finding ALL open orders for conId={con_id} symbol={symbol}")
 
-    # Step 1: Find all open orders for this contract on IB
+    # STEP 1: Find all open orders
     try:
         open_orders = client.find_open_orders_for_contract(con_id, symbol)
     except Exception as e:
-        log.error(f"[{ticker}] Could not query IB for open orders: {e}")
+        _trace(ticker, f"STEP 1: Could not query IB for open orders: {e}", "error")
         open_orders = []
 
-    if not open_orders:
-        # No orders found. But if we EXPECTED brackets (stored IDs), they may have
-        # JUST FIRED. IB takes 1-2 seconds to update positions after a bracket fill.
-        # Wait and re-check position — if qty is now 0, bracket closed it.
-        expected_brackets = bool(trade.get("ib_tp_order_id") or trade.get("ib_sl_order_id"))
-        if expected_brackets:
-            log.warning(f"[{ticker}] CLOSE STEP 1: No orders found but brackets were expected "
-                        f"(TP={trade.get('ib_tp_order_id')}, SL={trade.get('ib_sl_order_id')}). "
-                        f"Bracket may have JUST FIRED. Waiting 2s for IB to update positions...")
-            time.sleep(2)
-            # Re-check position — if 0, bracket already closed it
+    # STEP 2: Cancel all found orders
+    if open_orders:
+        _trace(ticker, f"STEP 2: Found {len(open_orders)} order(s), cancelling all: "
+               f"{[f'id={o['orderId']} type={o['orderType']} status={o['status']}' for o in open_orders]}")
+
+        for order in open_orders:
             try:
-                qty_after_wait = client.get_position_quantity(con_id) if con_id else 0
-                if qty_after_wait == 0:
-                    log.info(f"[{ticker}] CLOSE STEP 1 RESULT: Position now 0 — bracket fired. "
-                             f"No sell needed, will update DB only.")
+                client.cancel_order_by_id(order["orderId"])
+                _trace(ticker, f"STEP 2: Cancel sent for orderId={order['orderId']} "
+                       f"({order['orderType']} {order.get('action', '')})")
+            except Exception as e:
+                _trace(ticker, f"STEP 2: Failed to cancel orderId={order['orderId']}: {e}", "warn")
+
+        # STEP 3: Verify all cancelled (poll up to 3 seconds)
+        for attempt in range(6):
+            time.sleep(0.5)
+            try:
+                remaining = client.find_open_orders_for_contract(con_id, symbol)
+                active = [o for o in remaining
+                          if o["status"] in ("Submitted", "PreSubmitted", "PendingSubmit")]
+                if not active:
+                    _trace(ticker, f"STEP 3: All orders CANCELLED (verified after {(attempt+1)*0.5}s)")
                     trade["ib_tp_order_id"] = None
                     trade["ib_sl_order_id"] = None
-                    trade["_bracket_fired"] = True  # Signal to caller
                     return True
-                log.info(f"[{ticker}] CLOSE STEP 1 RESULT: Position still {qty_after_wait} after wait — "
-                         f"proceeding with close")
             except Exception:
                 pass
-        else:
-            log.info(f"[{ticker}] CLOSE STEP 1 RESULT: No open orders found — safe to proceed")
-        trade["ib_tp_order_id"] = None
-        trade["ib_sl_order_id"] = None
-        return True
 
-    log.info(f"[{ticker}] CLOSE STEP 1 RESULT: Found {len(open_orders)} open order(s): "
-             f"{[f'orderId={o['orderId']} type={o['orderType']} status={o['status']}' for o in open_orders]}")
+        # Orders still active after 3s — ABORT
+        _trace(ticker, "STEP 3: ABORT — orders still active after 3s. Retry next cycle.", "error")
+        return False
 
-    # Step 2: Cancel all of them
-    cancelled_ids = []
-    for order in open_orders:
-        order_id = order["orderId"]
+    # No orders found — check if brackets were expected (may have just fired)
+    expected_brackets = bool(trade.get("ib_tp_order_id") or trade.get("ib_sl_order_id"))
+    if expected_brackets:
+        _trace(ticker, f"STEP 1: No orders found but brackets EXPECTED "
+               f"(TP={trade.get('ib_tp_order_id')}, SL={trade.get('ib_sl_order_id')}). "
+               f"Bracket may have JUST FIRED. Waiting 2s...", "warn")
+        time.sleep(2)
+
+        # Re-check position — if 0, bracket already closed it
         try:
-            client.cancel_order_by_id(order_id)
-            cancelled_ids.append(order_id)
-            log.info(f"[{ticker}] CLOSE STEP 2: Cancel sent for orderId={order_id} "
-                     f"(type={order['orderType']} action={order.get('action')})")
-        except Exception as e:
-            log.warning(f"[{ticker}] Failed to cancel orderId={order_id}: {e}")
-
-    if not cancelled_ids:
-        log.warning(f"[{ticker}] CLOSE STEP 2: No cancels sent — orders may not be cancellable")
-
-    # Step 3: Verify all cancelled (poll up to 3 seconds)
-    for attempt in range(6):
-        time.sleep(0.5)
-        try:
-            remaining = client.find_open_orders_for_contract(con_id, symbol)
-            active = [o for o in remaining if o["status"] in ("Submitted", "PreSubmitted", "PendingSubmit")]
-            if not active:
-                log.info(f"[{ticker}] CLOSE STEP 3 RESULT: All orders cancelled (verified after {(attempt+1)*0.5}s)")
+            qty = client.get_position_quantity(con_id) if con_id else 0
+            if qty == 0:
+                _trace(ticker, "STEP 1 RESULT: Position now 0 — bracket fired. "
+                       "No sell needed, will update DB only.")
+                trade["_bracket_fired"] = True
                 trade["ib_tp_order_id"] = None
                 trade["ib_sl_order_id"] = None
                 return True
-            log.debug(f"[{ticker}] CLOSE STEP 3: Still {len(active)} active after {(attempt+1)*0.5}s")
+            _trace(ticker, f"STEP 1 RESULT: Position still {qty} after wait — proceeding")
         except Exception:
             pass
+    else:
+        _trace(ticker, "STEP 1: No open orders found, no brackets expected — safe to proceed")
 
-    # After 3 seconds, orders still active — ABORT
-    log.error(f"[{ticker}] CLOSE STEP 3 RESULT: ABORT — orders still active after 3s. "
-              f"Will retry next cycle.")
-    from strategy.error_handler import handle_error
-    handle_error(f"exit_executor-{ticker}", "bracket_cancel_timeout",
-                 RuntimeError(f"Orders still active after 3s cancel attempt"),
-                 context={"ticker": ticker, "con_id": con_id, "cancelled_ids": cancelled_ids},
-                 critical=True)
-    return False
+    trade["ib_tp_order_id"] = None
+    trade["ib_sl_order_id"] = None
+    return True
 
 
 def get_ib_position_qty(client, trade: dict) -> int:
@@ -209,8 +204,8 @@ def execute_exit(client, trade: dict, reason: str) -> float | None:
            f"contracts={trade.get('contracts')} "
            f"bracket TP={trade.get('ib_tp_order_id')} SL={trade.get('ib_sl_order_id')}")
 
-    # Step 1-3: Cancel ALL brackets and verify
-    brackets_clear = cancel_all_brackets_for_contract(client, trade)
+    # Step 1-3: Cancel ALL orders for this contract and verify
+    brackets_clear = cancel_all_orders_and_verify(client, trade)
     if not brackets_clear:
         log.error(f"[{ticker}] EXECUTE EXIT ABORTED — brackets not cleared")
         log.info(f"{'='*60}")
