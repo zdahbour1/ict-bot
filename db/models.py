@@ -191,3 +191,58 @@ class Setting(Base):
     is_secret = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow)
+
+
+# ── Test Run History (ARCH-004) ─────────────────────────────
+# One row per `pytest` invocation — captures the summary so we can
+# chart pass/fail trend over time in the dashboard.
+
+class TestRun(Base):
+    __tablename__ = "test_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    git_branch = Column(String(80), index=True)
+    git_sha = Column(String(40), index=True)
+    suite = Column(String(40), nullable=False, default="unit", index=True)
+    # Counts
+    total = Column(Integer, nullable=False, default=0)
+    passed = Column(Integer, nullable=False, default=0)
+    failed = Column(Integer, nullable=False, default=0)
+    skipped = Column(Integer, nullable=False, default=0)
+    errors = Column(Integer, nullable=False, default=0)
+    # Timing
+    duration_sec = Column(Numeric(10, 3), nullable=False, default=0)
+    started_at = Column(DateTime(timezone=True), nullable=False, default=utcnow, index=True)
+    finished_at = Column(DateTime(timezone=True))
+    # Metadata
+    triggered_by = Column(String(30), nullable=False, default="manual")  # manual | ci | pre-commit
+    python_version = Column(String(20))
+    platform = Column(String(40))
+    exit_status = Column(String(20), nullable=False, default="pending")  # pending | passed | failed | error
+    summary = Column(Text)  # short human-readable summary line
+
+    results = relationship("TestResult", back_populates="run", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index("idx_test_runs_started", "started_at"),
+    )
+
+
+class TestResult(Base):
+    """One row per test that ran inside a TestRun."""
+    __tablename__ = "test_results"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(Integer, ForeignKey("test_runs.id", ondelete="CASCADE"),
+                    nullable=False, index=True)
+    nodeid = Column(Text, nullable=False)     # e.g. tests/unit/test_foo.py::TestBar::test_baz
+    module = Column(String(200), index=True)  # tests/unit/test_foo.py
+    test_class = Column(String(100))
+    test_name = Column(String(200))
+    outcome = Column(String(10), nullable=False, index=True)  # passed | failed | skipped | error
+    duration_sec = Column(Numeric(10, 4))
+    error_message = Column(Text)  # only populated on failure
+    traceback = Column(Text)      # only populated on failure
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+    run = relationship("TestRun", back_populates="results")
