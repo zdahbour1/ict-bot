@@ -1,16 +1,54 @@
 """Test Runs API — history of pytest executions.
 
 Powers the Tests tab in the dashboard: list runs, drill into one run's
-individual test results, and expose a simple pass/fail trend timeseries.
+individual test results, expose a pass/fail trend timeseries, and
+launch new test runs by proxying to the bot_manager sidecar.
 """
+import os
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+import httpx
+from fastapi import APIRouter, HTTPException, Query, Body
 
 from db.connection import get_session
 from db.models import TestRun, TestResult
 
 router = APIRouter(tags=["test-runs"])
+
+# Same sidecar the bot control routes talk to
+SIDECAR_URL = os.getenv("BOT_SIDECAR_URL", "http://host.docker.internal:9000")
+ALLOWED_SUITES = {"unit", "concurrency", "integration", "all"}
+
+
+@router.post("/test-runs/launch")
+async def launch_test_run(payload: dict = Body(default={})):
+    """Kick off a pytest subprocess on the host via bot_manager.
+
+    Body: {"suite": "unit"|"concurrency"|"integration"|"all"}
+    Returns 202 with the sidecar's acknowledgement. A row appears in
+    test_runs as the run progresses (poll /test-runs/summary to detect it).
+    """
+    suite = (payload.get("suite") or "unit").strip()
+    if suite not in ALLOWED_SUITES:
+        raise HTTPException(400, f"suite must be one of {sorted(ALLOWED_SUITES)}")
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                f"{SIDECAR_URL}/run-tests",
+                json={"suite": suite, "triggered_by": "dashboard"},
+            )
+            data = resp.json()
+            if resp.status_code >= 400:
+                raise HTTPException(resp.status_code, data.get("error", "sidecar error"))
+            return data
+    except httpx.ConnectError:
+        raise HTTPException(
+            503,
+            "Bot manager sidecar is not running. Start it with: python bot_manager.py"
+        )
+    except httpx.TimeoutException:
+        raise HTTPException(504, "Sidecar timed out starting pytest")
 
 
 def _run_to_dict(r: TestRun) -> dict:

@@ -115,6 +115,56 @@ export default function TestsTab() {
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [outcomeFilter, setOutcomeFilter] = useState<'all' | 'failed' | 'skipped'>('all');
 
+  // ── Launch a new test run via bot_manager sidecar ─────────
+  const [launching, setLaunching] = useState<string | null>(null);
+  const [launchError, setLaunchError] = useState<string | null>(null);
+  const latestStartedAt = runs.length ? runs[0].started_at : null;
+
+  const launchRun = async (suite: 'unit' | 'concurrency' | 'integration' | 'all') => {
+    if (launching) return;
+    setLaunchError(null);
+    setLaunching(suite);
+    try {
+      const res = await fetch('/api/test-runs/launch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ suite }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setLaunchError(err.detail || `HTTP ${res.status}`);
+        setLaunching(null);
+        return;
+      }
+      // Poll for the new run to show up (up to ~90s)
+      const deadline = Date.now() + 90_000;
+      const poll = setInterval(async () => {
+        await refetchRuns();
+        await refetchSummary();
+        if (Date.now() > deadline) {
+          clearInterval(poll);
+          setLaunching(null);
+        }
+      }, 2000);
+      // Also clear on component unmount — best effort
+      setTimeout(() => { clearInterval(poll); setLaunching(null); }, 95_000);
+    } catch (e: any) {
+      setLaunchError(e?.message || 'launch failed');
+      setLaunching(null);
+    }
+  };
+
+  // If a new run row appears after we launched, stop the busy spinner
+  useEffect(() => {
+    if (launching && latestStartedAt) {
+      const age = Date.now() - new Date(latestStartedAt).getTime();
+      if (age < 30_000) {
+        // Fresh row — launch succeeded
+        setLaunching(null);
+      }
+    }
+  }, [latestStartedAt, launching]);
+
   useEffect(() => {
     if (selectedRunId == null) {
       setDetail(null);
@@ -148,8 +198,50 @@ export default function TestsTab() {
     refetchSummary();
   };
 
+  const suiteButtons: { suite: 'unit' | 'concurrency' | 'integration' | 'all'; label: string; hint: string }[] = [
+    { suite: 'unit',        label: 'Run Unit',        hint: 'Fast in-memory tests' },
+    { suite: 'concurrency', label: 'Run Concurrency', hint: 'Race-condition stress (threaded)' },
+    { suite: 'integration', label: 'Run Integration', hint: 'DB locking + reconciliation (needs Postgres)' },
+    { suite: 'all',         label: 'Run All',         hint: 'Every suite, unfiltered' },
+  ];
+
   return (
     <div className="space-y-6">
+      {/* Run-tests control bar */}
+      <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm text-gray-400 mr-2">Launch a run:</span>
+          {suiteButtons.map(b => (
+            <button key={b.suite}
+              onClick={() => launchRun(b.suite)}
+              disabled={!!launching}
+              title={b.hint}
+              className={`px-3 py-1.5 text-xs rounded-md font-medium transition-all border ${
+                launching === b.suite
+                  ? 'bg-blue-600 text-white animate-pulse border-blue-500 cursor-wait'
+                  : launching
+                    ? 'bg-[#21262d] border-[#30363d] text-gray-600 cursor-not-allowed'
+                    : 'bg-[#21262d] border-[#30363d] text-gray-300 hover:bg-[#30363d] hover:text-white'
+              }`}>
+              {launching === b.suite ? 'Running...' : b.label}
+            </button>
+          ))}
+          {launching && (
+            <span className="text-xs text-blue-400 ml-2">
+              waiting for results to appear...
+            </span>
+          )}
+          {launchError && (
+            <span className="text-xs text-red-400 ml-2">
+              {launchError}
+            </span>
+          )}
+          <span className="text-xs text-gray-500 ml-auto">
+            runs on the host via <code className="text-gray-400">bot_manager</code>
+          </span>
+        </div>
+      </div>
+
       {/* Top row: latest + trend */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-4">
