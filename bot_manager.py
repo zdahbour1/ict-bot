@@ -25,6 +25,9 @@ log = logging.getLogger(__name__)
 _bot_process = None
 _bot_start_time = None
 
+# Test runner state (pytest subprocess)
+_test_process = None
+
 BOT_DIR = os.path.dirname(os.path.abspath(__file__))
 PYTHON = sys.executable
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://ict_bot:ict_bot_dev@localhost:5432/ict_bot")
@@ -62,8 +65,78 @@ class BotManagerHandler(BaseHTTPRequestHandler):
             self._handle_stop()
         elif self.path == "/close-trade":
             self._handle_close_trade()
+        elif self.path == "/run-tests":
+            self._handle_run_tests()
         else:
             self._send_json({"error": "not found"}, 404)
+
+    def _handle_run_tests(self):
+        """Spawn pytest as a detached subprocess.
+
+        Body: {"suite": "unit" | "integration" | "concurrency" | "all"}
+        Returns 202 immediately — the pytest_db_reporter plugin writes
+        test_runs/test_results rows as the run progresses, so the UI
+        polls /api/test-runs/summary to see the new row appear.
+        """
+        global _test_process
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = json.loads(self.rfile.read(content_length)) if content_length > 0 else {}
+        except Exception:
+            body = {}
+
+        suite = body.get("suite", "unit").strip()
+        # Allow-list of suites → which pytest args to use
+        suites = {
+            "unit":        ["tests/unit/", "-m", "not integration and not slow"],
+            "concurrency": ["tests/unit/", "-m", "concurrency"],
+            "integration": ["tests/integration/", "-m", "integration"],
+            "all":         ["tests/"],
+        }
+        if suite not in suites:
+            self._send_json({"error": f"unknown suite '{suite}'"}, 400)
+            return
+
+        # Don't stack runs — if one is live, reject
+        if _test_process is not None and _test_process.poll() is None:
+            self._send_json({
+                "error": "a test run is already in progress",
+                "pid": _test_process.pid,
+            }, 409)
+            return
+
+        args = [PYTHON, "-m", "pytest", *suites[suite], "-q", "--tb=short"]
+        env = os.environ.copy()
+        env["PYTEST_DB_REPORT"] = "1"
+        env["PYTEST_SUITE"] = suite
+        env["PYTEST_TRIGGERED_BY"] = body.get("triggered_by", "dashboard")
+        env["DATABASE_URL"] = DATABASE_URL
+
+        log_file = os.path.join(BOT_DIR, "pytest.log")
+        log.info(f"Spawning pytest: suite={suite} args={args[3:]}")
+        try:
+            with open(log_file, "w") as f:
+                f.write(f"=== pytest run started at {datetime.now().isoformat()} ===\n")
+                f.write(f"Suite: {suite}\nArgs: {' '.join(args)}\n\n")
+                f.flush()
+                _test_process = subprocess.Popen(
+                    args,
+                    cwd=BOT_DIR,
+                    env=env,
+                    stdout=f,
+                    stderr=subprocess.STDOUT,
+                )
+        except Exception as e:
+            log.error(f"Failed to spawn pytest: {e}")
+            self._send_json({"error": f"spawn failed: {e}"}, 500)
+            return
+
+        self._send_json({
+            "status": "started",
+            "pid": _test_process.pid,
+            "suite": suite,
+            "log_file": "pytest.log",
+        }, status=202)
 
     def _handle_close_trade(self):
         """Close a trade on IB. Checks position, cancels brackets, sells if still open."""

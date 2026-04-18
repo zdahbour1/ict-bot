@@ -32,6 +32,19 @@ Branch: feature/dashboard. Docs: docs/backlog.md has full project state.
 - If brackets were expected but not found → bracket may have JUST FIRED, wait 2s
 - NEVER use stale cached data for critical decisions
 
+### Test Every Feature, Every Change
+- **Every new feature MUST ship with at least a handful of tests** that lock
+  in the intended behavior. No exceptions — if it's worth writing, it's
+  worth a test.
+- **Before calling any unit of work "done," run the full regression suite**
+  (`python -m pytest tests/unit/`). Any pre-existing test failing is a
+  regression — fix it or roll the change back. Never ship red.
+- Concurrency-sensitive features get concurrency tests (see
+  `tests/unit/test_concurrency.py` for the pattern). DB-touching features
+  get integration tests under `tests/integration/`.
+- The dashboard Tests tab ("Run Unit" / "Run Concurrency" / "Run Integration")
+  is the fastest way to confirm the whole suite still passes.
+
 ## Commands
 ```bash
 # Compile check
