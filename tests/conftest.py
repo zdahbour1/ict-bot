@@ -21,6 +21,12 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 
+# ── Pytest → DB reporter ─────────────────────────────────────
+# Opt-in: set PYTEST_DB_REPORT=1 to persist runs to Postgres.
+# Without it, pytest runs normally with no DB side effects.
+pytest_plugins = ["tests.pytest_db_reporter"]
+
+
 # ── Mock IB Contract ─────────────────────────────────────────
 
 class MockContract:
