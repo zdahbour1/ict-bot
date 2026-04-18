@@ -460,6 +460,20 @@ Test results stored in DB, viewable in dashboard. Pre-commit hooks.
 Spec: docs/testing_framework.md
 Status: Design documented, not started
 
+### ENH-025: iOS Native Mobile Application
+Native SwiftUI app connecting to existing FastAPI backend. Zero business logic
+duplication — server does all computation, app is a thin client for monitoring,
+control, and alerts. Push notifications for trade events.
+Spec: docs/ios_mobile_app.md
+Status: Design documented, not started
+
+### ENH-026: Delta-Neutral Strategy (Iron Condor / Iron Butterfly)
+Theta decay strategy for range-bound markets. 0DTE iron condors on SPY/QQQ.
+Requires multi-leg combo order support in IB. Complements directional strategies
+by profiting when market doesn't move. 40-72% win rate depending on structure.
+Spec: docs/delta_neutral_strategy.md
+Status: Research complete, design documented, not started
+
 ### ENH-024: Strategy Plugin Framework — Multi-Scanner Architecture
 Pluggable strategy system where each strategy implements BaseStrategy interface.
 Strategies produce Signal objects, trade engine executes them. Fully decoupled.
