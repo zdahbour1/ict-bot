@@ -74,6 +74,22 @@ def invalidate_active_strategy_cache() -> None:
     _CACHED_ACTIVE_STRATEGY_ID = None
 
 
+def _roadmap_fields(trade: dict) -> dict:
+    """Extract the roadmap-schema optional fields from a trade dict.
+
+    Only keys the caller actually provided are returned — the rest fall
+    back to the DB defaults (OPT / 100 / SMART / USD). This keeps today's
+    ICT flow unchanged while letting FOP / STK / futures callers pass
+    their own values without a separate insert path.
+    """
+    out: dict = {}
+    for key in ("sec_type", "multiplier", "exchange", "currency",
+                "underlying", "strategy_config"):
+        if key in trade and trade[key] is not None:
+            out[key] = trade[key]
+    return out
+
+
 def insert_trade(trade: dict, account: str) -> int | None:
     """Insert a new trade row. Returns the DB id."""
     from db.models import Trade
@@ -111,6 +127,9 @@ def insert_trade(trade: dict, account: str) -> int | None:
             entry_time=trade.get("entry_time", datetime.now(timezone.utc)),
             entry_enrichment=_sanitize_for_json(entry_enrichment),
             strategy_id=_resolve_strategy_id(trade),
+            # Roadmap schema extensions — caller may override, else DB defaults
+            # (OPT / 100 / SMART / USD) fire and behavior is identical to before.
+            **_roadmap_fields(trade),
         )
         session.add(row)
         session.commit()

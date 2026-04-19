@@ -68,6 +68,18 @@ class Trade(Base):
     strategy_id = Column(Integer, ForeignKey("strategies.strategy_id"),
                          nullable=False, index=True)
 
+    # Roadmap schema extensions (forward-compatible; defaults = today's behavior)
+    # Security typing for OPT / FOP / STK / FUT / BAG
+    sec_type = Column(String(5), nullable=False, default="OPT")
+    multiplier = Column(Integer, nullable=False, default=100)
+    exchange = Column(String(20), nullable=False, default="SMART")
+    currency = Column(String(5), nullable=False, default="USD")
+    underlying = Column(String(20))
+    # Snapshot of strategy tuning params at trade time (distinct from
+    # strategy_id/signal_type — this captures the exact values like
+    # PROFIT_TARGET/STOP_LOSS/ROLL_THRESHOLD that produced this trade).
+    strategy_config = Column(JSONB, nullable=False, default=dict)
+
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow)
 
@@ -182,6 +194,13 @@ class Ticker(Base):
     notes = Column(Text)
     strategy_id = Column(Integer, ForeignKey("strategies.strategy_id"),
                          nullable=False, index=True)
+
+    # Roadmap schema extensions (defaults = today's equity-options behavior)
+    sec_type = Column(String(5), nullable=False, default="OPT")
+    multiplier = Column(Integer, nullable=False, default=100)
+    exchange = Column(String(20), nullable=False, default="SMART")
+    currency = Column(String(5), nullable=False, default="USD")
+
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow)
 
@@ -385,6 +404,14 @@ class BacktestTrade(Base):
     exit_indicators = Column(JSONB, default=dict)
     entry_context = Column(JSONB, default=dict)
     signal_details = Column(JSONB, default=dict)
+
+    # Roadmap schema extensions (defaults = today's equity-options behavior)
+    sec_type = Column(String(5), nullable=False, default="OPT")
+    multiplier = Column(Integer, nullable=False, default=100)
+    exchange = Column(String(20), nullable=False, default="SMART")
+    currency = Column(String(5), nullable=False, default="USD")
+    underlying = Column(String(20))
+    strategy_config = Column(JSONB, nullable=False, default=dict)
 
     notes = Column(Text)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
