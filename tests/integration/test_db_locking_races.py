@@ -57,10 +57,10 @@ def open_trade(db_guard):
             INSERT INTO trades
               (account, ticker, symbol, direction, contracts_entered,
                contracts_open, entry_price, profit_target, stop_loss_level,
-               entry_time, status)
+               entry_time, status, strategy_id)
             VALUES
               ('DU000000-TEST', 'TEST', 'TEST260415C00100000', 'LONG',
-               2, 2, 2.00, 4.00, 0.80, NOW(), 'open')
+               2, 2, 2.00, 4.00, 0.80, NOW(), 'open', 1)
             RETURNING id
         """)
     ).fetchone()
