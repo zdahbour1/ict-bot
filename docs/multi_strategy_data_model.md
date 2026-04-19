@@ -1,6 +1,9 @@
 # Multi-Strategy Concurrent Data Model — Design Doc
 
-**Status:** 🟡 Design under review — no code to be written until this is approved.
+**Status:** 🟠 **DEFERRED — long-term target.**
+**Near-term plan:** see `docs/active_strategy_design.md` (one strategy at
+a time, with the full `strategies`/`strategy_id` foundation so this doc
+becomes easier to implement later).
 
 **Problem:** The current bot assumes **one scanner per ticker**. To run
 ICT + ORB (+ future strategies) concurrently on the same ticker, several
