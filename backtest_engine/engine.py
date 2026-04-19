@@ -28,6 +28,7 @@ import pandas as pd
 
 from strategy.exit_conditions import evaluate_exit
 from strategy.signal_engine import SignalEngine
+from strategy.levels import get_all_levels
 
 from backtest_engine.data_provider import fetch_multi_timeframe
 from backtest_engine.fill_model import (
@@ -325,10 +326,17 @@ def _simulate_ticker(
         bars_1h = tf["1h"][tf["1h"].index <= ts]
         bars_4h = tf["4h"][tf["4h"].index <= ts]
 
+        # Compute levels (ICT needs PDH/PDL/session/OR/PWH/PWL for raids)
+        try:
+            levels = get_all_levels(bars_1m, bars_1h, bars_4h)
+        except Exception as e:
+            log.debug(f"{ticker}@{ts}: get_all_levels failed: {e}")
+            levels = []
+
         if strategy is not None:
             # Plugin path (ORB, VWAP, etc.)
             try:
-                signals = strategy.detect(bars_1m, bars_1h, bars_4h, [], ticker)
+                signals = strategy.detect(bars_1m, bars_1h, bars_4h, levels, ticker)
                 raw_signals = [_signal_to_dict(s) for s in signals]
             except Exception as e:
                 log.debug(f"{ticker}@{ts}: strategy detect failed: {e}")
@@ -336,7 +344,7 @@ def _simulate_ticker(
         else:
             # Legacy ICT path
             try:
-                signals = sig_engine.detect(bars_1m, bars_1h, bars_4h, [])
+                signals = sig_engine.detect(bars_1m, bars_1h, bars_4h, levels)
                 raw_signals = [_signal_to_dict(s) for s in signals]
             except Exception as e:
                 log.debug(f"{ticker}@{ts}: SignalEngine failed: {e}")
