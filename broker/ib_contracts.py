@@ -200,3 +200,88 @@ def ib_occ_to_contract(ib, occ_symbol: str, contract_cache: dict):
             return qualified[0]
 
     raise RuntimeError(f"Could not qualify IB contract for {occ_symbol}")
+
+
+# ─────────────────────────────────────────────────────────────
+# Futures Options (FOP) support
+# See docs/futures_options_implementation.md.
+# ─────────────────────────────────────────────────────────────
+
+# Per-instrument contract specs. Expiry intervals + multipliers are
+# fixed by the exchange; strike intervals are the minimum strike step.
+FOP_SPECS = {
+    "MNQ": {"exchange": "GLOBEX", "multiplier": 2,    "strike_interval": 25,   "currency": "USD"},
+    "NQ":  {"exchange": "GLOBEX", "multiplier": 20,   "strike_interval": 25,   "currency": "USD"},
+    "MES": {"exchange": "GLOBEX", "multiplier": 5,    "strike_interval": 5,    "currency": "USD"},
+    "ES":  {"exchange": "GLOBEX", "multiplier": 50,   "strike_interval": 5,    "currency": "USD"},
+    "GC":  {"exchange": "NYMEX",  "multiplier": 100,  "strike_interval": 5,    "currency": "USD"},
+    "MGC": {"exchange": "NYMEX",  "multiplier": 10,   "strike_interval": 5,    "currency": "USD"},
+    "CL":  {"exchange": "NYMEX",  "multiplier": 1000, "strike_interval": 0.5,  "currency": "USD"},
+    "MCL": {"exchange": "NYMEX",  "multiplier": 100,  "strike_interval": 0.5,  "currency": "USD"},
+}
+
+
+def get_fop_spec(underlying: str) -> dict | None:
+    """Return the canonical contract spec for a futures-option underlying,
+    or None if the symbol isn't known to this bot yet."""
+    return FOP_SPECS.get(underlying.upper())
+
+
+def ib_qualify_futures_option(
+    ib,
+    underlying: str,
+    expiry: str,                # YYYYMMDD
+    strike: float,
+    right: str,                 # 'C' or 'P'
+    contract_cache: dict,
+    exchange: str | None = None,
+):
+    """Build + qualify a `FuturesOption` IB contract and cache it.
+
+    Unlike equity options which route SMART, FOPs must specify the exact
+    exchange (GLOBEX for ES/NQ families, NYMEX for energy + metals).
+    If `exchange` is not provided we look it up from FOP_SPECS.
+
+    Returns the qualified `FuturesOption` on success. Raises on failure.
+    """
+    from ib_async import FuturesOption
+
+    spec = get_fop_spec(underlying)
+    if spec is None and exchange is None:
+        raise RuntimeError(
+            f"No FOP_SPECS entry for {underlying} and no explicit exchange — "
+            "add it to broker/ib_contracts.py FOP_SPECS"
+        )
+    resolved_exchange = exchange or spec["exchange"]
+    currency = (spec or {}).get("currency", "USD")
+    multiplier = (spec or {}).get("multiplier")
+
+    cache_key = f"FOP:{underlying}:{expiry}:{right}:{strike}:{resolved_exchange}"
+    if cache_key in contract_cache:
+        return contract_cache[cache_key]
+
+    contract = FuturesOption(
+        symbol=underlying,
+        lastTradeDateOrContractMonth=expiry,
+        strike=strike,
+        right=right,
+        exchange=resolved_exchange,
+        currency=currency,
+        multiplier=str(multiplier) if multiplier else "",
+    )
+
+    qualified = ib.qualifyContracts(contract)
+    if not qualified or not qualified[0] or not getattr(qualified[0], "conId", 0):
+        raise RuntimeError(
+            f"Could not qualify FOP {underlying} {expiry} {strike}{right} "
+            f"on {resolved_exchange}"
+        )
+
+    result = qualified[0]
+    contract_cache[cache_key] = result
+    log.info(
+        f"[IB] FOP {underlying} {expiry} {strike}{right} qualified on "
+        f"{resolved_exchange} — conId={result.conId}, "
+        f"multiplier={multiplier}"
+    )
+    return result

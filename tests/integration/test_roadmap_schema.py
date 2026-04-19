@@ -219,18 +219,30 @@ class TestInsertTradeDefaults:
 # ── Existing tickers backfill ────────────────────────────
 
 class TestTickerBackfill:
-    def test_all_existing_tickers_opt_default(self, session):
-        """Every pre-existing ticker must be OPT / 100 / SMART / USD after
-        the migration (the implicit assumption made explicit)."""
-        row = session.execute(text(
+    def test_equity_option_tickers_have_opt_defaults(self, session):
+        """Every OPT (equity-option) ticker must have multiplier=100 /
+        exchange=SMART / currency=USD. FOP tickers (MNQ, ES, etc.) are
+        expected to diverge — they carry their own instrument-specific
+        values — so they are excluded from this invariant."""
+        bad = session.execute(text(
             "SELECT COUNT(*) FROM tickers "
-            "WHERE sec_type <> 'OPT' OR multiplier <> 100 "
-            "  OR exchange <> 'SMART' OR currency <> 'USD'"
+            "WHERE sec_type = 'OPT' "
+            "  AND (multiplier <> 100 OR exchange <> 'SMART' "
+            "       OR currency <> 'USD')"
         )).scalar()
-        assert row == 0, (
-            f"{row} tickers have non-default values after migration — "
-            "existing rows should match the implicit equity-options defaults"
+        assert bad == 0, (
+            f"{bad} OPT tickers have non-default values — "
+            "the implicit equity-options backfill should match the defaults"
         )
+
+    def test_fop_tickers_if_present_are_not_smart_routed(self, session):
+        """If any FOP tickers exist, they must NOT be SMART-routed —
+        FOPs need explicit exchange (GLOBEX/NYMEX/etc.)."""
+        bad = session.execute(text(
+            "SELECT COUNT(*) FROM tickers "
+            "WHERE sec_type = 'FOP' AND exchange = 'SMART'"
+        )).scalar()
+        assert bad == 0, f"{bad} FOP tickers are incorrectly SMART-routed"
 
 
 # ── Backtest_trades round-trip ───────────────────────────
