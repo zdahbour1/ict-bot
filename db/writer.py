@@ -34,6 +34,46 @@ def _safe_db(func):
 
 
 @_safe_db
+def _resolve_strategy_id(trade: dict) -> int:
+    """Resolve the strategy_id to stamp on a new trade.
+
+    Priority: trade['strategy_id'] > ACTIVE_STRATEGY setting > default strategy > 1.
+    Cached for the process lifetime after the first successful lookup so every
+    insert doesn't hit the DB for the same answer.
+    """
+    # Explicit win
+    sid = trade.get("strategy_id")
+    if sid is not None:
+        try:
+            return int(sid)
+        except (TypeError, ValueError):
+            pass
+
+    global _CACHED_ACTIVE_STRATEGY_ID
+    cached = globals().get("_CACHED_ACTIVE_STRATEGY_ID")
+    if cached:
+        return cached
+
+    try:
+        from db.strategy_writer import get_active_strategy_id, get_default_strategy_id
+        resolved = get_active_strategy_id() or get_default_strategy_id() or 1
+    except Exception:
+        resolved = 1
+    _CACHED_ACTIVE_STRATEGY_ID = resolved
+    return resolved
+
+
+# Process-cached active strategy_id — invalidated only on bot restart
+# (matches the "change requires restart" contract in active_strategy_design.md).
+_CACHED_ACTIVE_STRATEGY_ID: int | None = None
+
+
+def invalidate_active_strategy_cache() -> None:
+    """Testing hook — clear the cached active strategy id."""
+    global _CACHED_ACTIVE_STRATEGY_ID
+    _CACHED_ACTIVE_STRATEGY_ID = None
+
+
 def insert_trade(trade: dict, account: str) -> int | None:
     """Insert a new trade row. Returns the DB id."""
     from db.models import Trade
@@ -70,6 +110,7 @@ def insert_trade(trade: dict, account: str) -> int | None:
             ict_tp=float(trade["ict_tp"]) if trade.get("ict_tp") else None,
             entry_time=trade.get("entry_time", datetime.now(timezone.utc)),
             entry_enrichment=_sanitize_for_json(entry_enrichment),
+            strategy_id=_resolve_strategy_id(trade),
         )
         session.add(row)
         session.commit()

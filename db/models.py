@@ -64,12 +64,17 @@ class Trade(Base):
     exit_enrichment = Column(JSONB, default={})
     notes = Column(Text)
 
+    # ENH-024 rollout #1: strategy attribution (audit only — logic unchanged)
+    strategy_id = Column(Integer, ForeignKey("strategies.strategy_id"),
+                         nullable=False, index=True)
+
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow)
 
     closes = relationship("TradeClose", back_populates="trade", cascade="all, delete-orphan")
     commands = relationship("TradeCommand", back_populates="trade", cascade="all, delete-orphan")
     errors = relationship("Error", back_populates="trade")
+    strategy = relationship("Strategy", back_populates="trades")
 
 
 class TradeClose(Base):
@@ -170,13 +175,21 @@ class Ticker(Base):
     __tablename__ = "tickers"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    symbol = Column(String(10), nullable=False, unique=True)
+    symbol = Column(String(10), nullable=False)  # unique WITH strategy_id, see table_args
     name = Column(String(100))
     is_active = Column(Boolean, nullable=False, default=True)
     contracts = Column(Integer, nullable=False, default=2)
     notes = Column(Text)
+    strategy_id = Column(Integer, ForeignKey("strategies.strategy_id"),
+                         nullable=False, index=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow)
+
+    strategy = relationship("Strategy", back_populates="tickers")
+
+    __table_args__ = (
+        UniqueConstraint("symbol", "strategy_id", name="uniq_ticker_per_strategy"),
+    )
 
 
 class Setting(Base):
@@ -184,13 +197,49 @@ class Setting(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     category = Column(String(30), nullable=False, index=True)
-    key = Column(String(50), nullable=False, unique=True)
+    key = Column(String(50), nullable=False)  # unique WITH strategy_id, see table_args
     value = Column(Text, nullable=False)
     data_type = Column(String(20), nullable=False, default="string")
     description = Column(Text)
     is_secret = Column(Boolean, nullable=False, default=False)
+    # Nullable strategy_id: NULL = global (infra/account), non-NULL = per-strategy override
+    strategy_id = Column(Integer, ForeignKey("strategies.strategy_id"),
+                         nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow)
+
+    strategy = relationship("Strategy", back_populates="settings")
+
+    __table_args__ = (
+        UniqueConstraint("key", "strategy_id", name="uniq_setting_per_scope"),
+    )
+
+
+class Strategy(Base):
+    """ENH-024 rollout #1: strategies table.
+
+    Each trading strategy registered in the system (ICT, ORB, VWAP, ...).
+    The `strategy_id` is the user-facing stable ID and the FK target on
+    child tables (trades, tickers, settings).
+
+    Only one strategy may have `is_default=True` at a time (enforced by
+    partial unique index in the SQL schema).
+    """
+    __tablename__ = "strategies"
+
+    strategy_id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(30), nullable=False, unique=True)
+    display_name = Column(String(80), nullable=False)
+    description = Column(Text)
+    class_path = Column(String(200), nullable=False)
+    enabled = Column(Boolean, nullable=False, default=True)
+    is_default = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow)
+
+    trades = relationship("Trade", back_populates="strategy")
+    tickers = relationship("Ticker", back_populates="strategy")
+    settings = relationship("Setting", back_populates="strategy")
 
 
 # ── Test Run History (ARCH-004) ─────────────────────────────
