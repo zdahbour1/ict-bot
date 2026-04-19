@@ -1,0 +1,260 @@
+"""
+Integration tests for dashboard/routes/backtest.py — the API surface.
+
+Uses FastAPI's TestClient against the full app (no HTTP server spawn
+needed). Seeds a run + trades in the DB, then exercises every route.
+"""
+from __future__ import annotations
+
+from datetime import date, datetime, timezone
+
+import pytest
+from sqlalchemy import text
+
+pytestmark = pytest.mark.integration
+
+
+def _db_available() -> bool:
+    try:
+        from db.connection import db_available
+        return db_available()
+    except Exception:
+        return False
+
+
+@pytest.fixture(scope="module")
+def db_guard():
+    if not _db_available():
+        pytest.skip("Postgres not reachable")
+
+
+@pytest.fixture(scope="module")
+def client(db_guard):
+    """Real FastAPI TestClient — all routes mounted."""
+    from fastapi.testclient import TestClient
+    from dashboard.app import app
+    return TestClient(app)
+
+
+@pytest.fixture
+def seeded_run(db_guard):
+    """Create a run with a couple of trades; cleaned up after."""
+    from backtest_engine.writer import (
+        create_run, mark_run_started, record_trade, finalize_run, delete_run
+    )
+    from backtest_engine.metrics import compute_summary
+
+    run_id = create_run(
+        name="api-test-run",
+        strategy_id=1,
+        tickers=["QQQ", "SPY"],
+        start_date=date(2026, 3, 1),
+        end_date=date(2026, 3, 5),
+        config={"profit_target": 1.0, "stop_loss": 0.6},
+    )
+    mark_run_started(run_id)
+
+    trades = [
+        {
+            "ticker": "QQQ", "symbol": "QQQ260301C00600000",
+            "direction": "LONG", "contracts": 2,
+            "entry_price": 2.0, "exit_price": 4.0,
+            "pnl_pct": 1.0, "pnl_usd": 400.0,
+            "entry_time": datetime(2026, 3, 1, 14, 30, tzinfo=timezone.utc),
+            "exit_time": datetime(2026, 3, 1, 15, 15, tzinfo=timezone.utc),
+            "hold_minutes": 45,
+            "signal_type": "LONG_iFVG",
+            "exit_reason": "TP", "exit_result": "WIN",
+            "entry_indicators": {"rsi_14": 35.0, "atr_14": 1.2, "vwap": 600.5},
+            "entry_context": {"day_of_week": "Monday", "session_phase": "open"},
+        },
+        {
+            "ticker": "SPY", "symbol": "SPY260302P00550000",
+            "direction": "SHORT", "contracts": 2,
+            "entry_price": 1.8, "exit_price": 1.1,
+            "pnl_pct": 0.39, "pnl_usd": 140.0,
+            "entry_time": datetime(2026, 3, 2, 15, 0, tzinfo=timezone.utc),
+            "exit_time": datetime(2026, 3, 2, 16, 30, tzinfo=timezone.utc),
+            "hold_minutes": 90,
+            "signal_type": "SHORT_OB",
+            "exit_reason": "TRAIL_STOP", "exit_result": "WIN",
+            "entry_indicators": {"rsi_14": 72.0, "atr_14": 1.5, "vwap": 550.1},
+            "entry_context": {"day_of_week": "Tuesday", "session_phase": "midday"},
+        },
+        {
+            "ticker": "QQQ", "symbol": "QQQ260303C00605000",
+            "direction": "LONG", "contracts": 2,
+            "entry_price": 2.1, "exit_price": 1.1,
+            "pnl_pct": -0.47, "pnl_usd": -200.0,
+            "entry_time": datetime(2026, 3, 3, 15, 0, tzinfo=timezone.utc),
+            "exit_time": datetime(2026, 3, 3, 15, 45, tzinfo=timezone.utc),
+            "hold_minutes": 45,
+            "signal_type": "LONG_iFVG",
+            "exit_reason": "SL", "exit_result": "LOSS",
+            "entry_indicators": {"rsi_14": 42.0, "atr_14": 1.1, "vwap": 603.0},
+            "entry_context": {"day_of_week": "Wednesday", "session_phase": "midday"},
+        },
+    ]
+    for t in trades:
+        record_trade(run_id, 1, t)
+
+    finalize_run(run_id, compute_summary(trades))
+    yield run_id
+    delete_run(run_id)
+
+
+# ── GET /backtests ───────────────────────────────────────
+
+class TestListBacktests:
+    def test_returns_seeded_run(self, client, seeded_run):
+        r = client.get("/api/backtests?limit=10")
+        assert r.status_code == 200
+        data = r.json()
+        ids = [run["id"] for run in data["runs"]]
+        assert seeded_run in ids
+
+    def test_filter_by_strategy(self, client, seeded_run):
+        r = client.get("/api/backtests?strategy_id=1&limit=10")
+        assert r.status_code == 200
+        assert any(run["id"] == seeded_run for run in r.json()["runs"])
+
+    def test_strategy_filter_excludes_others(self, client, seeded_run):
+        r = client.get("/api/backtests?strategy_id=99999&limit=10")
+        assert r.status_code == 200
+        assert not any(run["id"] == seeded_run for run in r.json()["runs"])
+
+    def test_status_filter(self, client, seeded_run):
+        r = client.get("/api/backtests?status=completed&limit=10")
+        assert r.status_code == 200
+        assert any(run["id"] == seeded_run for run in r.json()["runs"])
+
+
+# ── GET /backtests/{id} ──────────────────────────────────
+
+class TestGetBacktest:
+    def test_returns_run_with_trades(self, client, seeded_run):
+        r = client.get(f"/api/backtests/{seeded_run}")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["run"]["id"] == seeded_run
+        assert data["trade_count"] == 3
+        assert len(data["trades"]) == 3
+        assert data["run"]["strategy_name"] == "ict"
+
+    def test_404_on_missing_run(self, client):
+        r = client.get("/api/backtests/999999")
+        assert r.status_code == 404
+
+
+# ── GET /backtests/{id}/analytics ────────────────────────
+
+class TestAnalytics:
+    def test_pnl_by_ticker(self, client, seeded_run):
+        r = client.get(f"/api/backtests/{seeded_run}/analytics")
+        assert r.status_code == 200
+        data = r.json()
+        tickers = {row["ticker"] for row in data["pnl_by_ticker"]}
+        assert tickers == {"QQQ", "SPY"}
+
+    def test_exit_reason_distribution(self, client, seeded_run):
+        r = client.get(f"/api/backtests/{seeded_run}/analytics")
+        reasons = {row["reason"] for row in r.json()["by_reason"]}
+        assert {"TP", "SL", "TRAIL_STOP"}.issubset(reasons)
+
+    def test_cumulative_pnl_curve(self, client, seeded_run):
+        r = client.get(f"/api/backtests/{seeded_run}/analytics")
+        cum = r.json()["cum_pnl"]
+        assert len(cum) == 3
+        # Final cumulative should equal sum of pnls
+        assert cum[-1]["cum_pnl"] == pytest.approx(340.0)  # 400 + 140 - 200
+
+    def test_by_signal_win_rate(self, client, seeded_run):
+        r = client.get(f"/api/backtests/{seeded_run}/analytics")
+        by_sig = {row["signal"]: row for row in r.json()["by_signal"]}
+        # LONG_iFVG: 2 trades, 1 win
+        assert by_sig["LONG_iFVG"]["count"] == 2
+        assert by_sig["LONG_iFVG"]["wins"] == 1
+
+
+# ── GET /backtests/{id}/feature_analysis ─────────────────
+
+class TestFeatureAnalysis:
+    def test_features_extracted(self, client, seeded_run):
+        r = client.get(f"/api/backtests/{seeded_run}/feature_analysis")
+        assert r.status_code == 200
+        data = r.json()
+        feature_names = {f["feature"] for f in data["features"]}
+        # The three numeric indicators we seeded
+        assert {"rsi_14", "atr_14", "vwap"}.issubset(feature_names)
+
+    def test_edge_computed(self, client, seeded_run):
+        r = client.get(f"/api/backtests/{seeded_run}/feature_analysis")
+        rsi = next(f for f in r.json()["features"] if f["feature"] == "rsi_14")
+        # 2 wins (RSI 35 + 72), 1 loss (RSI 42). Win mean = 53.5, loss mean = 42
+        assert rsi["n_wins"] == 2
+        assert rsi["n_losses"] == 1
+
+
+# ── POST /backtests/launch ───────────────────────────────
+
+class TestLaunch:
+    def test_rejects_missing_tickers(self, client):
+        r = client.post("/api/backtests/launch", json={
+            "start_date": "2026-03-01", "end_date": "2026-03-02",
+        })
+        assert r.status_code == 400
+
+    def test_rejects_missing_dates(self, client):
+        r = client.post("/api/backtests/launch", json={
+            "tickers": ["QQQ"],
+        })
+        assert r.status_code == 400
+
+    def test_sidecar_proxy_surfaces_errors_cleanly(self, client):
+        """Whatever the sidecar does (connect error, 404 on old sidecar,
+        timeout, or actual 202 if it's up-to-date) the endpoint must
+        surface it cleanly — NEVER a 500. The specific status depends on
+        the local sidecar version, so accept any of the reasonable ones."""
+        r = client.post("/api/backtests/launch", json={
+            "tickers": ["QQQ"],
+            "start_date": "2026-03-01",
+            "end_date": "2026-03-02",
+        })
+        assert r.status_code != 500, (
+            f"launch produced 500 (should surface sidecar error cleanly): {r.text}"
+        )
+        # Must be a valid HTTP code
+        assert 400 <= r.status_code < 600
+
+
+# ── Strategies-for-dropdown ──────────────────────────────
+
+class TestStrategiesEndpoint:
+    def test_lists_enabled_strategies(self, client):
+        r = client.get("/api/backtests/strategies")
+        assert r.status_code == 200
+        data = r.json()
+        names = {s["name"] for s in data["strategies"]}
+        assert "ict" in names
+
+
+# ── DELETE /backtests/{id} ───────────────────────────────
+
+class TestDelete:
+    def test_delete_removes_run(self, client, db_guard):
+        from backtest_engine.writer import create_run
+        rid = create_run(
+            name="delete-target",
+            strategy_id=1,
+            tickers=["X"],
+            start_date=date(2026, 1, 1),
+            end_date=date(2026, 1, 1),
+            config={},
+        )
+        r = client.delete(f"/api/backtests/{rid}")
+        assert r.status_code == 200
+        assert r.json()["deleted"] == rid
+
+        # Confirm gone
+        r = client.get(f"/api/backtests/{rid}")
+        assert r.status_code == 404

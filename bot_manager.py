@@ -28,6 +28,9 @@ _bot_start_time = None
 # Test runner state (pytest subprocess)
 _test_process = None
 
+# Backtest runner state (backtest_engine subprocess)
+_backtest_process = None
+
 BOT_DIR = os.path.dirname(os.path.abspath(__file__))
 PYTHON = sys.executable
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://ict_bot:ict_bot_dev@localhost:5432/ict_bot")
@@ -67,8 +70,74 @@ class BotManagerHandler(BaseHTTPRequestHandler):
             self._handle_close_trade()
         elif self.path == "/run-tests":
             self._handle_run_tests()
+        elif self.path == "/run-backtest":
+            self._handle_run_backtest()
         else:
             self._send_json({"error": "not found"}, 404)
+
+    def _handle_run_backtest(self):
+        """Spawn a backtest subprocess. Body:
+            {"name": str?, "strategy": "ict", "tickers": ["QQQ"],
+             "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD",
+             "config": {...}}
+        Returns 202 immediately with the new run_id (or sidecar pid if
+        run_id can't be determined before spawn — engine creates it)."""
+        global _backtest_process
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = json.loads(self.rfile.read(content_length)) if content_length > 0 else {}
+        except Exception:
+            body = {}
+
+        # Validate required fields
+        tickers = body.get("tickers")
+        if not tickers or not isinstance(tickers, list):
+            self._send_json({"error": "tickers (list) required"}, 400)
+            return
+        for k in ("start_date", "end_date"):
+            if not body.get(k):
+                self._send_json({"error": f"{k} required"}, 400)
+                return
+
+        # Don't stack runs
+        if _backtest_process is not None and _backtest_process.poll() is None:
+            self._send_json({
+                "error": "a backtest is already running",
+                "pid": _backtest_process.pid,
+            }, 409)
+            return
+
+        runner = os.path.join(BOT_DIR, "run_backtest_engine.py")
+        if not os.path.exists(runner):
+            self._send_json({"error": f"runner not found: {runner}"}, 500)
+            return
+
+        args = [PYTHON, runner, json.dumps(body)]
+        env = os.environ.copy()
+        env["DATABASE_URL"] = DATABASE_URL
+
+        log_file = os.path.join(BOT_DIR, "backtest.log")
+        log.info(f"Spawning backtest: strategy={body.get('strategy')} "
+                 f"tickers={tickers} {body.get('start_date')}→{body.get('end_date')}")
+        try:
+            with open(log_file, "w") as f:
+                f.write(f"=== backtest started at {datetime.now().isoformat()} ===\n")
+                f.write(f"Request: {json.dumps(body)}\n\n")
+                f.flush()
+                _backtest_process = subprocess.Popen(
+                    args, cwd=BOT_DIR, env=env,
+                    stdout=f, stderr=subprocess.STDOUT,
+                )
+        except Exception as e:
+            log.error(f"Failed to spawn backtest: {e}")
+            self._send_json({"error": f"spawn failed: {e}"}, 500)
+            return
+
+        self._send_json({
+            "status": "started",
+            "pid": _backtest_process.pid,
+            "log_file": "backtest.log",
+        }, status=202)
 
     def _handle_run_tests(self):
         """Spawn pytest as a detached subprocess.

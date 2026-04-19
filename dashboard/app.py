@@ -121,6 +121,7 @@ socket_app = socketio.ASGIApp(sio, app)
 # Import and include route modules
 from dashboard.routes import (
     trades, tickers, settings, threads, bot, summary, analytics, test_runs,
+    backtest,
 )
 
 app.include_router(trades.router, prefix="/api")
@@ -131,6 +132,7 @@ app.include_router(bot.router, prefix="/api")
 app.include_router(summary.router, prefix="/api")
 app.include_router(analytics.router, prefix="/api")
 app.include_router(test_runs.router, prefix="/api")
+app.include_router(backtest.router, prefix="/api")
 
 
 @app.get("/api/health")
