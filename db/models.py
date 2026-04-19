@@ -3,10 +3,10 @@ SQLAlchemy ORM models for all 8 database tables.
 """
 from datetime import datetime, timezone
 from sqlalchemy import (
-    Column, Integer, String, Boolean, Text, Numeric, DateTime,
+    Column, Integer, String, Boolean, Text, Numeric, Date, DateTime,
     ForeignKey, CheckConstraint, UniqueConstraint, Index
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, ARRAY
 from sqlalchemy.orm import declarative_base, relationship
 
 Base = declarative_base()
@@ -295,3 +295,99 @@ class TestResult(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
 
     run = relationship("TestRun", back_populates="results")
+
+
+# ── Backtest Framework (ENH-019) ────────────────────────────
+
+class BacktestRun(Base):
+    """One row per backtest execution."""
+    __tablename__ = "backtest_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100))
+    status = Column(String(20), nullable=False, default="pending")  # pending | running | completed | failed
+
+    strategy_id = Column(Integer, ForeignKey("strategies.strategy_id"),
+                         nullable=False, index=True)
+
+    tickers = Column(ARRAY(Text), nullable=False)
+    start_date = Column(Date, nullable=False)
+    end_date = Column(Date, nullable=False)
+    config = Column(JSONB, nullable=False, default=dict)
+
+    total_trades = Column(Integer, default=0)
+    wins = Column(Integer, default=0)
+    losses = Column(Integer, default=0)
+    scratches = Column(Integer, default=0)
+    total_pnl = Column(Numeric(12, 2), default=0)
+    win_rate = Column(Numeric(5, 2), default=0)
+    avg_win = Column(Numeric(12, 2), default=0)
+    avg_loss = Column(Numeric(12, 2), default=0)
+    max_drawdown = Column(Numeric(12, 2), default=0)
+    sharpe_ratio = Column(Numeric(8, 4))
+    profit_factor = Column(Numeric(8, 4))
+    avg_hold_min = Column(Numeric(8, 1))
+    max_win_streak = Column(Integer, default=0)
+    max_loss_streak = Column(Integer, default=0)
+
+    error_message = Column(Text)
+    started_at = Column(DateTime(timezone=True))
+    completed_at = Column(DateTime(timezone=True))
+    duration_sec = Column(Numeric(10, 2))
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    notes = Column(Text)
+
+    strategy = relationship("Strategy")
+    trades = relationship("BacktestTrade", back_populates="run",
+                          cascade="all, delete-orphan")
+
+
+class BacktestTrade(Base):
+    """One row per simulated trade inside a BacktestRun."""
+    __tablename__ = "backtest_trades"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(Integer, ForeignKey("backtest_runs.id", ondelete="CASCADE"),
+                    nullable=False, index=True)
+    strategy_id = Column(Integer, ForeignKey("strategies.strategy_id"),
+                         nullable=False, index=True)
+
+    ticker = Column(String(10), nullable=False, index=True)
+    symbol = Column(String(40))
+    direction = Column(String(5), nullable=False)  # LONG | SHORT
+    contracts = Column(Integer, nullable=False, default=2)
+
+    entry_price = Column(Numeric(10, 4), nullable=False)
+    exit_price = Column(Numeric(10, 4))
+    pnl_pct = Column(Numeric(8, 4), default=0)
+    pnl_usd = Column(Numeric(12, 4), default=0)
+    peak_pnl_pct = Column(Numeric(8, 4), default=0)
+    slippage_paid = Column(Numeric(10, 4), default=0)
+    commission = Column(Numeric(10, 4), default=0)
+
+    entry_time = Column(DateTime(timezone=True), nullable=False)
+    exit_time = Column(DateTime(timezone=True))
+    hold_minutes = Column(Numeric(8, 1))
+
+    signal_type = Column(String(40), index=True)
+    entry_bar_idx = Column(Integer)
+
+    exit_reason = Column(String(20))  # TP | SL | TRAIL_STOP | ROLL | TIME_EXIT | EOD_EXIT
+    exit_result = Column(String(10), index=True)  # WIN | LOSS | SCRATCH
+
+    tp_level = Column(Numeric(10, 4))
+    sl_level = Column(Numeric(10, 4))
+    dynamic_sl_pct = Column(Numeric(8, 4))
+    tp_trailed = Column(Boolean, default=False)
+    rolled = Column(Boolean, default=False)
+
+    entry_indicators = Column(JSONB, default=dict)
+    exit_indicators = Column(JSONB, default=dict)
+    entry_context = Column(JSONB, default=dict)
+    signal_details = Column(JSONB, default=dict)
+
+    notes = Column(Text)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+    run = relationship("BacktestRun", back_populates="trades")
+    strategy = relationship("Strategy")
