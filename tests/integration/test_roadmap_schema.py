@@ -100,15 +100,16 @@ class TestStrategySeeds:
         names = {r[0] for r in rows}
         assert names == {"ict", "orb", "vwap_revert", "delta_neutral"}
 
-    def test_only_ict_enabled(self, session):
-        cnt = session.execute(text(
-            "SELECT COUNT(*) FROM strategies WHERE enabled = TRUE"
-        )).scalar()
-        assert cnt == 1
-        name = session.execute(text(
-            "SELECT name FROM strategies WHERE enabled = TRUE"
-        )).scalar()
-        assert name == "ict"
+    def test_ict_is_always_enabled(self, session):
+        """ICT must stay enabled regardless of what other strategies get
+        flipped on in subsequent feature branches (orb, vwap, etc.).
+        Originally this test asserted 'only ict' but as new strategies
+        come online the invariant shifts to 'ict is always present'."""
+        enabled = session.execute(text(
+            "SELECT name FROM strategies WHERE enabled = TRUE ORDER BY name"
+        )).fetchall()
+        names = {r[0] for r in enabled}
+        assert "ict" in names, f"ict must be enabled; got {names}"
 
     def test_only_ict_is_default(self, session):
         cnt = session.execute(text(
