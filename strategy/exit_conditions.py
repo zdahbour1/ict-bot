@@ -78,11 +78,12 @@ def evaluate_exit(trade: dict, current_price: float, now_pt: datetime) -> dict |
     # Check roll
     should_roll = check_roll_condition(trade, pnl_pct)
 
-    # Time exit
+    # Time exit — use the injected `now_pt` so backtests can drive the
+    # clock from bar timestamps instead of wall-clock.
     entry_time = trade.get("entry_time")
     bars_held = 0
     if entry_time:
-        bars_held = (datetime.now(PT) - entry_time).total_seconds() / 60
+        bars_held = (now_pt - entry_time).total_seconds() / 60
     time_exit = bars_held >= 90
 
     # EOD exit

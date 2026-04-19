@@ -25,11 +25,14 @@ PT = pytz.timezone("America/Los_Angeles")
 
 @pytest.fixture
 def base_trade():
-    """A baseline open trade dict — entry at 2.00, no peak, default SL."""
+    """A baseline open trade dict — entry 5 min before the test's 10:00 PT
+    reference clock (see TestEvaluateExit._now). Uses an explicit time so
+    bars_held is deterministic and not wall-clock dependent."""
     return {
         "ticker": "QQQ",
         "entry_price": 2.00,
-        "entry_time": datetime.now(PT) - timedelta(minutes=5),
+        "entry_time": datetime.now(PT).replace(hour=9, minute=55, second=0,
+                                               microsecond=0) - timedelta(0),
         "peak_pnl_pct": 0.0,
         "dynamic_sl_pct": -0.60,
         "contracts": 2,
@@ -174,18 +177,22 @@ class TestEvaluateExit:
         assert result["should_roll"] is True
 
     def test_time_exit_after_90min(self, base_trade, cfg):
-        base_trade["entry_time"] = datetime.now(PT) - timedelta(minutes=95)
+        # Entry at 08:00 PT, now is 10:00 PT → held 120 min, past the 90 cap
+        base_trade["entry_time"] = self._now(10) - timedelta(minutes=120)
         result = evaluate_exit(base_trade, 2.10, self._now(10))
         assert result is not None
         assert result["reason"] == "TIME_EXIT"
 
     def test_eod_exit_at_13(self, base_trade, cfg):
+        # Enter a few minutes before 13:00 so TIME_EXIT doesn't fire first
+        base_trade["entry_time"] = self._now(13) - timedelta(minutes=10)
         result = evaluate_exit(base_trade, 2.20, self._now(13))
         assert result is not None
         assert result["reason"] == "EOD_EXIT"
         assert result["result"] == "WIN"
 
     def test_eod_loss_classification(self, base_trade, cfg):
+        base_trade["entry_time"] = self._now(13) - timedelta(minutes=10)
         result = evaluate_exit(base_trade, 1.80, self._now(13))
         assert result is not None
         assert result["reason"] == "EOD_EXIT"
@@ -193,6 +200,7 @@ class TestEvaluateExit:
 
     def test_tp_wins_over_eod(self, base_trade, cfg):
         # Both TP and EOD true → TP takes priority (checked first)
+        base_trade["entry_time"] = self._now(13) - timedelta(minutes=10)
         result = evaluate_exit(base_trade, 4.00, self._now(13))
         assert result["reason"] == "TP"
 
