@@ -65,7 +65,14 @@ class IBClient:
     2. Legacy mode: no args — creates its own IB() and queues (backwards compatible)
     """
 
-    def __init__(self, connection=None, contract_cache=None, cache_lock=None):
+    def __init__(self, connection=None, contract_cache=None, cache_lock=None,
+                 pool=None):
+        # Optional pool reference — used by cancel_order_by_id to route
+        # cancels across clientIds. IB's cancelOrder only works on the
+        # client that PLACED the order (error 10147 otherwise); with a
+        # pool reference we can submit the cancel on every connection so
+        # the owning client picks it up.
+        self._pool = pool
         if connection is not None:
             # ── Pool mode: use provided IBConnection ──
             self._conn = connection
@@ -686,20 +693,60 @@ class IBClient:
         return results
 
     def cancel_order_by_id(self, order_id: int):
-        """Cancel a specific order by orderId. Thread-safe."""
+        """Cancel a specific order by orderId, across every client in the pool.
+
+        IB's ``cancelOrder`` only succeeds on the client that PLACED the
+        order — all other clients get Error 10147 ("OrderId X ... is not
+        found") and the cancel silently does nothing. Before the pool
+        existed, this was invisible; with our multi-client pool it
+        bites every time exit-mgr (clientId=N) tries to cancel a
+        bracket placed by scanner-A (clientId=N+1).
+
+        Solution: submit the cancel on THIS client's IB thread, then
+        also submit it on every other connection in the pool. Whichever
+        one owns the order will process it; the others harmlessly emit
+        10147 which we swallow.
+
+        If we're not in pool mode (legacy), the behavior is unchanged.
+        """
         try:
             self._submit_to_ib(self._ib_cancel_single_order, order_id, timeout=5)
         except Exception as e:
-            log.warning(f"Failed to cancel orderId={order_id}: {e}")
+            log.warning(f"Failed to cancel orderId={order_id} on own client: {e}")
+
+        # Fan out to every other connection in the pool. If the
+        # exit-mgr originally owned the order, the fan-out is a no-op;
+        # if scanner-A owned it, this is where the cancel actually lands.
+        if self._pool is not None:
+            for conn in self._pool.all_connections:
+                if conn is self._conn:
+                    continue  # already tried on our own connection
+                try:
+                    conn.submit(self._ib_cancel_single_order_on_conn,
+                                conn.ib, order_id, timeout=5)
+                except Exception as e:
+                    # 10147 ("not found") is expected on non-owner clients;
+                    # log at debug to avoid spamming warn.
+                    log.debug(f"[IB pool fan-out] cancel orderId={order_id} "
+                              f"on {conn.label}: {e}")
 
     def _ib_cancel_single_order(self, order_id: int):
-        """Runs on IB thread. Cancel one order."""
-        for trade in self.ib.openTrades():
+        """Runs on THIS connection's IB thread. Cancel one order."""
+        self._ib_cancel_single_order_on_conn(self.ib, order_id)
+
+    @staticmethod
+    def _ib_cancel_single_order_on_conn(ib, order_id: int):
+        """Runs on a specific connection's IB thread. Cancel one order.
+        Used for cross-client fan-out: same code, different connection."""
+        for trade in ib.openTrades():
             if trade.order.orderId == order_id:
-                self.ib.cancelOrder(trade.order)
-                log.info(f"[IB] Cancel sent for orderId={order_id}")
+                ib.cancelOrder(trade.order)
+                log.info(f"[IB clientId={trade.order.clientId}] "
+                         f"Cancel sent for orderId={order_id}")
                 return
-        log.warning(f"[IB] orderId={order_id} not found in openTrades")
+        # Not visible on this connection. That's normal for fan-out:
+        # only the owning client has the order in its openTrades.
+        log.debug(f"[IB] orderId={order_id} not in this connection's openTrades")
 
     def check_bracket_orders_active(self, trade: dict) -> bool:
         """Check if bracket orders (TP/SL) are still active on IB.

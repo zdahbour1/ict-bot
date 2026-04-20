@@ -91,8 +91,12 @@ def main():
         pool = IBConnectionPool(num_scanner_connections=num_scanner_conns)
         pool.start_all()  # Each connection: connect + event loop on same thread
 
-        # Exit manager gets a dedicated IBClient on the exit connection
-        client = IBClient(pool.exit_conn, pool.contract_cache, pool.cache_lock)
+        # Exit manager gets a dedicated IBClient on the exit connection.
+        # Passing the pool lets cancel_order_by_id fan out to every
+        # connection — required for cross-client bracket cancellation
+        # (IB error 10147 otherwise; see docs/cross_client_cancel.md).
+        client = IBClient(pool.exit_conn, pool.contract_cache, pool.cache_lock,
+                          pool=pool)
         log.info(f"IB connection pool active: {len(pool.all_connections)} connections")
 
     elif config.USE_SCHWAB:
@@ -253,7 +257,8 @@ def main():
                                     scanner_conn = pool.get_scanner_connection(ticker)
                                     scanner_client = IBClient(scanner_conn,
                                                               pool.contract_cache,
-                                                              pool.cache_lock)
+                                                              pool.cache_lock,
+                                                              pool=pool)
                                 else:
                                     # Non-IB broker: shared client
                                     scanner_client = client
