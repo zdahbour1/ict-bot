@@ -31,6 +31,18 @@ def client(db_guard):
     return TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def _reset_active_strategy(db_guard):
+    """Every test in this file assumes ACTIVE_STRATEGY='ict' as the
+    baseline. Earlier tests (possibly in other files) can leave the
+    row at another value if they fail mid-flight — reset before each
+    test to keep the suite deterministic."""
+    from db.strategy_writer import set_active_strategy
+    set_active_strategy("ict")
+    yield
+    set_active_strategy("ict")
+
+
 # ── GET /strategies ─────────────────────────────────────
 
 class TestListStrategies:

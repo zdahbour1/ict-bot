@@ -325,6 +325,11 @@ class BotManagerHandler(BaseHTTPRequestHandler):
             if _bot_process:
                 exit_code = _bot_process.returncode
                 _bot_process = None
+                _bot_start_time = None
+                # Bot just died — reconcile the DB so /api/bot/status
+                # doesn't keep reporting "running". Best-effort; if DB
+                # is unavailable we don't block the response.
+                self._heal_db_on_exit(exit_code)
             else:
                 exit_code = None
             self._send_json({
@@ -332,6 +337,38 @@ class BotManagerHandler(BaseHTTPRequestHandler):
                 "pid": None,
                 "exit_code": exit_code,
             })
+
+    def _heal_db_on_exit(self, exit_code):
+        """Mark bot_state as stopped when the sidecar detects its child
+        process has exited (crashed or finished). Called once at the
+        transition from 'running' → 'stopped'."""
+        try:
+            import psycopg2
+            # Parse DATABASE_URL → connection params minimally
+            conn = psycopg2.connect(DATABASE_URL)
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "UPDATE bot_state SET status='stopped', pid=NULL, "
+                    "ib_connected=FALSE, scans_active=FALSE, "
+                    "stopped_at=NOW(), "
+                    "last_error = COALESCE(SUBSTRING(last_error FOR 400), '') "
+                    "             || ' | auto-healed: bot process exited' "
+                    "             || CASE WHEN %s IS NULL THEN '' "
+                    "                ELSE ' (exit=' || %s || ')' END "
+                    "WHERE status = 'running'",
+                    (exit_code, exit_code),
+                )
+                conn.commit()
+                if cur.rowcount > 0:
+                    log.warning(
+                        f"bot_state auto-healed: process exited "
+                        f"(exit_code={exit_code})"
+                    )
+            finally:
+                conn.close()
+        except Exception as e:
+            log.debug(f"could not auto-heal bot_state on exit: {e}")
 
     def _handle_start(self):
         global _bot_process, _bot_start_time
