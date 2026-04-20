@@ -9,7 +9,7 @@ points here.
 ## Last updated
 
 **Apr 20 2026 — Cross-run Analytics panel + API**
-Latest commit: `(this)` on `feature/profitability-research`
+Latest commit: `7fbbd00` on `feature/profitability-research`
 
 New this session:
   - `GET /api/backtests/analytics/cross_run` aggregates across all completed runs.
