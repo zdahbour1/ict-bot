@@ -248,6 +248,85 @@ class TestAnalytics:
         assert by_sig["LONG_iFVG"]["wins"] == 1
 
 
+# ── GET /backtests/analytics/trades ──────────────────────
+
+class TestAnalyticsTrades:
+    def test_returns_trades_for_ticker(self, client, seeded_run):
+        r = client.get("/api/backtests/analytics/trades?ticker=QQQ")
+        assert r.status_code == 200
+        d = r.json()
+        assert d["returned"] >= 1
+        for t in d["trades"]:
+            assert t["ticker"] == "QQQ"
+
+    def test_compound_filter_strategy_and_ticker(self, client, seeded_run):
+        # strategy=ict (id=1 in seeded_run) + ticker=QQQ
+        r = client.get("/api/backtests/analytics/trades?strategy=ict&ticker=QQQ")
+        assert r.status_code == 200
+        for t in r.json()["trades"]:
+            assert t["ticker"] == "QQQ"
+
+    def test_outcome_filter(self, client, seeded_run):
+        r = client.get("/api/backtests/analytics/trades?ticker=QQQ&outcome=LOSS")
+        for t in r.json()["trades"]:
+            assert t["exit_result"] == "LOSS"
+
+    def test_server_sort_by_pnl_desc(self, client, seeded_run):
+        r = client.get("/api/backtests/analytics/trades?ticker=QQQ&sort=pnl_usd&direction=desc")
+        pnls = [t["pnl_usd"] for t in r.json()["trades"]]
+        assert pnls == sorted(pnls, reverse=True)
+
+    def test_server_sort_by_hold_minutes_asc(self, client, seeded_run):
+        r = client.get("/api/backtests/analytics/trades?sort=hold_minutes&direction=asc&limit=100")
+        holds = [t["hold_minutes"] for t in r.json()["trades"] if t["hold_minutes"] is not None]
+        assert holds == sorted(holds)
+
+    def test_unknown_sort_column_is_ignored(self, client, seeded_run):
+        """Unknown/attacker-supplied sort key must fall back to default, not 500."""
+        r = client.get("/api/backtests/analytics/trades?sort=DROP+TABLE&direction=desc")
+        assert r.status_code == 200
+
+
+# ── GET /backtests with server-side sort ─────────────────
+
+class TestRunsListSort:
+    def test_sort_by_total_pnl_desc(self, client, seeded_run):
+        r = client.get("/api/backtests?sort=total_pnl&direction=desc&limit=50")
+        assert r.status_code == 200
+        pnls = [run["total_pnl"] for run in r.json()["runs"]]
+        assert pnls == sorted(pnls, reverse=True)
+
+    def test_sort_by_win_rate_asc(self, client, seeded_run):
+        r = client.get("/api/backtests?sort=win_rate&direction=asc&limit=50")
+        wrs = [run["win_rate"] for run in r.json()["runs"]]
+        assert wrs == sorted(wrs)
+
+    def test_default_sort_is_newest_first(self, client, seeded_run):
+        r = client.get("/api/backtests?limit=20")
+        times = [run["created_at"] for run in r.json()["runs"] if run["created_at"]]
+        assert times == sorted(times, reverse=True)
+
+    def test_total_returned_for_pagination(self, client, seeded_run):
+        r = client.get("/api/backtests?limit=5")
+        d = r.json()
+        assert "total" in d
+        assert d["total"] >= len(d["runs"])
+
+
+# ── GET /backtests/{id}/trades with server-side sort ────
+
+class TestTradesListSort:
+    def test_sort_by_pnl_desc(self, client, seeded_run):
+        r = client.get(f"/api/backtests/{seeded_run}/trades?sort=pnl_usd&direction=desc")
+        pnls = [t["pnl_usd"] for t in r.json()["trades"]]
+        assert pnls == sorted(pnls, reverse=True)
+
+    def test_sort_by_ticker_asc(self, client, seeded_run):
+        r = client.get(f"/api/backtests/{seeded_run}/trades?sort=ticker&direction=asc")
+        tickers = [t["ticker"] for t in r.json()["trades"]]
+        assert tickers == sorted(tickers)
+
+
 # ── GET /backtests/analytics/cross_run ───────────────────
 
 class TestCrossRunAnalytics:

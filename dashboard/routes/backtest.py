@@ -65,19 +65,55 @@ _RUNS_SELECT = (
 
 # ── Routes ───────────────────────────────────────────────
 
+# Sort whitelists — map UI key -> SQL column. Prevents injection.
+_RUNS_SORT_COLS = {
+    "id": "r.id", "name": "r.name", "status": "r.status",
+    "strategy": "s.name", "strategy_name": "s.name",
+    "trades": "r.total_trades", "total_trades": "r.total_trades",
+    "win_rate": "r.win_rate", "total_pnl": "r.total_pnl",
+    "profit_factor": "r.profit_factor", "max_drawdown": "r.max_drawdown",
+    "avg_hold_min": "r.avg_hold_min", "created_at": "r.created_at",
+    "period": "r.start_date", "start_date": "r.start_date",
+    "end_date": "r.end_date",
+}
+
+_TRADES_SORT_COLS = {
+    "id": "id", "ticker": "ticker", "symbol": "symbol",
+    "direction": "direction", "entry_price": "entry_price",
+    "exit_price": "exit_price", "pnl_usd": "pnl_usd", "pnl_pct": "pnl_pct",
+    "hold_minutes": "hold_minutes", "entry_time": "entry_time",
+    "exit_time": "exit_time", "signal_type": "signal_type",
+    "exit_reason": "exit_reason", "exit_result": "exit_result",
+}
+
+
+def _sort_clause(sort: Optional[str], direction: Optional[str],
+                 whitelist: dict, default: str) -> str:
+    """Safe ORDER BY builder. Falls back to default when key not in whitelist."""
+    col = whitelist.get(sort or "", None)
+    if col is None:
+        return default
+    dir_sql = "DESC" if (direction or "").lower() == "desc" else "ASC"
+    return f"{col} {dir_sql} NULLS LAST"
+
+
 @router.get("/backtests")
 def list_backtests(
     limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     strategy_id: Optional[int] = None,
     status: Optional[str] = None,
+    sort: Optional[str] = None,
+    direction: Optional[str] = Query(None, pattern="^(asc|desc)$"),
 ):
-    """Most recent backtest runs first."""
+    """Paginated backtest runs. Server-side sort via ?sort=&direction=
+    on any column in _RUNS_SORT_COLS. Default order: newest first."""
     session = get_session()
     if session is None:
         raise HTTPException(503, "Database not available")
     try:
         q = _RUNS_SELECT
-        clauses, params = [], {"lim": limit}
+        clauses, params = [], {"lim": limit, "off": offset}
         if strategy_id is not None:
             clauses.append("r.strategy_id = :sid")
             params["sid"] = strategy_id
@@ -86,9 +122,23 @@ def list_backtests(
             params["status"] = status
         if clauses:
             q += "WHERE " + " AND ".join(clauses) + " "
-        q += "ORDER BY r.created_at DESC LIMIT :lim"
+        count_q = "SELECT COUNT(*) FROM backtest_runs r " + (
+            "WHERE " + " AND ".join(clauses) + " " if clauses else ""
+        )
+        total = session.execute(text(count_q), params).scalar() or 0
+
+        q += "ORDER BY " + _sort_clause(sort, direction, _RUNS_SORT_COLS,
+                                         "r.created_at DESC")
+        q += " LIMIT :lim OFFSET :off"
         rows = session.execute(text(q), params).fetchall()
-        return {"runs": [_run_to_dict(r) for r in rows], "total": len(rows)}
+        return {
+            "runs": [_run_to_dict(r) for r in rows],
+            "total": int(total),
+            "limit": limit,
+            "offset": offset,
+            "sort": sort,
+            "direction": direction,
+        }
     finally:
         session.close()
 
@@ -100,6 +150,98 @@ def list_strategies_for_backtest():
     wins against the int parameter."""
     from db.strategy_writer import list_strategies
     return {"strategies": list_strategies(enabled_only=True)}
+
+
+# ── Analytics routes ─────────────────────────────────────
+# CRITICAL: these MUST be declared before /backtests/{run_id}/trades
+# and /backtests/{run_id}/analytics. FastAPI matches routes by
+# registration order; the string segment "analytics" would otherwise
+# be interpreted as a run_id int and fail with 422.
+
+@router.get("/backtests/analytics/trades")
+def backtest_analytics_trades(
+    strategy: Optional[str] = None,
+    ticker: Optional[str] = None,
+    run_id: Optional[int] = None,
+    outcome: Optional[str] = None,
+    limit: int = Query(500, ge=1, le=5000),
+    offset: int = Query(0, ge=0),
+    status: Optional[str] = "completed",
+    sort: Optional[str] = None,
+    direction: Optional[str] = Query(None, pattern="^(asc|desc)$"),
+):
+    """Cross-run trade drill-down with server-side sort/filter.
+
+    Powers the click-to-drill from charts/tables on the Analytics panel.
+    Filters AND-joined. Server-side sort via ?sort=&direction=."""
+    session = get_session()
+    if session is None:
+        raise HTTPException(503, "Database not available")
+    try:
+        where = ["1=1"]
+        params: dict = {"lim": limit, "off": offset}
+        if status:
+            where.append("r.status = :status")
+            params["status"] = status
+        if strategy:
+            where.append("s.name = :strategy")
+            params["strategy"] = strategy
+        if ticker:
+            where.append("t.ticker = :ticker")
+            params["ticker"] = ticker
+        if run_id is not None:
+            where.append("t.run_id = :rid")
+            params["rid"] = run_id
+        if outcome:
+            where.append("t.exit_result = :outcome")
+            params["outcome"] = outcome
+        wh = " AND ".join(where)
+
+        analytics_sort_cols = {k: f"t.{v}" for k, v in _TRADES_SORT_COLS.items()}
+        analytics_sort_cols["strategy"] = "s.name"
+        order_by = _sort_clause(sort, direction, analytics_sort_cols,
+                                 "t.pnl_usd DESC")
+
+        rows = session.execute(text(
+            f"SELECT t.id, t.run_id, t.ticker, t.symbol, t.direction, "
+            f"  t.entry_price, t.exit_price, t.pnl_usd, t.pnl_pct, "
+            f"  t.entry_time, t.exit_time, t.hold_minutes, "
+            f"  t.signal_type, t.exit_reason, t.exit_result, s.name AS strategy "
+            f"FROM backtest_trades t "
+            f"JOIN backtest_runs r ON r.id = t.run_id "
+            f"JOIN strategies s ON s.strategy_id = r.strategy_id "
+            f"WHERE {wh} "
+            f"ORDER BY {order_by} "
+            f"LIMIT :lim OFFSET :off"
+        ), params).fetchall()
+
+        total_row = session.execute(text(
+            f"SELECT COUNT(*) FROM backtest_trades t "
+            f"JOIN backtest_runs r ON r.id = t.run_id "
+            f"JOIN strategies s ON s.strategy_id = r.strategy_id "
+            f"WHERE {wh}"
+        ), params).fetchone()
+        total = int(total_row[0] or 0) if total_row else 0
+
+        trades = [
+            {
+                "id": r[0], "run_id": r[1], "ticker": r[2], "symbol": r[3],
+                "direction": r[4],
+                "entry_price": float(r[5]) if r[5] is not None else None,
+                "exit_price": float(r[6]) if r[6] is not None else None,
+                "pnl_usd": float(r[7] or 0),
+                "pnl_pct": float(r[8] or 0),
+                "entry_time": r[9].isoformat() if r[9] else None,
+                "exit_time": r[10].isoformat() if r[10] else None,
+                "hold_minutes": float(r[11]) if r[11] is not None else None,
+                "signal_type": r[12], "exit_reason": r[13],
+                "exit_result": r[14], "strategy": r[15],
+            }
+            for r in rows
+        ]
+        return {"trades": trades, "total": total, "returned": len(trades)}
+    finally:
+        session.close()
 
 
 @router.get("/backtests/{run_id}")
@@ -162,6 +304,8 @@ def _fetch_trades_page(
     limit: int,
     offset: int,
     outcome: Optional[str],
+    sort: Optional[str] = None,
+    direction: Optional[str] = None,
 ) -> list[dict]:
     """Shared pagination helper used by both the inline-include path
     and the dedicated /trades endpoint."""
@@ -171,6 +315,8 @@ def _fetch_trades_page(
         clauses.append("exit_result = :out")
         params["out"] = outcome
 
+    order_by = _sort_clause(sort, direction, _TRADES_SORT_COLS,
+                            "entry_time ASC")
     rows = session.execute(
         text(
             "SELECT id, ticker, symbol, direction, contracts, "
@@ -180,7 +326,7 @@ def _fetch_trades_page(
             "  tp_trailed, rolled "
             "FROM backtest_trades "
             f"WHERE {' AND '.join(clauses)} "
-            "ORDER BY entry_time "
+            f"ORDER BY {order_by} "
             "LIMIT :lim OFFSET :off"
         ),
         params,
@@ -212,6 +358,8 @@ def get_backtest_trades(
     limit: int = Query(100, ge=1, le=2000),
     offset: int = Query(0, ge=0),
     outcome: Optional[str] = Query(None, description="Filter by WIN / LOSS / SCRATCH"),
+    sort: Optional[str] = None,
+    direction: Optional[str] = Query(None, pattern="^(asc|desc)$"),
 ):
     """Paginated trades for a run. Slimmer response than the inline
     detail — omits the big JSONB enrichment columns (entry_indicators,
@@ -237,6 +385,7 @@ def get_backtest_trades(
 
         trades = _fetch_trades_page(
             session, run_id, limit=limit, offset=offset, outcome=outcome,
+            sort=sort, direction=direction,
         )
         return {
             "trades": trades,
@@ -244,6 +393,8 @@ def get_backtest_trades(
             "limit": limit,
             "offset": offset,
             "outcome": outcome,
+            "sort": sort,
+            "direction": direction,
         }
     finally:
         session.close()

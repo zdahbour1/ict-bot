@@ -8,8 +8,31 @@ points here.
 
 ## Last updated
 
-**Apr 20 2026 — Cross-run Analytics panel + API**
-Latest commit: `7fbbd00` on `feature/profitability-research`
+**Apr 20 2026 — Analytics charts + unified modal + server-side sort**
+Latest commit: `(this)` on `feature/profitability-research`
+
+This iteration:
+  - Replaced Analytics tables with click-to-drill bar charts (recharts).
+    Four charts: P&L by Strategy · Top 20 Tickers · Top 20 (Ticker×Strategy) ·
+    Top 15 Runs. Plus a stat row (total P&L, trades, win%, best strategy/ticker).
+    Click any bar → opens the unified drill-down modal.
+  - Extracted `TradesModal` component — SAME modal for every drill-down
+    entry point (run row click, analytics chart click, analytics table
+    row click). Consistent header, filter bar, close behavior.
+  - **Server-side sort** on all paginated endpoints (user request).
+    Clicking a column header now re-queries the DB ordered by that column
+    across the ENTIRE dataset, not just the loaded page.
+    Whitelisted columns via `_RUNS_SORT_COLS` / `_TRADES_SORT_COLS`;
+    unknown keys fall back to default (safe against SQL injection).
+  - New endpoint `GET /api/backtests/analytics/trades` — cross-run trade
+    drill-down with compound filters (strategy + ticker + run_id +
+    outcome) + sort/pagination. Powers chart drill-downs.
+  - Fixed route-ordering bug: `/backtests/analytics/trades` was being
+    caught by `/backtests/{run_id}/trades` because FastAPI matches by
+    registration order. Moved analytics routes above the `{run_id}` ones.
+  - Tests: +12 (analytics trades + server-side sort). **376 passed + 4 skips.**
+
+Prior: `7fbbd00` — Cross-run Analytics panel + API (tables only)
 
 New this session:
   - `GET /api/backtests/analytics/cross_run` aggregates across all completed runs.
@@ -139,7 +162,7 @@ revalidated or users pin to stale code.
 
 ## Test suite
 
-- **364 passed + 4 expected skips** as of latest commit
+- **376 passed + 4 expected skips** as of latest commit
 - Run: `DATABASE_URL="postgresql://ict_bot:ict_bot_dev@localhost:5432/ict_bot" python -m pytest tests/ -q`
 - DB-persistent runs: `PYTEST_DB_REPORT=1 ...` then view at Tests tab
 
