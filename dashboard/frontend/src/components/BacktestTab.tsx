@@ -455,9 +455,10 @@ interface RunsFilter {
   ticker?: string;
 }
 
-function AnalyticsPanel({ onOpenRun, onApplyFilter }: {
+function AnalyticsPanel({ onOpenRun, onApplyFilter, filter }: {
   onOpenRun: (id: number) => void;
   onApplyFilter: (filter: RunsFilter) => void;
+  filter: RunsFilter;   // drives re-fetch so charts/KPIs re-slice
 }) {
   const [open, setOpen] = useState(true);
   const [data, setData] = useState<CrossRunAnalytics | null>(null);
@@ -468,13 +469,21 @@ function AnalyticsPanel({ onOpenRun, onApplyFilter }: {
   const load = () => {
     setLoading(true);
     setErr(null);
-    fetch('/api/backtests/analytics/cross_run?limit_runs=500')
+    const qs = new URLSearchParams();
+    qs.set('limit_runs', '500');
+    if (filter.strategy) qs.set('strategy', filter.strategy);
+    if (filter.ticker)   qs.set('ticker',   filter.ticker);
+    fetch(`/api/backtests/analytics/cross_run?${qs.toString()}`)
       .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
       .then(d => { setData(d); setLoading(false); })
       .catch(e => { setErr(e.message); setLoading(false); });
   };
 
-  useEffect(() => { if (open && !data) load(); }, [open]);
+  // Refetch whenever the panel opens or the filter changes.
+  useEffect(() => {
+    if (open) load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, filter.strategy, filter.ticker]);
 
   const tsCols: ColDef<CrossRunAnalytics['by_ticker_strategy'][0]>[] = useMemo(() => [
     { key: 'ticker',   label: 'Ticker',   get: r => r.ticker,   render: r => <span className="text-gray-200">{r.ticker}</span>, filterable: true, filterType: 'text' },
@@ -564,6 +573,14 @@ function AnalyticsPanel({ onOpenRun, onApplyFilter }: {
         <span className="text-xs text-gray-500">
           {data ? `${data.run_count} runs · ${data.trade_count.toLocaleString()} trades aggregated` : 'cross-run slice/dice'}
         </span>
+        {(filter.strategy || filter.ticker) && (
+          <span className="text-[11px] text-blue-300 bg-blue-500/10 border border-blue-500/30 rounded px-2 py-0.5">
+            Scoped to
+            {filter.strategy && <> strategy=<b>{filter.strategy}</b></>}
+            {filter.strategy && filter.ticker && ' · '}
+            {filter.ticker && <>ticker=<b>{filter.ticker}</b></>}
+          </span>
+        )}
         <button onClick={load} disabled={loading}
                 className="ml-auto px-2 py-0.5 text-xs bg-[#21262d] border border-[#30363d] text-gray-400 rounded hover:text-white">
           {loading ? 'Loading...' : 'Refresh'}
@@ -1139,13 +1156,17 @@ export default function BacktestTab() {
   useEffect(() => { fetchStrategies(); }, []);
 
   const applyFilter = (patch: RunsFilter) => {
-    // Merge: clicking a "strategy" chart keeps an existing ticker filter, etc.
-    setRunsFilter(cur => ({ ...cur, ...patch }));
-    // Scroll to the runs table so the user sees the result
-    setTimeout(() => {
-      document.getElementById('backtest-runs-table')
-        ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }, 100);
+    // Toggle semantics: clicking the already-applied value clears it.
+    setRunsFilter(cur => {
+      const next: RunsFilter = { ...cur };
+      if (patch.strategy !== undefined) {
+        next.strategy = cur.strategy === patch.strategy ? undefined : patch.strategy;
+      }
+      if (patch.ticker !== undefined) {
+        next.ticker = cur.ticker === patch.ticker ? undefined : patch.ticker;
+      }
+      return next;
+    });
   };
 
   const onRunClick = (id: number) => {
@@ -1182,7 +1203,8 @@ export default function BacktestTab() {
       </div>
 
       {/* Cross-run Analytics — charts + tables with drill-down. */}
-      <AnalyticsPanel onOpenRun={onRunClick} onApplyFilter={applyFilter} />
+      <AnalyticsPanel onOpenRun={onRunClick} onApplyFilter={applyFilter}
+                      filter={runsFilter} />
 
       {/* Active filter chips — drives the runs table query below */}
       <div id="backtest-runs-table">

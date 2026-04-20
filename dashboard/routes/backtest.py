@@ -65,6 +65,56 @@ _RUNS_SELECT = (
 
 # ── Routes ───────────────────────────────────────────────
 
+import re
+
+# Numeric operator parser — shared by frontend + backend filter grammar.
+_NUM_OP_RE = re.compile(r"^(>=|<=|>|<|=)?\s*(-?\d+(?:\.\d+)?)\s*$")
+
+
+def _build_column_filters(
+    filter_specs: list[str],
+    column_map: dict,
+    number_cols: set[str],
+    param_prefix: str = "f",
+) -> tuple[list[str], dict]:
+    """Parse ``filter=col:value`` specs into SQL WHERE fragments.
+
+    - ``col`` must be in ``column_map``; unknown cols are silently
+      ignored (defense in depth against injection / typos).
+    - Values starting with ``>``/``<``/``=``/``>=``/``<=`` apply as
+      numeric operators when the column is in ``number_cols``.
+    - Everything else becomes ``col ILIKE '%value%'`` (text/substring).
+    - Returns (clauses, params) to AND-join into the main query.
+    """
+    clauses: list[str] = []
+    params: dict = {}
+    for i, spec in enumerate(filter_specs or []):
+        if ":" not in spec:
+            continue
+        col, val = spec.split(":", 1)
+        col = col.strip()
+        val = val.strip()
+        if not val:
+            continue
+        sql_col = column_map.get(col)
+        if not sql_col:
+            continue
+        key = f"{param_prefix}{i}"
+        if col in number_cols:
+            m = _NUM_OP_RE.match(val)
+            if not m:
+                # Fall through: numeric column but non-numeric filter -> skip
+                continue
+            op = m.group(1) or "="
+            num = float(m.group(2))
+            clauses.append(f"{sql_col} {op} :{key}")
+            params[key] = num
+        else:
+            clauses.append(f"{sql_col}::text ILIKE :{key}")
+            params[key] = f"%{val}%"
+    return clauses, params
+
+
 # Sort whitelists — map UI key -> SQL column. Prevents injection.
 _RUNS_SORT_COLS = {
     "id": "r.id", "name": "r.name", "status": "r.status",
@@ -668,6 +718,8 @@ def backtest_feature_analysis(run_id: int):
 @router.get("/backtests/analytics/cross_run")
 def backtest_cross_run_analytics(
     strategy_id: Optional[int] = None,
+    strategy: Optional[str] = None,
+    ticker: Optional[str] = None,
     status: Optional[str] = "completed",
     limit_runs: int = Query(500, ge=1, le=2000),
 ):
@@ -678,14 +730,18 @@ def backtest_cross_run_analytics(
       - by_strategy:        strategy → trades, pnl, win_rate, runs
       - by_ticker:          ticker → trades, pnl, win_rate, strategies
       - top_runs:           top/bottom runs by total P&L (quick config comparison)
-    Used by the Analytics sub-tab on the Backtest page to slice/dice
-    the entire corpus of backtests.
+
+    **Filters (`strategy`, `ticker`) apply at the TRADE level** so that
+    when the user clicks a chart bar, every rollup + KPI on the page
+    reflects the same slice. Run-level filters (strategy_id, status)
+    restrict which runs are eligible; trade-level filters then narrow
+    within those runs.
     """
     session = get_session()
     if session is None:
         raise HTTPException(503, "Database not available")
     try:
-        # Identify qualifying runs
+        # Identify qualifying runs (run-level filter)
         where = ["1=1"]
         params: dict = {"lim_runs": limit_runs}
         if strategy_id is not None:
@@ -708,12 +764,26 @@ def backtest_cross_run_analytics(
                 "by_ticker_strategy": [], "by_strategy": [],
                 "by_ticker": [], "top_runs": [], "bottom_runs": [],
                 "run_count": 0, "trade_count": 0,
+                "filter": {"strategy": strategy, "ticker": ticker},
             }
 
         run_ids = [r[0] for r in run_rows]
         strategy_by_run = {r[0]: r[2] for r in run_rows}
 
+        # Trade-level filters (drive chart/KPI re-slicing)
+        trade_where = ["t.run_id = ANY(:rids)"]
+        trade_params: dict = {"rids": run_ids}
+        if strategy:
+            trade_where.append("s.name = :strat_name")
+            trade_params["strat_name"] = strategy
+        if ticker:
+            trade_where.append("t.ticker = :tick")
+            trade_params["tick"] = ticker
+        twh = " AND ".join(trade_where)
+
         # Pull aggregated trades. Group DB-side to keep payload small.
+        # Apply trade-level filters (strategy / ticker) so every rollup
+        # reflects the same slice as the clicked chart bar.
         by_ts_rows = session.execute(text(
             "SELECT t.ticker, s.name AS strategy, "
             "  COUNT(*) AS trades, "
@@ -724,9 +794,9 @@ def backtest_cross_run_analytics(
             "FROM backtest_trades t "
             "JOIN backtest_runs r ON r.id = t.run_id "
             "JOIN strategies s ON s.strategy_id = r.strategy_id "
-            "WHERE t.run_id = ANY(:rids) "
+            f"WHERE {twh} "
             "GROUP BY t.ticker, s.name"
-        ), {"rids": run_ids}).fetchall()
+        ), trade_params).fetchall()
 
         by_ticker_strategy = [
             {
@@ -791,14 +861,38 @@ def backtest_cross_run_analytics(
         ]
         by_ticker.sort(key=lambda x: x["pnl"], reverse=True)
 
-        # Top/bottom runs by P&L
-        run_summary_rows = session.execute(text(
-            "SELECT r.id, r.name, s.name, r.tickers, r.total_trades, "
-            "  r.total_pnl, r.win_rate, r.profit_factor, r.max_drawdown, r.created_at "
-            "FROM backtest_runs r JOIN strategies s ON s.strategy_id = r.strategy_id "
-            "WHERE r.id = ANY(:rids) AND r.total_trades > 0 "
-            "ORDER BY r.total_pnl DESC"
-        ), {"rids": run_ids}).fetchall()
+        # Top/bottom runs by P&L — must respect trade-level filters so
+        # the "Top 15 Runs" chart shows actual filtered P&L, not the
+        # raw whole-run total from backtest_runs.total_pnl.
+        if strategy or ticker:
+            # Recompute per-run stats from the filtered trade set
+            run_summary_rows = session.execute(text(
+                "SELECT r.id, r.name, s.name, r.tickers, "
+                "  COUNT(t.id) AS trades, "
+                "  COALESCE(SUM(t.pnl_usd), 0) AS pnl, "
+                "  CASE WHEN SUM(CASE WHEN t.exit_result IN ('WIN','LOSS') THEN 1 ELSE 0 END) > 0 "
+                "       THEN 100.0 * SUM(CASE WHEN t.exit_result='WIN' THEN 1 ELSE 0 END) "
+                "            / SUM(CASE WHEN t.exit_result IN ('WIN','LOSS') THEN 1 ELSE 0 END) "
+                "       ELSE 0.0 END AS win_rate, "
+                "  NULL::numeric AS profit_factor, "
+                "  MIN(COALESCE(r.max_drawdown, 0)) AS max_drawdown, "
+                "  r.created_at "
+                "FROM backtest_runs r "
+                "JOIN strategies s ON s.strategy_id = r.strategy_id "
+                "JOIN backtest_trades t ON t.run_id = r.id "
+                f"WHERE {twh} "
+                "GROUP BY r.id, r.name, s.name, r.tickers, r.created_at "
+                "HAVING COUNT(t.id) > 0 "
+                "ORDER BY pnl DESC"
+            ), trade_params).fetchall()
+        else:
+            run_summary_rows = session.execute(text(
+                "SELECT r.id, r.name, s.name, r.tickers, r.total_trades, "
+                "  r.total_pnl, r.win_rate, r.profit_factor, r.max_drawdown, r.created_at "
+                "FROM backtest_runs r JOIN strategies s ON s.strategy_id = r.strategy_id "
+                "WHERE r.id = ANY(:rids) AND r.total_trades > 0 "
+                "ORDER BY r.total_pnl DESC"
+            ), {"rids": run_ids}).fetchall()
 
         def _run_row_to_dict(r):
             return {
@@ -825,6 +919,7 @@ def backtest_cross_run_analytics(
             "bottom_runs": bottom_runs,
             "run_count": len(run_rows),
             "trade_count": trade_count,
+            "filter": {"strategy": strategy, "ticker": ticker},
         }
     finally:
         session.close()

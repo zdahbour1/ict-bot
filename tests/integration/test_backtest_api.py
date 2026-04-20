@@ -413,6 +413,41 @@ class TestCrossRunAnalytics:
         strategies = {row["strategy"] for row in data["by_strategy"]}
         assert len(strategies) <= 1
 
+    def test_filter_propagates_to_all_rollups(self, client, seeded_run):
+        """Trade-level filter (strategy/ticker) must narrow every rollup
+        AND top_runs so charts/KPIs all re-slice together."""
+        r = client.get("/api/backtests/analytics/cross_run?ticker=QQQ")
+        assert r.status_code == 200
+        d = r.json()
+        # Every rollup row must only contain the filtered ticker
+        for row in d["by_ticker"]:
+            assert row["ticker"] == "QQQ"
+        for row in d["by_ticker_strategy"]:
+            assert row["ticker"] == "QQQ"
+        # Echo so the FE can display the active scope
+        assert d["filter"]["ticker"] == "QQQ"
+
+    def test_filter_by_strategy_name(self, client, seeded_run):
+        r = client.get("/api/backtests/analytics/cross_run?strategy=ict")
+        d = r.json()
+        for row in d["by_strategy"]:
+            assert row["strategy"] == "ict"
+        for row in d["by_ticker_strategy"]:
+            assert row["strategy"] == "ict"
+
+    def test_filter_recomputes_top_runs_pnl(self, client, seeded_run):
+        """When filtering by ticker, top_runs P&L must reflect ONLY
+        that ticker's trades — not the whole-run total_pnl."""
+        r_all = client.get("/api/backtests/analytics/cross_run")
+        r_filt = client.get("/api/backtests/analytics/cross_run?ticker=QQQ")
+        # seeded_run has both QQQ and SPY — filtered P&L should differ
+        all_runs = {run["id"]: run["pnl"] for run in r_all.json()["top_runs"] + r_all.json()["bottom_runs"]}
+        filt_runs = {run["id"]: run["pnl"] for run in r_filt.json()["top_runs"] + r_filt.json()["bottom_runs"]}
+        if seeded_run in all_runs and seeded_run in filt_runs:
+            # QQQ portion of the run should not equal the full run total
+            # (QQQ = 1 WIN of $400; full run = $400 + $140 - $200 = $340)
+            assert filt_runs[seeded_run] != all_runs[seeded_run]
+
     def test_top_runs_shape(self, client, seeded_run):
         r = client.get("/api/backtests/analytics/cross_run")
         data = r.json()
