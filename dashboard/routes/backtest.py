@@ -102,27 +102,39 @@ def list_backtests(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     strategy_id: Optional[int] = None,
+    strategy: Optional[str] = Query(None, description="Filter by strategy name (e.g. 'ict')"),
+    ticker: Optional[str] = Query(None, description="Filter to runs whose tickers array contains this symbol"),
     status: Optional[str] = None,
     sort: Optional[str] = None,
     direction: Optional[str] = Query(None, pattern="^(asc|desc)$"),
 ):
     """Paginated backtest runs. Server-side sort via ?sort=&direction=
-    on any column in _RUNS_SORT_COLS. Default order: newest first."""
+    on any column in _RUNS_SORT_COLS. Default order: newest first.
+    Filter by strategy name or ticker membership so the Analytics
+    charts can drive a live filter on the runs table below."""
     session = get_session()
     if session is None:
         raise HTTPException(503, "Database not available")
     try:
+        # _RUNS_SELECT already JOINs strategies s so s.name is available
         q = _RUNS_SELECT
+        count_q_from = "FROM backtest_runs r JOIN strategies s ON s.strategy_id = r.strategy_id "
         clauses, params = [], {"lim": limit, "off": offset}
         if strategy_id is not None:
             clauses.append("r.strategy_id = :sid")
             params["sid"] = strategy_id
+        if strategy is not None:
+            clauses.append("s.name = :strat_name")
+            params["strat_name"] = strategy
+        if ticker is not None:
+            clauses.append(":ticker = ANY(r.tickers)")
+            params["ticker"] = ticker
         if status is not None:
             clauses.append("r.status = :status")
             params["status"] = status
         if clauses:
             q += "WHERE " + " AND ".join(clauses) + " "
-        count_q = "SELECT COUNT(*) FROM backtest_runs r " + (
+        count_q = "SELECT COUNT(*) " + count_q_from + (
             "WHERE " + " AND ".join(clauses) + " " if clauses else ""
         )
         total = session.execute(text(count_q), params).scalar() or 0

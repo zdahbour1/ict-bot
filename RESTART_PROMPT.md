@@ -8,8 +8,30 @@ points here.
 
 ## Last updated
 
-**Apr 20 2026 — Analytics charts + unified modal + server-side sort**
-Latest commit: `d7087b1` on `feature/profitability-research`
+**Apr 20 2026 — Analytics click → filter runs table**
+Latest commit: `(this)` on `feature/profitability-research`
+
+User feedback: "when I click or filter I would like it to filter the
+table below so I can see the details".
+
+Changes:
+  - Clicking any Analytics chart bar (strategy / ticker / ticker×strategy)
+    now FILTERS THE RUNS TABLE below instead of popping a modal with
+    raw trades. Modal drill-down still available for individual runs
+    (click a run row or Top 15 Runs chart bar).
+  - Filter chips shown above the runs table with [×] per chip +
+    "Clear all". Page auto-scrolls to the runs table when a chart is
+    clicked so the filtered result is visible immediately.
+  - Filters persist across chart clicks (clicking a strategy keeps an
+    existing ticker filter; they AND together).
+  - Analytics-view tables (By Strategy / By Ticker / Ticker×Strategy)
+    also filter on row click — hint text added.
+  - Backend: `/api/backtests` accepts `?strategy=<name>&ticker=<sym>`.
+    Ticker uses Postgres `:ticker = ANY(r.tickers)` for array
+    membership. Both AND-join with existing filters.
+  - Tests: +4 filter cases ⇒ **380 passed + 4 skips**.
+
+Prior: `d7087b1` — Analytics charts + unified modal + server-side sort
 
 This iteration:
   - Replaced Analytics tables with click-to-drill bar charts (recharts).
@@ -162,7 +184,7 @@ revalidated or users pin to stale code.
 
 ## Test suite
 
-- **376 passed + 4 expected skips** as of latest commit
+- **380 passed + 4 expected skips** as of latest commit
 - Run: `DATABASE_URL="postgresql://ict_bot:ict_bot_dev@localhost:5432/ict_bot" python -m pytest tests/ -q`
 - DB-persistent runs: `PYTEST_DB_REPORT=1 ...` then view at Tests tab
 

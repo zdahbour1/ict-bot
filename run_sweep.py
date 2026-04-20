@@ -71,6 +71,7 @@ def main(argv: list[str]) -> int:
         base_config=req.get("base_config", {}),
         grid=req.get("grid", {}),
         name_prefix=req.get("name_prefix", "sweep"),
+        per_ticker=bool(req.get("per_ticker", False)),
         progress_cb=lambda msg: log.info(msg),
     )
 

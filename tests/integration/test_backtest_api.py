@@ -312,6 +312,38 @@ class TestRunsListSort:
         assert "total" in d
         assert d["total"] >= len(d["runs"])
 
+    def test_filter_by_strategy_name(self, client, seeded_run):
+        # seeded_run uses strategy_id=1 which is 'ict'
+        r = client.get("/api/backtests?strategy=ict&limit=200")
+        assert r.status_code == 200
+        for run in r.json()["runs"]:
+            assert run["strategy_name"] == "ict"
+        # seeded_run should be in the set
+        ids = [run["id"] for run in r.json()["runs"]]
+        assert seeded_run in ids
+
+    def test_filter_by_ticker_membership(self, client, seeded_run):
+        # seeded_run has tickers=['QQQ','SPY']
+        r = client.get("/api/backtests?ticker=QQQ&limit=200")
+        assert r.status_code == 200
+        ids = [run["id"] for run in r.json()["runs"]]
+        assert seeded_run in ids
+        # All returned runs must include QQQ in their tickers array
+        for run in r.json()["runs"]:
+            assert "QQQ" in (run["tickers"] or [])
+
+    def test_filter_combined_strategy_and_ticker(self, client, seeded_run):
+        r = client.get("/api/backtests?strategy=ict&ticker=QQQ&limit=200")
+        assert r.status_code == 200
+        ids = [run["id"] for run in r.json()["runs"]]
+        assert seeded_run in ids
+
+    def test_filter_excludes_non_matching_runs(self, client, seeded_run):
+        # 'ZZZ-NOPE' shouldn't match any run
+        r = client.get("/api/backtests?ticker=ZZZ-NOPE-XYZ&limit=50")
+        assert r.status_code == 200
+        assert r.json()["total"] == 0
+
 
 # ── GET /backtests/{id}/trades with server-side sort ────
 

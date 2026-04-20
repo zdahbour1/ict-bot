@@ -422,12 +422,6 @@ interface CrossRunAnalytics {
 
 type AnalyticsView = 'charts' | 'tables';
 
-type DrillSpec = {
-  title: string;
-  subtitle?: string;
-  filters: { strategy?: string; ticker?: string; run_id?: number; outcome?: string };
-} | null;
-
 function ChartCard({ title, children, hint }: {
   title: string; children: React.ReactNode; hint?: string;
 }) {
@@ -455,9 +449,15 @@ function StatBox({ label, value, sub, color }: {
   );
 }
 
-function AnalyticsPanel({ onOpenRun, onOpenDrill }: {
+// Applied filter used to drive the runs table from chart/table clicks.
+interface RunsFilter {
+  strategy?: string;
+  ticker?: string;
+}
+
+function AnalyticsPanel({ onOpenRun, onApplyFilter }: {
   onOpenRun: (id: number) => void;
-  onOpenDrill: (spec: DrillSpec) => void;
+  onApplyFilter: (filter: RunsFilter) => void;
 }) {
   const [open, setOpen] = useState(true);
   const [data, setData] = useState<CrossRunAnalytics | null>(null);
@@ -617,16 +617,12 @@ function AnalyticsPanel({ onOpenRun, onOpenDrill }: {
 
               {/* Row 1: By Strategy + Top Tickers */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <ChartCard title="P&L by Strategy" hint="click to drill">
+                <ChartCard title="P&L by Strategy" hint="click to filter runs table">
                   <ResponsiveContainer width="100%" height={220}>
                     <BarChart data={strategyChart}
                               onClick={(e: any) => {
                                 const p = e?.activePayload?.[0]?.payload;
-                                if (p?.name) onOpenDrill({
-                                  title: `Strategy: ${p.name}`,
-                                  subtitle: `${p.trades} trades · ${p.win_rate.toFixed(1)}% win · ${fmtUsd(p.pnl)} · ${p.runs} runs`,
-                                  filters: { strategy: p.name },
-                                });
+                                if (p?.name) onApplyFilter({ strategy: p.name });
                               }}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#21262d" />
                       <XAxis dataKey="name" tick={{ fill: '#8b949e', fontSize: 11 }} />
@@ -642,16 +638,12 @@ function AnalyticsPanel({ onOpenRun, onOpenDrill }: {
                   </ResponsiveContainer>
                 </ChartCard>
 
-                <ChartCard title="Top 20 Tickers by P&L" hint="click to drill">
+                <ChartCard title="Top 20 Tickers by P&L" hint="click to filter runs table">
                   <ResponsiveContainer width="100%" height={220}>
                     <BarChart data={tickerChart}
                               onClick={(e: any) => {
                                 const p = e?.activePayload?.[0]?.payload;
-                                if (p?.name) onOpenDrill({
-                                  title: `Ticker: ${p.name}`,
-                                  subtitle: `${p.trades} trades · ${p.win_rate.toFixed(1)}% win · ${fmtUsd(p.pnl)}`,
-                                  filters: { ticker: p.name },
-                                });
+                                if (p?.name) onApplyFilter({ ticker: p.name });
                               }}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#21262d" />
                       <XAxis dataKey="name" tick={{ fill: '#8b949e', fontSize: 10 }} angle={-45} textAnchor="end" height={60} />
@@ -670,15 +662,13 @@ function AnalyticsPanel({ onOpenRun, onOpenDrill }: {
 
               {/* Row 2: Top (ticker × strategy) + Top Runs */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <ChartCard title="Top 20 (Ticker × Strategy)" hint="click to drill">
+                <ChartCard title="Top 20 (Ticker × Strategy)" hint="click to filter runs table">
                   <ResponsiveContainer width="100%" height={260}>
                     <BarChart data={tsChart} layout="vertical"
                               onClick={(e: any) => {
                                 const p = e?.activePayload?.[0]?.payload;
-                                if (p?.ticker && p?.strategy) onOpenDrill({
-                                  title: `${p.ticker} / ${p.strategy}`,
-                                  subtitle: `${p.trades} trades · ${p.win_rate.toFixed(1)}% win · ${fmtUsd(p.pnl)}`,
-                                  filters: { ticker: p.ticker, strategy: p.strategy },
+                                if (p?.ticker && p?.strategy) onApplyFilter({
+                                  ticker: p.ticker, strategy: p.strategy,
                                 });
                               }}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#21262d" />
@@ -718,32 +708,26 @@ function AnalyticsPanel({ onOpenRun, onOpenDrill }: {
           {data && view === 'tables' && (
             <div className="space-y-4">
               <div>
-                <div className="text-xs text-gray-400 font-semibold mb-1">Ticker × Strategy</div>
+                <div className="text-xs text-gray-400 font-semibold mb-1">
+                  Ticker × Strategy <span className="text-gray-600 font-normal">(click row → filter runs table)</span>
+                </div>
                 <AnalyticsTable rows={data.by_ticker_strategy} cols={tsCols} empty="No pairs."
-                                onRowClick={r => onOpenDrill({
-                                  title: `${r.ticker} / ${r.strategy}`,
-                                  subtitle: `${r.trades} trades · ${r.win_rate.toFixed(1)}% win · ${fmtUsd(r.pnl)}`,
-                                  filters: { ticker: r.ticker, strategy: r.strategy },
-                                })} />
+                                onRowClick={r => onApplyFilter({ ticker: r.ticker, strategy: r.strategy })} />
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
-                  <div className="text-xs text-gray-400 font-semibold mb-1">By Strategy</div>
+                  <div className="text-xs text-gray-400 font-semibold mb-1">
+                    By Strategy <span className="text-gray-600 font-normal">(click → filter runs)</span>
+                  </div>
                   <AnalyticsTable rows={data.by_strategy} cols={sCols} empty="No strategies."
-                                  onRowClick={r => onOpenDrill({
-                                    title: `Strategy: ${r.strategy}`,
-                                    subtitle: `${r.trades} trades · ${r.win_rate.toFixed(1)}% win · ${fmtUsd(r.pnl)} · ${r.runs} runs`,
-                                    filters: { strategy: r.strategy },
-                                  })} />
+                                  onRowClick={r => onApplyFilter({ strategy: r.strategy })} />
                 </div>
                 <div>
-                  <div className="text-xs text-gray-400 font-semibold mb-1">By Ticker</div>
+                  <div className="text-xs text-gray-400 font-semibold mb-1">
+                    By Ticker <span className="text-gray-600 font-normal">(click → filter runs)</span>
+                  </div>
                   <AnalyticsTable rows={data.by_ticker} cols={tCols} empty="No tickers."
-                                  onRowClick={r => onOpenDrill({
-                                    title: `Ticker: ${r.ticker}`,
-                                    subtitle: `${r.trades} trades · ${r.win_rate.toFixed(1)}% win · ${fmtUsd(r.pnl)}`,
-                                    filters: { ticker: r.ticker },
-                                  })} />
+                                  onRowClick={r => onApplyFilter({ ticker: r.ticker })} />
                 </div>
               </div>
               <div>
@@ -1119,13 +1103,13 @@ export default function BacktestTab() {
   const [runsTotal, setRunsTotal] = useState(0);
   const [strategies, setStrategies] = useState<Strategy[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
-  const [drillSpec, setDrillSpec] = useState<DrillSpec>(null);
   const [showLaunch, setShowLaunch] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   // Server-side sort state for the runs table
   const [runsSortKey, setRunsSortKey] = useState<string | null>(null);
   const [runsSortDir, setRunsSortDir] = useState<SortDir>(null);
+  const [runsFilter, setRunsFilter] = useState<RunsFilter>({});
   const runsLimit = 100;
 
   const fetchRuns = () => {
@@ -1136,6 +1120,8 @@ export default function BacktestTab() {
       qs.set('sort', runsSortKey);
       qs.set('direction', runsSortDir);
     }
+    if (runsFilter.strategy) qs.set('strategy', runsFilter.strategy);
+    if (runsFilter.ticker) qs.set('ticker', runsFilter.ticker);
     fetch(`/api/backtests?${qs.toString()}`)
       .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
       .then(d => { setRuns(d.runs || []); setRunsTotal(d.total || (d.runs?.length ?? 0)); })
@@ -1149,23 +1135,25 @@ export default function BacktestTab() {
       .catch(() => {});
   };
 
-  useEffect(() => { fetchRuns(); }, [runsSortKey, runsSortDir]);
+  useEffect(() => { fetchRuns(); }, [runsSortKey, runsSortDir, runsFilter.strategy, runsFilter.ticker]);
   useEffect(() => { fetchStrategies(); }, []);
 
-  const onRunClick = (id: number) => {
-    // All run-level drill-downs go through the same modal as analytics
-    setDrillSpec(null);
-    setSelectedRunId(id);
+  const applyFilter = (patch: RunsFilter) => {
+    // Merge: clicking a "strategy" chart keeps an existing ticker filter, etc.
+    setRunsFilter(cur => ({ ...cur, ...patch }));
+    // Scroll to the runs table so the user sees the result
+    setTimeout(() => {
+      document.getElementById('backtest-runs-table')
+        ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 100);
   };
 
-  const onOpenDrill = (spec: DrillSpec) => {
-    setSelectedRunId(null);
-    setDrillSpec(spec);
+  const onRunClick = (id: number) => {
+    setSelectedRunId(id);
   };
 
   const closeModal = () => {
     setSelectedRunId(null);
-    setDrillSpec(null);
   };
 
   const deleteRun = async (id: number) => {
@@ -1194,19 +1182,46 @@ export default function BacktestTab() {
       </div>
 
       {/* Cross-run Analytics — charts + tables with drill-down. */}
-      <AnalyticsPanel onOpenRun={onRunClick} onOpenDrill={onOpenDrill} />
+      <AnalyticsPanel onOpenRun={onRunClick} onApplyFilter={applyFilter} />
 
-      {/* Runs table — click any row to open the same TradesModal */}
-      <RunsTable
-        runs={runs}
-        total={runsTotal}
-        selectedRunId={selectedRunId}
-        onRunClick={onRunClick}
-        onDelete={deleteRun}
-        sortKey={runsSortKey}
-        sortDir={runsSortDir}
-        onSortChange={(k, d) => { setRunsSortKey(k); setRunsSortDir(d); }}
-      />
+      {/* Active filter chips — drives the runs table query below */}
+      <div id="backtest-runs-table">
+        {(runsFilter.strategy || runsFilter.ticker) && (
+          <div className="bg-[#0d1117] border border-[#30363d] rounded-lg px-3 py-2 mb-2 flex items-center gap-2 flex-wrap">
+            <span className="text-xs text-gray-500">Active filters:</span>
+            {runsFilter.strategy && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-blue-500/20 border border-blue-500/40 text-blue-300 text-xs">
+                strategy = <span className="font-semibold">{runsFilter.strategy}</span>
+                <button onClick={() => setRunsFilter(f => ({ ...f, strategy: undefined }))}
+                        className="ml-1 text-blue-300 hover:text-white">×</button>
+              </span>
+            )}
+            {runsFilter.ticker && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-purple-500/20 border border-purple-500/40 text-purple-300 text-xs">
+                ticker ∈ tickers = <span className="font-semibold">{runsFilter.ticker}</span>
+                <button onClick={() => setRunsFilter(f => ({ ...f, ticker: undefined }))}
+                        className="ml-1 text-purple-300 hover:text-white">×</button>
+              </span>
+            )}
+            <button onClick={() => setRunsFilter({})}
+                    className="text-xs text-gray-400 hover:text-white underline ml-auto">
+              Clear all
+            </button>
+          </div>
+        )}
+
+        {/* Runs table — click any row to open the same TradesModal */}
+        <RunsTable
+          runs={runs}
+          total={runsTotal}
+          selectedRunId={selectedRunId}
+          onRunClick={onRunClick}
+          onDelete={deleteRun}
+          sortKey={runsSortKey}
+          sortDir={runsSortDir}
+          onSortChange={(k, d) => { setRunsSortKey(k); setRunsSortDir(d); }}
+        />
+      </div>
 
       {/* UNIFIED drill-down modal — one component for every entry point */}
       {selectedRunId != null && (
@@ -1222,14 +1237,6 @@ export default function BacktestTab() {
               {' · '}{Number(selectedRun.win_rate || 0).toFixed(1)}% win rate
             </>
           )}
-          onClose={closeModal}
-        />
-      )}
-      {drillSpec && (
-        <TradesModal
-          title={drillSpec.title}
-          subtitle={drillSpec.subtitle}
-          analyticsFilters={drillSpec.filters}
           onClose={closeModal}
         />
       )}
