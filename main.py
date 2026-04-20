@@ -28,13 +28,49 @@ def main():
     log.info("=" * 60)
     log.info("ICT Multi-Ticker Options Bot starting...")
     log.info(f"Mode:      {'DRY RUN (no real orders)' if config.DRY_RUN else 'LIVE TRADING'}")
+
+    # Active-strategy resolution (ENH-024 rollout #4).
+    # Settings + tickers loaders already auto-scope to the active
+    # strategy (rollouts #2+#3), so config.TICKERS / PROFIT_TARGET /
+    # etc. reflect the right values. This block surfaces the decision
+    # in the log + warns if the live scanner doesn't yet support the
+    # chosen strategy directly.
+    active_strategy_name = "ict"
+    try:
+        from db.settings_loader import (
+            get_active_strategy_id, resolve_strategy_id,
+        )
+        from db.connection import get_session
+        from sqlalchemy import text as _sql_text
+
+        resolved_sid = resolve_strategy_id()
+        s = get_session()
+        if s and resolved_sid is not None:
+            row = s.execute(_sql_text(
+                "SELECT name, display_name, enabled FROM strategies "
+                "WHERE strategy_id = :sid"
+            ), {"sid": resolved_sid}).fetchone()
+            s.close()
+            if row:
+                active_strategy_name = row[0]
+                log.info(f"Strategy:  {row[1]} ({row[0]}, strategy_id={resolved_sid})")
+                if active_strategy_name != "ict":
+                    log.warning(
+                        f"⚠ ACTIVE_STRATEGY is '{active_strategy_name}' but the "
+                        f"live scanner still runs ICT only. "
+                        f"Backtest fully supports '{active_strategy_name}'. "
+                        f"Scanner plugin wiring ships in a follow-up branch."
+                    )
+    except Exception as e:
+        log.warning(f"Could not resolve active strategy at boot: {e}")
+        log.info("Strategy:  Raid + Displacement + iFVG/OB (default ICT)")
+
     log.info(f"Tickers:   {', '.join(config.TICKERS)}")
     for t in config.TICKERS:
         contracts = config.CONTRACTS_PER_TICKER.get(t, config.CONTRACTS)
         log.info(f"  {t}: {contracts} contracts")
     log.info(f"Option TP: {config.PROFIT_TARGET:.0%}   SL: {config.STOP_LOSS:.0%}")
     log.info(f"Window:    {config.TRADE_WINDOW_START_PT}:00-{config.TRADE_WINDOW_END_PT}:00 PT")
-    log.info(f"Strategy:  Raid + Displacement + iFVG/OB (full ICT)")
     log.info(f"Max alerts/day: {config.MAX_ALERTS_PER_DAY}")
     broker_name = ("Interactive Brokers" if config.USE_IB else
                    "Schwab paperMoney" if config.USE_SCHWAB else
