@@ -8,8 +8,27 @@ points here.
 
 ## Last updated
 
-**Apr 20 2026 — All-ticker sweeps + sortable/filterable UI + modal drill-down**
-Latest commit: `8e256cc` on `feature/profitability-research`
+**Apr 20 2026 — Cross-run Analytics panel + API**
+Latest commit: `(this)` on `feature/profitability-research`
+
+New this session:
+  - `GET /api/backtests/analytics/cross_run` aggregates across all completed runs.
+    Returns by_ticker_strategy, by_strategy, by_ticker, top/bottom_runs.
+    Optional strategy_id + status filters; limit_runs default 500.
+  - `AnalyticsPanel` component on Backtest page: collapsible section above
+    runs table with 4 views (Ticker×Strategy, By Strategy, By Ticker,
+    Top/Bottom Runs). Uses existing ColDef<T>+useSortableFilterable hook
+    so every column sorts and filters. Click a run ID in Top/Bottom Runs
+    to open its drill-down modal.
+  - 7 new integration tests in test_backtest_api.py ⇒ **364 passed + 4 skips**.
+
+Current DB state (proof endpoint works): 138 runs · 15,593 trades aggregated.
+  By strategy: ICT +$44,995 (60 runs) · ORB +$31,732 (51 runs) · VWAP +$4,777 (27 runs)
+  Top ticker/strategy combos:
+    QQQ/orb +$18,755 · INTC/ict +$6,013 · SLV/ict +$5,775 · NVDA/orb +$4,753
+    TSLA/ict +$4,746 · MU/ict +$4,631 · PLTR/ict +$4,425 · AMD/ict +$4,097
+
+Prior: `8e256cc` — All-ticker sweeps + sortable/filterable UI + modal drill-down
 
 All-ticker per-strategy sweep results (5m bars, 60 days, BS pricer, SL=0.8 for ORB):
   ICT  top 5: INTC +$6,013 · SLV +$5,775 · MU +$4,631 · PLTR +$4,425 · AMD +$4,097
@@ -31,10 +50,11 @@ Fixes this session:
     non-empty exit_indicators — UI just wasn't surfacing it).
 
 Still to do (user's open asks):
-  - Analytics page for cross-run slice/dice
   - Feature-importance: correlate entry/exit indicators vs WIN/LOSS
+    (per-run endpoint exists; need cross-run version + UI)
   - Sweep launch UI form
   - FOP backtest with user-supplied contract (data provider works)
+  - Agents for optimization (user suggestion)
 
 Prior: `c14dd1c` BS pricer made ICT + ORB profitable on 3-ticker sets.
 ORB parameter sweep found SL=0.8 any PT → +$1,493 (+15% over default).
@@ -119,7 +139,7 @@ revalidated or users pin to stale code.
 
 ## Test suite
 
-- **357 passed + 4 expected skips** as of latest commit
+- **364 passed + 4 expected skips** as of latest commit
 - Run: `DATABASE_URL="postgresql://ict_bot:ict_bot_dev@localhost:5432/ict_bot" python -m pytest tests/ -q`
 - DB-persistent runs: `PYTEST_DB_REPORT=1 ...` then view at Tests tab
 

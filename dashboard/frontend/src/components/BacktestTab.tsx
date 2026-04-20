@@ -342,6 +342,209 @@ function TradesTable({ trades }: { trades: TradeRow[] }) {
 }
 
 
+// ─────────────────────────────────────────────────────────
+// AnalyticsPanel — cross-run slice/dice from /backtests/analytics/cross_run
+// ─────────────────────────────────────────────────────────
+
+interface CrossRunAnalytics {
+  by_ticker_strategy: {
+    ticker: string; strategy: string; trades: number; pnl: number;
+    wins: number; decided: number; win_rate: number; runs: number;
+  }[];
+  by_strategy: {
+    strategy: string; trades: number; pnl: number; wins: number;
+    decided: number; win_rate: number; runs: number;
+  }[];
+  by_ticker: {
+    ticker: string; trades: number; pnl: number; wins: number;
+    decided: number; win_rate: number; strategies: string[];
+  }[];
+  top_runs: {
+    id: number; name: string | null; strategy: string; tickers: string[];
+    trades: number; pnl: number; win_rate: number;
+    profit_factor: number | null; max_drawdown: number;
+    created_at: string | null;
+  }[];
+  bottom_runs: CrossRunAnalytics['top_runs'];
+  run_count: number;
+  trade_count: number;
+}
+
+type AnalyticsView = 'ticker_strategy' | 'strategy' | 'ticker' | 'top_runs';
+
+function AnalyticsPanel({ onOpenRun }: { onOpenRun: (id: number) => void }) {
+  const [open, setOpen] = useState(true);
+  const [data, setData] = useState<CrossRunAnalytics | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [view, setView] = useState<AnalyticsView>('ticker_strategy');
+
+  const load = () => {
+    setLoading(true);
+    setErr(null);
+    fetch('/api/backtests/analytics/cross_run?limit_runs=500')
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .then(d => { setData(d); setLoading(false); })
+      .catch(e => { setErr(e.message); setLoading(false); });
+  };
+
+  useEffect(() => { if (open && !data) load(); }, [open]);
+
+  const tsCols: ColDef<CrossRunAnalytics['by_ticker_strategy'][0]>[] = useMemo(() => [
+    { key: 'ticker',   label: 'Ticker',   get: r => r.ticker,   render: r => <span className="text-gray-200">{r.ticker}</span>, filterable: true, filterType: 'text' },
+    { key: 'strategy', label: 'Strategy', get: r => r.strategy, render: r => <span className="text-gray-400">{r.strategy}</span>, filterable: true, filterType: 'text' },
+    { key: 'trades',   label: 'Trades',   get: r => r.trades,   render: r => r.trades, filterable: true, filterType: 'number', align: 'right' },
+    { key: 'pnl',      label: 'P&L',      get: r => r.pnl,      render: r => <span className={`font-mono ${pnlColor(r.pnl)}`}>{fmtUsd(r.pnl)}</span>, filterable: true, filterType: 'number', align: 'right' },
+    { key: 'win_rate', label: 'Win%',     get: r => r.win_rate, render: r => `${r.win_rate.toFixed(1)}%`, filterable: true, filterType: 'number', align: 'right' },
+    { key: 'runs',     label: 'Runs',     get: r => r.runs,     render: r => <span className="text-gray-500">{r.runs}</span>, filterable: true, filterType: 'number', align: 'right' },
+  ], []);
+
+  const sCols: ColDef<CrossRunAnalytics['by_strategy'][0]>[] = useMemo(() => [
+    { key: 'strategy', label: 'Strategy', get: r => r.strategy, render: r => <span className="text-gray-200">{r.strategy}</span>, filterable: true, filterType: 'text' },
+    { key: 'runs',     label: 'Runs',     get: r => r.runs,     render: r => r.runs, filterable: true, filterType: 'number', align: 'right' },
+    { key: 'trades',   label: 'Trades',   get: r => r.trades,   render: r => r.trades, filterable: true, filterType: 'number', align: 'right' },
+    { key: 'pnl',      label: 'Total P&L', get: r => r.pnl,     render: r => <span className={`font-mono ${pnlColor(r.pnl)}`}>{fmtUsd(r.pnl)}</span>, filterable: true, filterType: 'number', align: 'right' },
+    { key: 'win_rate', label: 'Win%',     get: r => r.win_rate, render: r => `${r.win_rate.toFixed(1)}%`, filterable: true, filterType: 'number', align: 'right' },
+    { key: 'avg_pnl',  label: 'P&L/Trade', get: r => r.trades ? r.pnl / r.trades : 0, render: r => <span className={`font-mono ${pnlColor(r.trades ? r.pnl / r.trades : 0)}`}>{fmtUsd(r.trades ? r.pnl / r.trades : 0)}</span>, filterable: true, filterType: 'number', align: 'right' },
+  ], []);
+
+  const tCols: ColDef<CrossRunAnalytics['by_ticker'][0]>[] = useMemo(() => [
+    { key: 'ticker',   label: 'Ticker',     get: r => r.ticker,     render: r => <span className="text-gray-200">{r.ticker}</span>, filterable: true, filterType: 'text' },
+    { key: 'trades',   label: 'Trades',     get: r => r.trades,     render: r => r.trades, filterable: true, filterType: 'number', align: 'right' },
+    { key: 'pnl',      label: 'Total P&L',  get: r => r.pnl,        render: r => <span className={`font-mono ${pnlColor(r.pnl)}`}>{fmtUsd(r.pnl)}</span>, filterable: true, filterType: 'number', align: 'right' },
+    { key: 'win_rate', label: 'Win%',       get: r => r.win_rate,   render: r => `${r.win_rate.toFixed(1)}%`, filterable: true, filterType: 'number', align: 'right' },
+    { key: 'strategies', label: 'Strategies', get: r => r.strategies.join(','), render: r => <span className="text-gray-500 text-[11px]">{r.strategies.join(', ')}</span>, filterable: true, filterType: 'text' },
+  ], []);
+
+  const rCols: ColDef<CrossRunAnalytics['top_runs'][0]>[] = useMemo(() => [
+    { key: 'id',        label: 'ID',       get: r => r.id,       render: r => <button onClick={e => { e.stopPropagation(); onOpenRun(r.id); }} className="text-blue-400 hover:underline">#{r.id}</button>, filterable: true, filterType: 'number' },
+    { key: 'strategy',  label: 'Strategy', get: r => r.strategy, render: r => <span className="text-gray-400">{r.strategy}</span>, filterable: true, filterType: 'text' },
+    { key: 'tickers',   label: 'Tickers',  get: r => (r.tickers || []).join(','), render: r => <span className="text-gray-500 text-[11px]">{(r.tickers || []).slice(0, 3).join(', ')}{(r.tickers || []).length > 3 ? `… (+${r.tickers.length - 3})` : ''}</span>, filterable: true, filterType: 'text' },
+    { key: 'trades',    label: 'Trades',   get: r => r.trades,   render: r => r.trades, filterable: true, filterType: 'number', align: 'right' },
+    { key: 'pnl',       label: 'P&L',      get: r => r.pnl,      render: r => <span className={`font-mono ${pnlColor(r.pnl)}`}>{fmtUsd(r.pnl)}</span>, filterable: true, filterType: 'number', align: 'right' },
+    { key: 'win_rate',  label: 'Win%',     get: r => r.win_rate, render: r => `${r.win_rate.toFixed(1)}%`, filterable: true, filterType: 'number', align: 'right' },
+    { key: 'profit_factor', label: 'PF',   get: r => r.profit_factor ?? null, render: r => r.profit_factor != null ? r.profit_factor.toFixed(2) : '—', filterable: true, filterType: 'number', align: 'right' },
+    { key: 'max_drawdown', label: 'Max DD', get: r => r.max_drawdown, render: r => <span className={`font-mono ${pnlColor(r.max_drawdown)}`}>{fmtUsd(r.max_drawdown)}</span>, filterable: true, filterType: 'number', align: 'right' },
+  ], [onOpenRun]);
+
+  const viewMeta: Record<AnalyticsView, { label: string; hint: string }> = {
+    ticker_strategy: { label: '(Ticker × Strategy)', hint: 'Best ticker/strategy combos across all runs' },
+    strategy:        { label: 'By Strategy',         hint: 'Aggregate P&L per strategy across all runs' },
+    ticker:          { label: 'By Ticker',           hint: 'Aggregate P&L per ticker across all strategies' },
+    top_runs:        { label: 'Top & Bottom Runs',   hint: 'Best + worst individual runs (click ID to open)' },
+  };
+
+  return (
+    <div className="bg-[#161b22] border border-[#30363d] rounded-lg">
+      <div className="px-4 py-2 border-b border-[#30363d] flex items-center gap-3">
+        <button onClick={() => setOpen(o => !o)} className="text-gray-400 hover:text-white text-sm">
+          {open ? '▼' : '▶'} <span className="font-semibold">Analytics</span>
+        </button>
+        <span className="text-xs text-gray-500">
+          {data ? `${data.run_count} runs · ${data.trade_count.toLocaleString()} trades aggregated` : 'cross-run slice/dice'}
+        </span>
+        <button onClick={load} disabled={loading}
+                className="ml-auto px-2 py-0.5 text-xs bg-[#21262d] border border-[#30363d] text-gray-400 rounded hover:text-white">
+          {loading ? 'Loading...' : 'Refresh'}
+        </button>
+      </div>
+      {open && (
+        <div className="p-3">
+          {err && <div className="text-red-400 text-xs mb-2">Error: {err}</div>}
+          {/* View switcher */}
+          <div className="flex items-center gap-1 mb-3 flex-wrap">
+            {(Object.keys(viewMeta) as AnalyticsView[]).map(v => (
+              <button key={v} onClick={() => setView(v)}
+                      className={`px-2.5 py-1 text-xs rounded ${
+                        view === v
+                          ? 'bg-blue-500/20 text-blue-400 border border-blue-500/40'
+                          : 'bg-[#21262d] border border-[#30363d] text-gray-400 hover:text-white'
+                      }`}>
+                {viewMeta[v].label}
+              </button>
+            ))}
+            <span className="text-xs text-gray-600 ml-2">{viewMeta[view].hint}</span>
+          </div>
+          {!data && !loading && <div className="text-gray-500 text-sm py-4 text-center">No data loaded.</div>}
+          {data && view === 'ticker_strategy' && <AnalyticsTable rows={data.by_ticker_strategy} cols={tsCols} empty="No (ticker, strategy) pairs found." />}
+          {data && view === 'strategy' && <AnalyticsTable rows={data.by_strategy} cols={sCols} empty="No strategy rollups." />}
+          {data && view === 'ticker' && <AnalyticsTable rows={data.by_ticker} cols={tCols} empty="No ticker rollups." />}
+          {data && view === 'top_runs' && (
+            <div className="space-y-4">
+              <div>
+                <div className="text-xs text-gray-400 font-semibold mb-1">Top 20 runs by P&L</div>
+                <AnalyticsTable rows={data.top_runs} cols={rCols} empty="No winning runs." />
+              </div>
+              <div>
+                <div className="text-xs text-gray-400 font-semibold mb-1">Bottom 20 runs by P&L</div>
+                <AnalyticsTable rows={data.bottom_runs} cols={rCols} empty="No losing runs." />
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AnalyticsTable<T extends { [k: string]: any }>({ rows, cols, empty }: {
+  rows: T[]; cols: ColDef<T>[]; empty: string;
+}) {
+  const { processed, sortKey, sortDir, toggleSort, filters, setFilter } =
+    useSortableFilterable(rows, cols);
+  const hasFilters = Object.values(filters).some(v => v?.trim());
+  return (
+    <div className="overflow-x-auto">
+      {hasFilters && (
+        <div className="px-2 py-1 text-xs text-gray-500">
+          Showing <span className="text-gray-300">{processed.length}</span> of {rows.length}
+          <button onClick={() => Object.keys(filters).forEach(k => setFilter(k, ''))}
+                  className="ml-2 text-blue-400 hover:text-blue-300">(clear)</button>
+        </div>
+      )}
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="bg-[#21262d]">
+            {cols.map(c =>
+              <SortHeader key={c.key} col={c} sortKey={sortKey} sortDir={sortDir}
+                          onClick={() => toggleSort(c.key)} />
+            )}
+          </tr>
+          <tr className="bg-[#161b22]">
+            {cols.map(c =>
+              <th key={c.key} className="px-2 py-1 border-b border-[#21262d]">
+                {c.filterable ? (
+                  <input value={filters[c.key] || ''}
+                         onChange={e => setFilter(c.key, e.target.value)}
+                         placeholder={c.filterType === 'number' ? '>0' : 'filter'}
+                         className="w-full px-1.5 py-0.5 text-xs bg-[#0d1117] border border-[#30363d] rounded text-gray-300 placeholder:text-gray-600" />
+                ) : null}
+              </th>
+            )}
+          </tr>
+        </thead>
+        <tbody>
+          {processed.map((r, i) => (
+            <tr key={i} className="border-b border-[#21262d] hover:bg-[#1c2128]">
+              {cols.map(c =>
+                <td key={c.key} className={`px-3 py-1.5 ${c.align === 'right' ? 'text-right' : ''}`}>
+                  {c.render(r)}
+                </td>
+              )}
+            </tr>
+          ))}
+          {processed.length === 0 && (
+            <tr><td colSpan={cols.length} className="px-3 py-6 text-center text-gray-500">
+              {rows.length === 0 ? empty : 'No rows match the filters.'}
+            </td></tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+
 function LaunchDialog({ onClose, onLaunched, strategies }: {
   onClose: () => void;
   onLaunched: () => void;
@@ -586,6 +789,9 @@ export default function BacktestTab() {
         {err && <span className="text-red-400 text-xs ml-2">{err}</span>}
         <span className="ml-auto text-xs text-gray-500">{runs.length} runs</span>
       </div>
+
+      {/* Cross-run Analytics — aggregate slice/dice across all completed runs. */}
+      <AnalyticsPanel onOpenRun={onRunClick} />
 
       {/* Runs table: sortable columns + per-column filters. Sort on
           header click (toggle asc/desc). Filter inputs in a second

@@ -502,6 +502,171 @@ def backtest_feature_analysis(run_id: int):
         session.close()
 
 
+@router.get("/backtests/analytics/cross_run")
+def backtest_cross_run_analytics(
+    strategy_id: Optional[int] = None,
+    status: Optional[str] = "completed",
+    limit_runs: int = Query(500, ge=1, le=2000),
+):
+    """Cross-run analytics — aggregate backtest_trades across many runs.
+
+    Returns four rollups:
+      - by_ticker_strategy: (ticker, strategy_name) → trades, pnl, win_rate, runs
+      - by_strategy:        strategy → trades, pnl, win_rate, runs
+      - by_ticker:          ticker → trades, pnl, win_rate, strategies
+      - top_runs:           top/bottom runs by total P&L (quick config comparison)
+    Used by the Analytics sub-tab on the Backtest page to slice/dice
+    the entire corpus of backtests.
+    """
+    session = get_session()
+    if session is None:
+        raise HTTPException(503, "Database not available")
+    try:
+        # Identify qualifying runs
+        where = ["1=1"]
+        params: dict = {"lim_runs": limit_runs}
+        if strategy_id is not None:
+            where.append("r.strategy_id = :sid")
+            params["sid"] = strategy_id
+        if status:
+            where.append("r.status = :status")
+            params["status"] = status
+        wh = " AND ".join(where)
+
+        run_rows = session.execute(text(
+            f"SELECT r.id, r.strategy_id, s.name "
+            f"FROM backtest_runs r JOIN strategies s ON s.strategy_id = r.strategy_id "
+            f"WHERE {wh} "
+            f"ORDER BY r.created_at DESC LIMIT :lim_runs"
+        ), params).fetchall()
+
+        if not run_rows:
+            return {
+                "by_ticker_strategy": [], "by_strategy": [],
+                "by_ticker": [], "top_runs": [], "bottom_runs": [],
+                "run_count": 0, "trade_count": 0,
+            }
+
+        run_ids = [r[0] for r in run_rows]
+        strategy_by_run = {r[0]: r[2] for r in run_rows}
+
+        # Pull aggregated trades. Group DB-side to keep payload small.
+        by_ts_rows = session.execute(text(
+            "SELECT t.ticker, s.name AS strategy, "
+            "  COUNT(*) AS trades, "
+            "  SUM(t.pnl_usd) AS pnl, "
+            "  SUM(CASE WHEN t.exit_result='WIN' THEN 1 ELSE 0 END) AS wins, "
+            "  SUM(CASE WHEN t.exit_result IN ('WIN','LOSS') THEN 1 ELSE 0 END) AS decided, "
+            "  COUNT(DISTINCT t.run_id) AS runs "
+            "FROM backtest_trades t "
+            "JOIN backtest_runs r ON r.id = t.run_id "
+            "JOIN strategies s ON s.strategy_id = r.strategy_id "
+            "WHERE t.run_id = ANY(:rids) "
+            "GROUP BY t.ticker, s.name"
+        ), {"rids": run_ids}).fetchall()
+
+        by_ticker_strategy = [
+            {
+                "ticker": r[0], "strategy": r[1],
+                "trades": int(r[2] or 0),
+                "pnl": round(float(r[3] or 0), 2),
+                "wins": int(r[4] or 0),
+                "decided": int(r[5] or 0),
+                "win_rate": round(100.0 * (r[4] or 0) / r[5], 1) if r[5] else 0.0,
+                "runs": int(r[6] or 0),
+            }
+            for r in by_ts_rows
+        ]
+        by_ticker_strategy.sort(key=lambda x: x["pnl"], reverse=True)
+
+        # Rollups from the detailed rows (in-Python to avoid 3 more queries)
+        from collections import defaultdict
+        strat_agg = defaultdict(lambda: {"trades": 0, "pnl": 0.0, "wins": 0, "decided": 0, "runs": set()})
+        ticker_agg = defaultdict(lambda: {"trades": 0, "pnl": 0.0, "wins": 0, "decided": 0, "strategies": set()})
+        for r in by_ts_rows:
+            ticker, strat = r[0], r[1]
+            trades, pnl, wins, decided, runs = r[2], r[3], r[4], r[5], r[6]
+            s = strat_agg[strat]
+            s["trades"] += int(trades or 0); s["pnl"] += float(pnl or 0)
+            s["wins"] += int(wins or 0); s["decided"] += int(decided or 0)
+            s["runs"].add(strat)  # placeholder; real count below
+            t = ticker_agg[ticker]
+            t["trades"] += int(trades or 0); t["pnl"] += float(pnl or 0)
+            t["wins"] += int(wins or 0); t["decided"] += int(decided or 0)
+            t["strategies"].add(strat)
+
+        # Real per-strategy run counts
+        runs_per_strat = defaultdict(int)
+        for rid, sid, sname in run_rows:
+            runs_per_strat[sname] += 1
+
+        by_strategy = [
+            {
+                "strategy": k,
+                "trades": v["trades"],
+                "pnl": round(v["pnl"], 2),
+                "wins": v["wins"],
+                "decided": v["decided"],
+                "win_rate": round(100.0 * v["wins"] / v["decided"], 1) if v["decided"] else 0.0,
+                "runs": runs_per_strat.get(k, 0),
+            }
+            for k, v in strat_agg.items()
+        ]
+        by_strategy.sort(key=lambda x: x["pnl"], reverse=True)
+
+        by_ticker = [
+            {
+                "ticker": k,
+                "trades": v["trades"],
+                "pnl": round(v["pnl"], 2),
+                "wins": v["wins"],
+                "decided": v["decided"],
+                "win_rate": round(100.0 * v["wins"] / v["decided"], 1) if v["decided"] else 0.0,
+                "strategies": sorted(v["strategies"]),
+            }
+            for k, v in ticker_agg.items()
+        ]
+        by_ticker.sort(key=lambda x: x["pnl"], reverse=True)
+
+        # Top/bottom runs by P&L
+        run_summary_rows = session.execute(text(
+            "SELECT r.id, r.name, s.name, r.tickers, r.total_trades, "
+            "  r.total_pnl, r.win_rate, r.profit_factor, r.max_drawdown, r.created_at "
+            "FROM backtest_runs r JOIN strategies s ON s.strategy_id = r.strategy_id "
+            "WHERE r.id = ANY(:rids) AND r.total_trades > 0 "
+            "ORDER BY r.total_pnl DESC"
+        ), {"rids": run_ids}).fetchall()
+
+        def _run_row_to_dict(r):
+            return {
+                "id": r[0], "name": r[1], "strategy": r[2],
+                "tickers": list(r[3] or []),
+                "trades": int(r[4] or 0),
+                "pnl": round(float(r[5] or 0), 2),
+                "win_rate": round(float(r[6] or 0), 1),
+                "profit_factor": float(r[7]) if r[7] is not None else None,
+                "max_drawdown": round(float(r[8] or 0), 2),
+                "created_at": r[9].isoformat() if r[9] else None,
+            }
+
+        top_runs = [_run_row_to_dict(r) for r in run_summary_rows[:20]]
+        bottom_runs = [_run_row_to_dict(r) for r in run_summary_rows[-20:][::-1]]
+
+        trade_count = sum(x["trades"] for x in by_ticker_strategy)
+
+        return {
+            "by_ticker_strategy": by_ticker_strategy,
+            "by_strategy": by_strategy,
+            "by_ticker": by_ticker,
+            "top_runs": top_runs,
+            "bottom_runs": bottom_runs,
+            "run_count": len(run_rows),
+            "trade_count": trade_count,
+        }
+    finally:
+        session.close()
+
+
 @router.delete("/backtests/{run_id}")
 def delete_backtest(run_id: int):
     from backtest_engine.writer import delete_run
