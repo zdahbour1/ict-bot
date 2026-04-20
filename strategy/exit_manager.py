@@ -341,13 +341,116 @@ class ExitManager:
                     log.info(f"[{ticker}] VERIFY CLOSE: position=0 after "
                              f"{(attempt + 1) * 0.5:.1f}s — sweeping stragglers")
                     self._cancel_stragglers(trade)
+                    # Re-check position after sweeping — a straggler can
+                    # fill between our position=0 read and the cancel
+                    # hitting IB. If the post-sweep position is negative,
+                    # trigger the recovery buy (see below).
+                    try:
+                        post_sweep_qty = self.client.get_position_quantity(con_id)
+                    except Exception:
+                        post_sweep_qty = 0
+                    if post_sweep_qty < 0:
+                        log.error(
+                            f"[{ticker}] VERIFY CLOSE: position went NEGATIVE "
+                            f"after sweep ({post_sweep_qty}) — a straggler "
+                            f"bracket fired during cleanup. Attempting recovery BUY."
+                        )
+                        return self._recover_negative_position(
+                            trade, post_sweep_qty, reason="sweep_race"
+                        )
                     return True
+                if qty < 0:
+                    # Direct negative — a bracket fired before or during
+                    # our flatten attempt. Try to recover.
+                    log.error(
+                        f"[{ticker}] VERIFY CLOSE: position is NEGATIVE ({qty}) "
+                        f"during polling — bracket fired after our close SELL. "
+                        f"Attempting recovery BUY."
+                    )
+                    return self._recover_negative_position(
+                        trade, qty, reason="late_bracket_fill"
+                    )
             except Exception as e:
                 log.warning(f"[{ticker}] VERIFY CLOSE attempt {attempt}: {e}")
 
         log.error(f"[{ticker}] VERIFY CLOSE FAILED: position still "
                   f"{final_qty} after 3s (symbol={symbol}, conId={con_id}) — "
                   f"releasing DB lock, will retry next cycle")
+        return False
+
+    def _recover_negative_position(self, trade: dict, qty: int,
+                                    reason: str) -> bool:
+        """Defensive BUY to restore flat after a straggler bracket fired
+        and flipped us short.
+
+        ONLY fires when ``qty < 0``. Buys exactly ``abs(qty)`` contracts
+        at market. Writes an ``AUDIT short_recovery_buy`` row so the
+        incident is permanently traceable.
+
+        Returns False regardless of success — the caller should NOT
+        finalize_close; the trade stays open while reconcile sorts
+        out the DB/IB state on the next cycle. That keeps the lock
+        logic conservative: the presence of a short means we're still
+        in an abnormal state that a human may want to see.
+        """
+        from strategy.audit import log_trade_action
+
+        ticker = trade.get("ticker", "UNK")
+        symbol = trade.get("symbol", "")
+        trade_id = trade.get("db_id")
+        to_buy = abs(int(qty))
+
+        if to_buy <= 0:
+            return False
+
+        log_trade_action(
+            trade_id, "short_recovery_attempt", "exit_manager",
+            f"position={qty} — attempting recovery BUY of {to_buy}x {symbol}",
+            level="error",
+            extra={"ticker": ticker, "symbol": symbol,
+                   "position_before_recovery": qty, "reason": reason},
+        )
+
+        try:
+            direction = trade.get("direction", "LONG")
+            # The original trade held long options. To unwind a short we
+            # BUY back the same contract. Use the same client call the
+            # open path uses but in BUY direction.
+            #
+            # We reuse buy_call / buy_put — they take a bare OCC symbol
+            # and a count. If the client exposes a more neutral helper,
+            # prefer that; until then these two branches cover
+            # everything the bot ever trades today.
+            if direction == "LONG":
+                # long calls — close a short in calls by buying calls
+                fill = self.client.buy_call(symbol, to_buy)
+            else:
+                # long puts (ICT bearish) — close a short in puts by buying puts
+                fill = self.client.buy_put(symbol, to_buy)
+            log.warning(f"[{ticker}] RECOVERY BUY submitted for {to_buy}x {symbol}. "
+                        f"Fill response: {fill}")
+            log_trade_action(
+                trade_id, "short_recovery_buy", "exit_manager",
+                f"recovery BUY submitted: {to_buy}x {symbol}",
+                level="warn",
+                extra={"ticker": ticker, "symbol": symbol,
+                       "qty_bought": to_buy, "reason": reason,
+                       "fill_response": str(fill)[:500]},
+            )
+        except Exception as e:
+            log.error(f"[{ticker}] RECOVERY BUY FAILED: {e} — BOT NEEDS HUMAN "
+                      f"ATTENTION. Position is short {to_buy}x {symbol}.")
+            log_trade_action(
+                trade_id, "short_recovery_failed", "exit_manager",
+                f"recovery BUY FAILED: {e} — still short {to_buy}x",
+                level="error",
+                extra={"ticker": ticker, "symbol": symbol,
+                       "error": str(e)[:500], "reason": reason},
+            )
+
+        # Always return False — we don't want to finalize_close with a
+        # trade that may still be in an abnormal state on IB. Reconcile
+        # will pick up the actual situation next cycle.
         return False
 
     def _cancel_stragglers(self, trade: dict) -> None:

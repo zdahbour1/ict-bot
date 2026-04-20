@@ -80,34 +80,93 @@ def cancel_all_orders_and_verify(client, trade: dict) -> bool:
 
     # STEP 2: Cancel all found orders
     if open_orders:
+        target_ids = {o["orderId"] for o in open_orders}
         _trace(ticker, f"STEP 2: Found {len(open_orders)} order(s), cancelling all: "
                f"{[f'id={o['orderId']} type={o['orderType']} status={o['status']}' for o in open_orders]}")
 
-        for order in open_orders:
-            try:
-                client.cancel_order_by_id(order["orderId"])
-                _trace(ticker, f"STEP 2: Cancel sent for orderId={order['orderId']} "
-                       f"({order['orderType']} {order.get('action', '')})")
-            except Exception as e:
-                _trace(ticker, f"STEP 2: Failed to cancel orderId={order['orderId']}: {e}", "warn")
+        # STRICT TERMINAL-STATE CANCEL (docs/bracket_cancel_strict_verification.md)
+        # --------------------------------------------------------------------
+        # Only these statuses mean "definitely won't fill":
+        TERMINAL_OK = {"Cancelled", "ApiCancelled", "Inactive", "Filled"}
+        # 'PendingCancel' is NOT terminal — cancel-requested but can still
+        # fill. IB sometimes reverts cancels (observed on MSFT 2026-04-20
+        # where the preset-modified TIF caused reverts). Up to MAX_CANCEL_ROUNDS
+        # rounds of: cancel + poll 3s. If orders revert to Submitted mid-poll,
+        # retry. If after all rounds orders still aren't terminal, ABORT the
+        # close — caller must NOT proceed to send the close SELL.
+        MAX_CANCEL_ROUNDS = 3
+        POLLS_PER_ROUND = 6
+        POLL_SLEEP = 0.5
 
-        # STEP 3: Verify all cancelled (poll up to 3 seconds)
-        for attempt in range(6):
-            time.sleep(0.5)
-            try:
-                remaining = client.find_open_orders_for_contract(con_id, symbol)
-                active = [o for o in remaining
-                          if o["status"] in ("Submitted", "PreSubmitted", "PendingSubmit")]
-                if not active:
-                    _trace(ticker, f"STEP 3: All orders CANCELLED (verified after {(attempt+1)*0.5}s)")
+        def _send_cancels(ids):
+            for oid in ids:
+                try:
+                    client.cancel_order_by_id(oid)
+                    _trace(ticker, f"STEP 2: Cancel sent for orderId={oid}")
+                except Exception as e:
+                    _trace(ticker, f"STEP 2: Failed to cancel orderId={oid}: {e}", "warn")
+
+        _send_cancels(target_ids)
+
+        for round_idx in range(MAX_CANCEL_ROUNDS):
+            reverted: set[int] = set()
+            for attempt in range(POLLS_PER_ROUND):
+                time.sleep(POLL_SLEEP)
+                try:
+                    # Refresh view so cross-client state is current
+                    client.refresh_all_open_orders()
+                    remaining = client.find_open_orders_for_contract(con_id, symbol)
+                except Exception:
+                    continue
+
+                # For each original target, determine its current status.
+                # Absence from remaining = we'll treat as "gone" (terminal).
+                remaining_by_id = {o["orderId"]: o for o in remaining
+                                    if o["orderId"] in target_ids}
+                non_terminal = [
+                    o for o in remaining_by_id.values()
+                    if o["status"] not in TERMINAL_OK
+                ]
+
+                if not non_terminal:
+                    _trace(ticker,
+                           f"STEP 3: All {len(target_ids)} order(s) "
+                           f"TERMINAL (verified after round {round_idx + 1} / "
+                           f"{(attempt + 1) * POLL_SLEEP:.1f}s)")
                     trade["ib_tp_order_id"] = None
                     trade["ib_sl_order_id"] = None
                     return True
-            except Exception:
-                pass
 
-        # Orders still active after 3s — ABORT
-        _trace(ticker, "STEP 3: ABORT — orders still active after 3s. Retry next cycle.", "error")
+                # Detect cancel reverts: order that left PendingCancel and
+                # came back to Submitted / PreSubmitted. These need a fresh
+                # cancel — IB didn't honor our first one.
+                for o in non_terminal:
+                    if o["status"] in ("Submitted", "PreSubmitted", "PendingSubmit"):
+                        reverted.add(o["orderId"])
+
+            if reverted:
+                _trace(ticker,
+                       f"STEP 3: IB REVERTED {len(reverted)} cancel(s): "
+                       f"{sorted(reverted)} — round {round_idx + 1} / "
+                       f"{MAX_CANCEL_ROUNDS}. Re-issuing cancels.",
+                       "warn")
+                _send_cancels(reverted)
+                # Next round will re-poll
+                continue
+
+            # Still non-terminal (probably PendingCancel) without reverts.
+            # Give IB more time in the next round.
+            _trace(ticker,
+                   f"STEP 3: {len(non_terminal)} order(s) still pending-cancel "
+                   f"after round {round_idx + 1} / {MAX_CANCEL_ROUNDS}. Continuing.",
+                   "warn")
+
+        # Exhausted retries — orders still not terminal.
+        _trace(ticker,
+               f"STEP 3: ABORT — cancels did not reach terminal state after "
+               f"{MAX_CANCEL_ROUNDS} rounds. Not sending close SELL. "
+               f"Will retry on next exit cycle.",
+               "error")
         return False
 
     # No orders found — check if brackets were expected (may have just fired)
