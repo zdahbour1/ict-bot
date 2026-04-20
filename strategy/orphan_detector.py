@@ -266,11 +266,19 @@ class OrphanBracketDetector:
             f"suspect_for={age:.0f}s"
         )
 
+        # Prefer permId cancel if available — globally unique across
+        # clients. orderId can collide across stale sessions. Fall back
+        # only if the permId is missing (rare).
+        perm_id = order.get("permId")
         try:
-            client.cancel_order_by_id(order_id)
+            if perm_id:
+                client.cancel_order_by_perm_id(int(perm_id))
+            else:
+                client.cancel_order_by_id(order_id)
             outcome = "cancel_sent"
         except Exception as e:
-            log.error(f"[ORPHAN] Cancel failed for orderId={order_id}: {e}")
+            log.error(f"[ORPHAN] Cancel failed for "
+                      f"orderId={order_id} permId={perm_id}: {e}")
             outcome = f"cancel_failed: {e}"
 
         log_trade_action(

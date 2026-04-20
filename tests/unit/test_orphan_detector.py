@@ -69,7 +69,10 @@ class TestSecondSightingAfterGraceCancels:
         assert len(cancelled) == 1
         assert cancelled[0]["orderId"] == 4383
         assert cancelled[0].get("_outcome") == "cancel_sent"
-        assert client.cancel_order_by_id.called
+        # Prefer permId (globally unique) over orderId
+        assert client.cancel_order_by_perm_id.called, (
+            "orphan cancellation should route through cancel_order_by_perm_id"
+        )
         # Suspect dict is pruned after action
         assert 4383 not in det.suspect_orders
 
@@ -211,9 +214,11 @@ class TestIbError201FastPath:
                 client, "INTC", "INTC260424C00066000", order_result
             )
 
-        cancelled_ids = {c.args[0] for c in client.cancel_order_by_id.call_args_list}
-        assert 3913 in cancelled_ids
-        assert 3914 in cancelled_ids
+        # Fast-path now cancels by permId (globally unique) — 12345 + 12346
+        # are the permIds of the orphan orders in this test fixture.
+        cancelled_perms = {c.args[0] for c in client.cancel_order_by_perm_id.call_args_list}
+        assert 12345 in cancelled_perms
+        assert 12346 in cancelled_perms
 
     def test_fast_path_SKIPS_when_open_trade_on_contract(self):
         """GUARD: open DB trade on same contract → 201 is legitimate,
@@ -234,8 +239,10 @@ class TestIbError201FastPath:
                 client, "INTC", "INTC260424C00066000", order_result
             )
 
-        # CRITICAL: no cancels issued — live bracket must stay intact
+        # CRITICAL: no cancels issued via EITHER cancel path —
+        # live bracket must stay intact
         assert not client.cancel_order_by_id.called
+        assert not client.cancel_order_by_perm_id.called
         # Also shouldn't even bother fetching orders
         assert not client.find_open_orders_for_contract.called
 

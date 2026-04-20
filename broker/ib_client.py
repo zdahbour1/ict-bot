@@ -447,6 +447,96 @@ class IBClient:
             self._ib_place_bracket, option_symbol, contracts, action, tp_price, sl_price
         )
 
+    def place_protection_brackets(self, option_symbol: str, contracts: int,
+                                   tp_price: float, sl_price: float) -> dict:
+        """Attach TP + SL protection to an EXISTING long position.
+
+        Unlike ``place_bracket_order`` (which opens a new trade with a
+        parent BUY + two SELL children), this places only the two SELL
+        children — a LMT take-profit and a STP stop-loss — bound
+        together in an OCA group so one cancels the other.
+
+        Used by the reconcile-driven bracket restoration path: when we
+        detect a trade that became ``unprotected_position`` (brackets
+        cancelled but position still held), we call this to put fresh
+        protection back on without re-buying.
+
+        Returns: {tp_order_id, tp_perm_id, sl_order_id, sl_perm_id,
+        tp_price, sl_price, oca_group} on success; raises on IB
+        rejection.
+        """
+        if config.DRY_RUN:
+            log.info(f"[DRY RUN] Restore brackets: {contracts}x {option_symbol} "
+                     f"TP=${tp_price:.2f} SL=${sl_price:.2f}")
+            return {"dry_run": True, "symbol": option_symbol}
+        return self._submit_to_ib(
+            self._ib_place_protection_brackets, option_symbol, contracts,
+            tp_price, sl_price
+        )
+
+    def _ib_place_protection_brackets(self, option_symbol, contracts,
+                                       tp_price, sl_price):
+        """Runs on IB thread. Places SELL LMT + SELL STP in an OCA group."""
+        contract = self._occ_to_contract(option_symbol)
+        if not contract or not contract.conId:
+            raise RuntimeError(f"Contract validation failed for {option_symbol}")
+        _check_not_flex(contract, option_symbol)
+
+        # Unique OCA group so the two orders cancel each other but
+        # don't interact with any other bracket.
+        oca_group = f"RESTORE-{self.ib.client.getReqId()}"
+
+        tp_order = LimitOrder("SELL", contracts, tp_price)
+        tp_order.orderId = self.ib.client.getReqId()
+        tp_order.ocaGroup = oca_group
+        tp_order.ocaType = 1   # 1 = cancel remaining when one fills
+        tp_order.tif = "DAY"
+        tp_order.transmit = False
+        if config.IB_ACCOUNT:
+            tp_order.account = config.IB_ACCOUNT
+
+        sl_order = StopOrder("SELL", contracts, sl_price)
+        sl_order.orderId = self.ib.client.getReqId()
+        sl_order.ocaGroup = oca_group
+        sl_order.ocaType = 1
+        sl_order.tif = "DAY"
+        sl_order.transmit = True   # last submitted transmits both
+        if config.IB_ACCOUNT:
+            sl_order.account = config.IB_ACCOUNT
+
+        tp_trade = self.ib.placeOrder(contract, tp_order)
+        sl_trade = self.ib.placeOrder(contract, sl_order)
+
+        # Brief wait for status to propagate
+        for _ in range(6):
+            self.ib.sleep(0.5)
+            if (tp_trade.orderStatus.status in ("Submitted", "PreSubmitted")
+                and sl_trade.orderStatus.status in ("Submitted", "PreSubmitted")):
+                break
+
+        log.warning(
+            f"[IB] RESTORE BRACKETS: {contracts}x {option_symbol} "
+            f"TP={tp_order.orderId}(perm={tp_trade.order.permId}) @ ${tp_price:.2f} "
+            f"status={tp_trade.orderStatus.status} "
+            f"SL={sl_order.orderId}(perm={sl_trade.order.permId}) @ ${sl_price:.2f} "
+            f"status={sl_trade.orderStatus.status} "
+            f"oca={oca_group}"
+        )
+
+        return {
+            "symbol": option_symbol,
+            "contracts": contracts,
+            "tp_order_id": tp_order.orderId,
+            "tp_perm_id":  tp_trade.order.permId,
+            "tp_price":    tp_price,
+            "sl_order_id": sl_order.orderId,
+            "sl_perm_id":  sl_trade.order.permId,
+            "sl_price":    sl_price,
+            "oca_group":   oca_group,
+            "tp_status":   tp_trade.orderStatus.status,
+            "sl_status":   sl_trade.orderStatus.status,
+        }
+
     def _ib_place_bracket(self, option_symbol, contracts, action, tp_price, sl_price):
         """Runs on IB thread. Places bracket order."""
         contract = self._occ_to_contract(option_symbol)
@@ -691,6 +781,52 @@ class IBClient:
                         "conId": trade.contract.conId if trade.contract else None,
                     })
         return results
+
+    def cancel_order_by_perm_id(self, perm_id: int):
+        """Cancel by IB permId — globally unique across all clients.
+
+        PREFERRED over cancel_order_by_id for orphan cleanup: orderId is
+        per-client and can collide across stale sessions, whereas permId
+        is assigned by IB's matching engine and never reused.
+
+        Fans out across the pool so the owning client processes the
+        cancel. Non-owners emit Error 10147 silently. Same contract as
+        cancel_order_by_id — never raises.
+        """
+        # Fan out to every connection. We resolve permId → Order
+        # object on each connection's own openTrades view.
+        if self._pool is None:
+            # Legacy: single-client mode
+            try:
+                self._submit_to_ib(self._ib_cancel_by_perm_id_on, self.ib, perm_id,
+                                    timeout=5)
+            except Exception as e:
+                log.warning(f"Failed to cancel permId={perm_id}: {e}")
+            return
+
+        # Pool mode: try own client then fan out
+        for conn in self._pool.all_connections:
+            try:
+                conn.submit(self._ib_cancel_by_perm_id_on, conn.ib, perm_id,
+                            timeout=5)
+            except Exception as e:
+                log.debug(f"[pool fan-out] cancel permId={perm_id} "
+                          f"on {conn.label}: {e}")
+
+    @staticmethod
+    def _ib_cancel_by_perm_id_on(ib, perm_id: int):
+        """Runs on the given ib thread. Cancel an order matched by permId."""
+        target = None
+        for trade in ib.openTrades():
+            if trade.order.permId == perm_id:
+                target = trade
+                break
+        if target is None:
+            # Normal on non-owner clients during fan-out.
+            return
+        ib.cancelOrder(target.order)
+        log.info(f"[IB clientId={target.order.clientId}] "
+                 f"Cancel sent by permId={perm_id} (orderId={target.order.orderId})")
 
     def cancel_order_by_id(self, order_id: int):
         """Cancel a specific order by orderId, across every client in the pool.

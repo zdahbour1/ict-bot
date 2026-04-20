@@ -26,6 +26,77 @@ function PnlCell({ value }: { value: number }) {
 }
 
 
+// ── BracketStatusCell ───────────────────────────────────────
+// Shows the TP + SL bracket orders per trade with their current IB
+// state (updated by reconcile PASS 4 every ~60s). Colors:
+//   green  — both TP + SL Submitted/PreSubmitted (healthy, protected)
+//   red    — at least one is Cancelled/Inactive/MISSING (UNPROTECTED)
+//   gray   — never known / status not yet refreshed
+// Hover tooltip reveals permId + orderId + checked timestamp.
+const _ACTIVE_STATUSES = new Set([
+  "Submitted", "PreSubmitted", "PendingSubmit",
+]);
+const _BAD_STATUSES = new Set([
+  "Cancelled", "ApiCancelled", "Inactive", "MISSING",
+]);
+
+function _legStatusColor(status: string | null): string {
+  if (!status) return "text-gray-500";
+  if (_ACTIVE_STATUSES.has(status)) return "text-green-400";
+  if (_BAD_STATUSES.has(status)) return "text-red-400";
+  if (status === "Filled") return "text-blue-400";
+  return "text-gray-400";
+}
+
+function _legAbbr(status: string | null): string {
+  if (!status) return "—";
+  if (status === "Submitted" || status === "PreSubmitted") return "OK";
+  if (status === "Cancelled" || status === "ApiCancelled") return "CXL";
+  if (status === "Inactive") return "INACT";
+  if (status === "Filled") return "FILL";
+  if (status === "MISSING") return "GONE";
+  return status.slice(0, 5);
+}
+
+function BracketStatusCell({ trade }: { trade: Trade }) {
+  if (trade.status !== 'open') {
+    // Closed trades: brackets are irrelevant; show a dash.
+    return <span className="text-gray-600">—</span>;
+  }
+
+  const tp = trade.ib_tp_status;
+  const sl = trade.ib_sl_status;
+  const tpBad = tp === null || _BAD_STATUSES.has(tp);
+  const slBad = sl === null || _BAD_STATUSES.has(sl);
+  const unprotected = tpBad && slBad;
+
+  const tooltip = [
+    `TP  perm=${trade.ib_tp_perm_id ?? '-'}  order=${trade.ib_tp_order_id ?? '-'}  status=${tp ?? 'unknown'}  price=$${trade.ib_tp_price ?? '-'}`,
+    `SL  perm=${trade.ib_sl_perm_id ?? '-'}  order=${trade.ib_sl_order_id ?? '-'}  status=${sl ?? 'unknown'}  price=$${trade.ib_sl_price ?? '-'}`,
+    `last check: ${trade.ib_brackets_checked_at ?? 'never'}`,
+  ].join('\n');
+
+  return (
+    <div
+      title={tooltip}
+      className={`text-[11px] font-mono whitespace-nowrap ${unprotected ? 'bg-red-500/20 px-1 rounded' : ''}`}>
+      <span className="text-gray-500">TP </span>
+      <span className={_legStatusColor(tp)}>{_legAbbr(tp)}</span>
+      {trade.ib_tp_price != null && (
+        <span className="text-gray-500"> ${trade.ib_tp_price.toFixed(2)}</span>
+      )}
+      <span className="text-gray-600"> · </span>
+      <span className="text-gray-500">SL </span>
+      <span className={_legStatusColor(sl)}>{_legAbbr(sl)}</span>
+      {trade.ib_sl_price != null && (
+        <span className="text-gray-500"> ${trade.ib_sl_price.toFixed(2)}</span>
+      )}
+      {unprotected && <span className="ml-1 text-red-400 font-bold">⚠</span>}
+    </div>
+  );
+}
+
+
 // ── Audit trail modal — shows every system_log row touching this trade.
 //    Uses the append-only trail written by strategy.audit.log_trade_action.
 interface AuditEntry {
@@ -257,6 +328,11 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
     col.accessor('pnl_usd', { header: 'P&L $', cell: info => <PnlCell value={info.getValue()} /> }),
     col.accessor('peak_pnl_pct', { header: 'Peak', cell: info => `${(info.getValue() * 100).toFixed(1)}%` }),
     col.accessor('dynamic_sl_pct', { header: 'Trail SL', cell: info => `${(info.getValue() * 100).toFixed(0)}%` }),
+    col.display({
+      id: 'brackets',
+      header: 'Brackets',
+      cell: ({ row }) => <BracketStatusCell trade={row.original} />,
+    }),
     col.accessor('entry_time', {
       header: 'Entry Time',
       cell: info => info.getValue() ? new Date(info.getValue()).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) : '-',

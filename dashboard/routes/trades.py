@@ -38,6 +38,24 @@ def _trade_to_dict(t: Trade) -> dict:
         "entry_enrichment": t.entry_enrichment or {},
         "exit_enrichment": t.exit_enrichment or {},
         "notes": t.notes,
+        # Bracket visibility (updated by reconcile PASS 4).
+        # Status values: Submitted / PreSubmitted / PendingSubmit
+        # (active), Cancelled / ApiCancelled / Inactive / Filled
+        # (terminal), MISSING (permId not found on IB at all),
+        # NULL (never placed / old row).
+        "ib_tp_perm_id":   t.ib_tp_perm_id,
+        "ib_sl_perm_id":   t.ib_sl_perm_id,
+        "ib_tp_status":    getattr(t, "ib_tp_status", None),
+        "ib_sl_status":    getattr(t, "ib_sl_status", None),
+        "ib_tp_price":     float(t.ib_tp_price) if getattr(t, "ib_tp_price", None) else None,
+        "ib_sl_price":     float(t.ib_sl_price) if getattr(t, "ib_sl_price", None) else None,
+        "ib_tp_order_id":  getattr(t, "ib_tp_order_id", None),
+        "ib_sl_order_id":  getattr(t, "ib_sl_order_id", None),
+        "ib_brackets_checked_at": (
+            t.ib_brackets_checked_at.isoformat()
+            if getattr(t, "ib_brackets_checked_at", None)
+            else None
+        ),
     }
 
 

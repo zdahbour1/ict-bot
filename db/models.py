@@ -4,6 +4,7 @@ SQLAlchemy ORM models for all 8 database tables.
 from datetime import datetime, timezone
 from sqlalchemy import (
     Column, Integer, String, Boolean, Text, Numeric, Date, DateTime,
+    TIMESTAMP,
     ForeignKey, CheckConstraint, UniqueConstraint, Index
 )
 from sqlalchemy.dialects.postgresql import JSONB, ARRAY
@@ -38,6 +39,16 @@ class Trade(Base):
     ib_tp_perm_id = Column(Integer)    # TP bracket leg permanent ID
     ib_sl_perm_id = Column(Integer)    # SL bracket leg permanent ID
     ib_con_id = Column(Integer)        # IB contract ID (unique per option)
+
+    # Bracket health — refreshed by reconcile PASS 4 every cycle.
+    # See strategy/reconciliation.py and docs/logging_and_audit.md.
+    ib_tp_order_id = Column(Integer)    # current orderId for TP (may change)
+    ib_sl_order_id = Column(Integer)    # current orderId for SL (may change)
+    ib_tp_status = Column(String(20))   # Submitted / PreSubmitted / Cancelled / MISSING / etc.
+    ib_sl_status = Column(String(20))
+    ib_tp_price = Column(Numeric(10, 4))   # working TP limit price from IB
+    ib_sl_price = Column(Numeric(10, 4))   # working SL stop price from IB
+    ib_brackets_checked_at = Column(TIMESTAMP(timezone=True))
 
     pnl_pct = Column(Numeric(8, 4), default=0)
     pnl_usd = Column(Numeric(12, 4), default=0)

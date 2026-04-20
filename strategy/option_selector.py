@@ -105,8 +105,12 @@ def _trigger_orphan_scan_fast_path(client, ticker: str, option_symbol: str,
         # aren't unique across clients; permId is.
         actual_symbol = o.get("symbol") or option_symbol
         actual_price = o.get("lmtPrice") or o.get("auxPrice")
+        # Prefer permId (globally unique) over orderId (per-client).
         try:
-            client.cancel_order_by_id(order_id)
+            if perm_id:
+                client.cancel_order_by_perm_id(int(perm_id))
+            else:
+                client.cancel_order_by_id(order_id)
         except Exception as e:
             log.warning(f"[{ticker}] Orphan fast-path: cancel of "
                         f"orderId={order_id} permId={perm_id} failed: {e}")

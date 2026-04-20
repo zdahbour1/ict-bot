@@ -25,6 +25,16 @@ export interface Trade {
   exit_result: 'WIN' | 'LOSS' | 'SCRATCH' | null;
   error_message: string | null;
   notes: string | null;
+  // Bracket health (reconcile PASS 4)
+  ib_tp_perm_id: number | null;
+  ib_sl_perm_id: number | null;
+  ib_tp_status:  string | null;   // Submitted / PreSubmitted / Cancelled / MISSING / null
+  ib_sl_status:  string | null;
+  ib_tp_price:   number | null;
+  ib_sl_price:   number | null;
+  ib_tp_order_id: number | null;
+  ib_sl_order_id: number | null;
+  ib_brackets_checked_at: string | null;
 }
 
 export interface ThreadStatus {

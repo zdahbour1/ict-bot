@@ -278,12 +278,142 @@ def _reconcile(client, exit_manager, ib_positions):
     except Exception as e:
         log.warning(f"[RECONCILE] PASS 3 orphan detector error: {e}")
 
+    # ══════════════════════════════════════════════════════════
+    # PASS 4: Per-trade bracket health audit
+    # ══════════════════════════════════════════════════════════
+    # For every OPEN DB trade, look up its recorded TP+SL permIds in
+    # IB's order table and write their current status back to the
+    # trade row. UI uses these fields to show "protected" vs
+    # "UNPROTECTED" per trade. Also emits an 'unprotected_position'
+    # audit when a trade's brackets have gone to a terminal non-fill
+    # state (Cancelled / Inactive / missing) while the position is
+    # still held — this is the exact state that led to today's
+    # 10-position naked exposure incident.
+    unprotected_items: list[str] = []
+    try:
+        from strategy.orphan_detector import OrphanBracketDetector
+        _TERMINAL_BAD = {"Cancelled", "ApiCancelled", "Inactive"}
+        _ACTIVE = OrphanBracketDetector._ACTIVE
+
+        # Build a lookup of all live orders by permId (from the refresh
+        # our orphan detector just ran). Cheap because we already have
+        # the list.
+        all_orders = []
+        try:
+            all_orders = client.get_all_working_orders()
+        except Exception:
+            pass
+        orders_by_perm = {int(o["permId"]): o for o in all_orders
+                          if o.get("permId")}
+
+        from db.connection import get_session
+        session = get_session()
+        if session is not None:
+            rows = session.execute(text(
+                "SELECT id, ticker, symbol, ib_tp_perm_id, ib_sl_perm_id "
+                "FROM trades WHERE status='open'"
+            )).fetchall()
+            for tid, tkr, sym, tp_pid, sl_pid in rows:
+                tp_status = None
+                tp_price = None
+                tp_order_id = None
+                sl_status = None
+                sl_price = None
+                sl_order_id = None
+
+                if tp_pid:
+                    o = orders_by_perm.get(int(tp_pid))
+                    if o:
+                        tp_status = o.get("status")
+                        tp_price = o.get("lmtPrice") or None
+                        tp_order_id = o.get("orderId")
+                    else:
+                        # permId not in live IB orders → either
+                        # cancelled/filled long ago OR never actually
+                        # made it to IB. Mark MISSING.
+                        tp_status = "MISSING"
+                if sl_pid:
+                    o = orders_by_perm.get(int(sl_pid))
+                    if o:
+                        sl_status = o.get("status")
+                        sl_price = o.get("auxPrice") or o.get("lmtPrice") or None
+                        sl_order_id = o.get("orderId")
+                    else:
+                        sl_status = "MISSING"
+
+                # Write back to the trade row
+                session.execute(text(
+                    "UPDATE trades SET "
+                    "  ib_tp_status=:tps, ib_sl_status=:sls, "
+                    "  ib_tp_price=:tpp, ib_sl_price=:slp, "
+                    "  ib_tp_order_id=:tpo, ib_sl_order_id=:slo, "
+                    "  ib_brackets_checked_at=now() "
+                    "WHERE id=:id"
+                ), {"tps": tp_status, "sls": sl_status,
+                    "tpp": tp_price, "slp": sl_price,
+                    "tpo": tp_order_id, "slo": sl_order_id,
+                    "id": tid})
+
+                # Unprotected detection — both TP AND SL gone.
+                tp_bad = tp_status is None or tp_status in _TERMINAL_BAD or tp_status == "MISSING"
+                sl_bad = sl_status is None or sl_status in _TERMINAL_BAD or sl_status == "MISSING"
+                if tp_bad and sl_bad:
+                    unprotected_items.append(
+                        f"{tkr} db_id={tid} {sym} "
+                        f"(TP={tp_status or 'never placed'}, "
+                        f"SL={sl_status or 'never placed'})"
+                    )
+                    # Audit emitted at warn — shows up in Trades tab Audit
+                    try:
+                        from strategy.audit import log_trade_action
+                        log_trade_action(
+                            tid, "unprotected_position", "reconciliation",
+                            f"{sym} has no working bracket — TP={tp_status}, "
+                            f"SL={sl_status}. Position still held; attempting "
+                            f"bracket restoration.",
+                            level="warn",
+                            extra={"ticker": tkr, "symbol": sym,
+                                   "tp_status": tp_status, "sl_status": sl_status,
+                                   "tp_perm_id": tp_pid, "sl_perm_id": sl_pid},
+                        )
+                    except Exception:
+                        pass
+
+                    # ── ROLLBACK / RESTORATION ────────────────────
+                    # Transaction semantics: if a cancel previously
+                    # succeeded (leaving brackets gone) but the close
+                    # didn't complete, compensate by placing fresh
+                    # protection. Without this the position rides
+                    # naked — exactly the failure mode we observed on
+                    # 10 positions between 10:52-10:55 PT.
+                    try:
+                        _restore_brackets_for(session, client, tid, tkr, sym)
+                    except Exception as e:
+                        log.error(f"[RECONCILE] Bracket restoration FAILED "
+                                  f"for db_id={tid} {tkr}: {e}")
+                        try:
+                            from strategy.audit import log_trade_action
+                            log_trade_action(
+                                tid, "bracket_restore_failed", "reconciliation",
+                                f"{sym}: failed to restore brackets — {e}",
+                                level="error",
+                                extra={"ticker": tkr, "symbol": sym,
+                                       "error": str(e)[:500]},
+                            )
+                        except Exception:
+                            pass
+            session.commit()
+            session.close()
+    except Exception as e:
+        log.warning(f"[RECONCILE] PASS 4 bracket-status refresh error: {e}")
+
     # ── Summary ──
     total_ib = len(ib_by_con_id)
     total_db = len(db_open_trades)
     orphan_count = len(orphan_items)
     headline = (f"closed={closed_count}, adopted={adopted_count}, "
                 f"orphans={orphan_count}, "
+                f"unprotected={len(unprotected_items)}, "
                 f"IB={total_ib}, DB was={total_db}, "
                 f"DB now={total_db - closed_count + adopted_count}")
 
@@ -296,6 +426,10 @@ def _reconcile(client, exit_manager, ib_positions):
         details_parts.append("adopted: [" + "; ".join(adopted_items) + "]")
     if orphan_items:
         details_parts.append("orphans: [" + "; ".join(orphan_items) + "]")
+    if unprotected_items:
+        details_parts.append(
+            "unprotected: [" + "; ".join(unprotected_items) + "]"
+        )
     detail = (" | " + " | ".join(details_parts)) if details_parts else ""
 
     full_summary = headline + detail
@@ -332,6 +466,97 @@ def _get_db_open_trades() -> list:
     except Exception as e:
         log.error(f"[RECONCILE] Failed to query DB open trades: {e}")
         return []
+
+
+def _restore_brackets_for(session, client, trade_id: int, ticker: str, symbol: str) -> None:
+    """Place fresh TP + SL protection on an existing long position.
+
+    Implements the rollback leg of the "every IB action has a
+    compensating action" principle (see
+    docs/bracket_rollback_semantics.md). When a close flow sent cancels
+    that eventually landed but the close SELL never fired — the bug
+    pattern observed 2026-04-20 10:52–10:55 PT on 10 positions — the
+    position is left unprotected. This helper is the compensating
+    transaction: put fresh TP + SL onto IB so exposure is bounded
+    again.
+
+    Reads entry_price + profit_target + stop_loss_level from the trade
+    row to reproduce the original bracket levels. If those are null
+    we fall back to the global settings (PROFIT_TARGET=1.0,
+    STOP_LOSS=0.6). Writes the new perm/order IDs back into the trade
+    row so the next PASS 4 sees them as healthy.
+
+    Never raises. Audits ``bracket_restored`` or
+    ``bracket_restore_failed``. Runs synchronously on the reconcile
+    thread — safe because reconcile already holds the 'one action at
+    a time' lock.
+    """
+    from sqlalchemy import text
+    # Read current state from DB so we use committed values.
+    row = session.execute(text(
+        "SELECT contracts_open, entry_price, profit_target, stop_loss_level "
+        "FROM trades WHERE id=:id"
+    ), {"id": trade_id}).fetchone()
+    if row is None:
+        log.warning(f"[RECONCILE] restore: trade {trade_id} not found")
+        return
+    contracts, entry, tp_level, sl_level = row
+    contracts = int(contracts or 0)
+    if contracts <= 0:
+        log.info(f"[RECONCILE] restore: trade {trade_id} has contracts_open={contracts}, skipping")
+        return
+
+    # Derive TP/SL option-premium prices. Fallback to config defaults
+    # if the trade row doesn't have them (shouldn't normally happen).
+    tp_price = float(tp_level) if tp_level else round(float(entry) * (1 + config.PROFIT_TARGET), 2)
+    sl_price = float(sl_level) if sl_level else round(float(entry) * (1 - config.STOP_LOSS), 2)
+
+    # IB rejects zero or negative stop prices
+    if sl_price <= 0:
+        sl_price = 0.05
+    if tp_price <= 0:
+        tp_price = round(float(entry) * 2, 2)
+
+    log.warning(
+        f"[RECONCILE] RESTORING BRACKETS for db_id={trade_id} {ticker} "
+        f"{symbol} {contracts}x  TP=${tp_price:.2f}  SL=${sl_price:.2f}"
+    )
+
+    result = client.place_protection_brackets(
+        symbol, contracts, tp_price, sl_price,
+    )
+    if not isinstance(result, dict):
+        raise RuntimeError(f"place_protection_brackets returned {result!r}")
+
+    tp_order_id = result.get("tp_order_id")
+    tp_perm_id  = result.get("tp_perm_id")
+    sl_order_id = result.get("sl_order_id")
+    sl_perm_id  = result.get("sl_perm_id")
+
+    session.execute(text(
+        "UPDATE trades SET "
+        "  ib_tp_order_id=:tpo, ib_tp_perm_id=:tpp, ib_tp_price=:tpx, "
+        "  ib_sl_order_id=:slo, ib_sl_perm_id=:slp, ib_sl_price=:slx, "
+        "  ib_tp_status=:tps, ib_sl_status=:sls, "
+        "  ib_brackets_checked_at=now() "
+        "WHERE id=:id"
+    ), {"tpo": tp_order_id, "tpp": tp_perm_id, "tpx": tp_price,
+        "slo": sl_order_id, "slp": sl_perm_id, "slx": sl_price,
+        "tps": result.get("tp_status"), "sls": result.get("sl_status"),
+        "id": trade_id})
+    # commit happens in the outer PASS 4 block
+
+    from strategy.audit import log_trade_action
+    log_trade_action(
+        trade_id, "bracket_restored", "reconciliation",
+        f"{symbol}: restored TP @ ${tp_price:.2f} (permId={tp_perm_id}), "
+        f"SL @ ${sl_price:.2f} (permId={sl_perm_id})",
+        level="warn",  # warn because a restoration means something went wrong
+        extra={"ticker": ticker, "symbol": symbol,
+               "tp_perm_id": tp_perm_id, "sl_perm_id": sl_perm_id,
+               "tp_price": tp_price, "sl_price": sl_price,
+               "oca_group": result.get("oca_group")},
+    )
 
 
 def _get_db_open_con_ids() -> set:
