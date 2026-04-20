@@ -19,6 +19,43 @@ log = logging.getLogger(__name__)
 PT = pytz.timezone("America/Los_Angeles")
 
 
+# Module-level singleton — state (suspect_orders dict) must persist
+# across reconcile cycles. See docs/orphan_bracket_detector.md.
+_orphan_detector_instance = None
+
+
+def _get_orphan_detector():
+    """Lazy-init and return the shared OrphanBracketDetector.
+
+    Reads ORPHAN_AUTO_CANCEL from settings (default True) so the
+    feature can be flipped to detection-only mode without a redeploy.
+    """
+    global _orphan_detector_instance
+    if _orphan_detector_instance is None:
+        from strategy.orphan_detector import OrphanBracketDetector
+        auto = True
+        try:
+            from db.connection import get_session
+            from sqlalchemy import text
+            session = get_session()
+            if session is not None:
+                row = session.execute(
+                    text("SELECT value FROM settings "
+                         "WHERE key='ORPHAN_AUTO_CANCEL' AND strategy_id IS NULL"),
+                ).fetchone()
+                session.close()
+                if row and row[0] is not None:
+                    auto = str(row[0]).lower() in ("true", "1", "yes")
+        except Exception:
+            pass
+        _orphan_detector_instance = OrphanBracketDetector(auto_cancel=auto)
+        log.info(
+            f"[ORPHAN] Detector initialized (auto_cancel={auto}, "
+            f"grace={_orphan_detector_instance.grace_period_sec:.0f}s)"
+        )
+    return _orphan_detector_instance
+
+
 def startup_reconciliation_direct(client, exit_manager):
     """
     Run on MAIN THREAD after IB connects, before main loop starts.
@@ -215,10 +252,38 @@ def _reconcile(client, exit_manager, ib_positions):
                    "entry_price": avg_cost, "ib_con_id": con_id},
         )
 
+    # ══════════════════════════════════════════════════════════
+    # PASS 3: Orphan bracket detection
+    # ══════════════════════════════════════════════════════════
+    # Working SELL orders with no matching open DB trade and no
+    # positive IB position to sell from. If they fire they go short.
+    # Stateful detector with a grace period — see
+    # docs/orphan_bracket_detector.md.
+    orphan_items: list[str] = []
+    try:
+        open_con_ids_after = _get_db_open_con_ids()
+        # Positions already fetched at the top of this function
+        ib_qty_by_con_id = {cid: int(pos.get("qty", 0))
+                            for cid, pos in ib_by_con_id.items()}
+        # Include zero-qty adopted contracts too (rare)
+        detector = _get_orphan_detector()
+        orphans = detector.scan(client, open_con_ids_after, ib_qty_by_con_id)
+        for o in orphans:
+            orphan_items.append(
+                f"orderId={o.get('orderId')} {o.get('symbol')} "
+                f"{o.get('orderType')} @ "
+                f"${o.get('lmtPrice') or o.get('auxPrice')} "
+                f"({o.get('_outcome', 'handled')})"
+            )
+    except Exception as e:
+        log.warning(f"[RECONCILE] PASS 3 orphan detector error: {e}")
+
     # ── Summary ──
     total_ib = len(ib_by_con_id)
     total_db = len(db_open_trades)
+    orphan_count = len(orphan_items)
     headline = (f"closed={closed_count}, adopted={adopted_count}, "
+                f"orphans={orphan_count}, "
                 f"IB={total_ib}, DB was={total_db}, "
                 f"DB now={total_db - closed_count + adopted_count}")
 
@@ -229,6 +294,8 @@ def _reconcile(client, exit_manager, ib_positions):
         details_parts.append("closed: [" + "; ".join(closed_items) + "]")
     if adopted_items:
         details_parts.append("adopted: [" + "; ".join(adopted_items) + "]")
+    if orphan_items:
+        details_parts.append("orphans: [" + "; ".join(orphan_items) + "]")
     detail = (" | " + " | ".join(details_parts)) if details_parts else ""
 
     full_summary = headline + detail

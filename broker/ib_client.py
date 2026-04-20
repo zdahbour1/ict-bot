@@ -614,6 +614,48 @@ class IBClient:
             log.warning(f"Failed to query open orders: {e}")
             return []
 
+    def get_all_working_orders(self) -> list:
+        """Return every working order across all clientIds in the account.
+
+        Output shape matches ``find_open_orders_for_contract`` — a list of
+        dicts with orderId / permId / action / orderType / totalQty /
+        status / conId / parentId / lmtPrice / auxPrice / symbol.
+
+        Callers that use this for orphan detection MUST call
+        ``refresh_all_open_orders()`` first to pick up cross-client orders.
+        """
+        try:
+            return self._submit_to_ib(self._ib_get_all_working_orders, timeout=10)
+        except Exception as e:
+            log.warning(f"Failed to query all working orders: {e}")
+            return []
+
+    def _ib_get_all_working_orders(self) -> list:
+        """Runs on IB thread. Returns all working orders (any contract)."""
+        results = []
+        for trade in self.ib.openTrades():
+            status = trade.orderStatus.status
+            # Skip terminal / inactive states
+            if status in ("Cancelled", "ApiCancelled", "Inactive", "Filled"):
+                continue
+            order = trade.order
+            contract = trade.contract
+            results.append({
+                "orderId":    order.orderId,
+                "permId":     order.permId,
+                "action":     order.action,
+                "orderType":  order.orderType,
+                "totalQty":   float(order.totalQuantity),
+                "status":     status,
+                "conId":      contract.conId if contract else None,
+                "parentId":   getattr(order, "parentId", 0) or 0,
+                "lmtPrice":   float(getattr(order, "lmtPrice", 0) or 0),
+                "auxPrice":   float(getattr(order, "auxPrice", 0) or 0),
+                "symbol":     _normalize_occ(getattr(contract, "localSymbol", "") if contract else ""),
+                "clientId":   getattr(order, "clientId", 0) or 0,
+            })
+        return results
+
     def _ib_find_orders_for_contract(self, con_id: int, symbol: str) -> list:
         """Runs on IB thread. Returns all open orders matching this contract."""
         symbol_clean = (symbol or "").replace(" ", "")
