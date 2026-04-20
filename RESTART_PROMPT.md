@@ -8,11 +8,20 @@ points here.
 
 ## Last updated
 
-**Apr 19 2026 — post-pagination fix**
+**Apr 19 2026 — post-nginx-cache fix (ROOT CAUSE of "still not working")**
 Latest commit on current branch: **`(pending this commit)`** on `feature/active-strategy-ui`
-("Fix: backtest drill-down payload + polling — paginated /trades + /trades/{id}")
+("Fix: nginx was letting browsers cache index.html → stale bundles")
 
-Previous: `0d69e86` fixed the 500 from missing backtest_engine module.
+Chain of fixes on the backtest drill-down bug (all three were needed):
+  1. `0d69e86` — Dockerfile.api missing backtest_engine module (caused 500)
+  2. `e980b2c` — 663KB payload + 10s polling (added pagination + /trades endpoint)
+  3. `(this)` — nginx cached index.html indefinitely (browsers loaded OLD bundle
+                 even after rebuilds; "still not working" for the user)
+
+Lesson for future: for SPA deployments, index.html MUST have
+Cache-Control: no-cache headers. The hashed /assets/*.js bundles CAN
+cache forever (content → hash), but the entry HTML must always be
+revalidated or users pin to stale code.
 
 ---
 
