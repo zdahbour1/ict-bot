@@ -102,6 +102,55 @@ class OrphanBracketDetector:
             log.warning(f"[ORPHAN] Could not fetch working orders: {e}")
             return []
 
+        # ── Inventory snapshot (informational) ──
+        # Before classifying, log every working SELL bracket child we see
+        # so the user can audit the full IB state without needing the
+        # external diagnostic script. At INFO the summary; at DEBUG the
+        # per-order details. No action is taken here — this is purely for
+        # visibility.
+        sell_children = [
+            o for o in all_orders
+            if o.get("action") == "SELL"
+            and o.get("status") in self._ACTIVE
+            and (o.get("parentId") or 0) != 0
+        ]
+        if sell_children:
+            # Bucket by contract + classify each as matched / orphan
+            # relative to the DB/position snapshot we just received.
+            orphan_count = 0
+            by_contract: dict[tuple, list[dict]] = {}
+            for o in sell_children:
+                key = (o.get("conId"), o.get("symbol"))
+                by_contract.setdefault(key, []).append(o)
+                cid = o.get("conId")
+                if cid not in open_db_con_ids and ib_positions_by_con_id.get(cid, 0) <= 0:
+                    orphan_count += 1
+            log.info(
+                f"[ORPHAN] Inventory scan: {len(sell_children)} working SELL "
+                f"bracket children across {len(by_contract)} contract(s); "
+                f"{orphan_count} appear orphaned, "
+                f"{len(self.suspect_orders)} currently on suspect watch"
+            )
+            # Per-contract summary at INFO when orphans present, DEBUG otherwise.
+            level = log.info if orphan_count > 0 else log.debug
+            for (cid, sym), orders in by_contract.items():
+                has_trade = cid in open_db_con_ids
+                pos = ib_positions_by_con_id.get(cid, 0)
+                status = (
+                    "matched-trade" if has_trade
+                    else "has-position" if pos > 0
+                    else "ORPHAN"
+                )
+                ids = [o.get("orderId") for o in orders]
+                prices = [
+                    f"{o.get('orderType')} @ ${o.get('lmtPrice') or o.get('auxPrice')}"
+                    for o in orders
+                ]
+                level(
+                    f"[ORPHAN]   {sym} (conId={cid}) "
+                    f"pos={pos} → {status}: orderIds={ids} ({'; '.join(prices)})"
+                )
+
         for order in all_orders:
             order_id = order.get("orderId")
             if order_id is None:
