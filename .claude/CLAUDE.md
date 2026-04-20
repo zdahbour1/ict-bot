@@ -45,6 +45,14 @@ Branch: feature/dashboard. Docs: docs/backlog.md has full project state.
 - The dashboard Tests tab ("Run Unit" / "Run Concurrency" / "Run Integration")
   is the fastest way to confirm the whole suite still passes.
 
+### Keep RESTART_PROMPT.md Current
+- **After every push, update `RESTART_PROMPT.md` at the repo root.**
+  The user keeps a fixed restart prompt that points at this file;
+  if the file drifts from reality, restarts get confused.
+- Refresh at minimum: the "Last updated" line (commit hash + branch),
+  the test pass count, any new branches pushed, and the next-step list.
+- The file has a stable structure — just edit the sections that changed.
+
 ## Commands
 ```bash
 # Compile check
