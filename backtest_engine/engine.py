@@ -97,15 +97,76 @@ def _signal_to_dict(s) -> dict | None:
 
 def _option_pnl_from_underlying(entry_price: float, current_price: float,
                                 direction: str) -> float:
-    """Proxy: option P&L as a % of entry follows the underlying move
-    scaled by an options leverage multiplier. For ATM options this is
-    roughly 5x-10x the underlying move."""
-    # Underlying % move
+    """Legacy flat-5× leverage proxy. Kept for unit tests that asserted
+    against it. New code should use _option_price_bs() + bs_option_pct()
+    below which use proper Black-Scholes pricing."""
     underlying_pct = (current_price - entry_price) / entry_price
     if direction == "SHORT":
         underlying_pct = -underlying_pct
-    # ATM-ish leverage — conservative 5x. Good-enough for relative comparison.
     return underlying_pct * 5.0
+
+
+def _option_price_bs(
+    underlying: float,
+    strike: float,
+    dte_days: float,
+    right: str,               # 'C' or 'P'
+    *,
+    sigma: float = 0.20,       # annualized vol; 20% default for equity
+    r: float = 0.04,           # risk-free rate
+    model: str = "bs",         # or 'black76' for FOP
+) -> float:
+    """Price a single option contract at the given parameters via BS.
+    Returns price per contract-share (multiply by 100 for equity
+    option dollars; FOP multipliers vary)."""
+    from backtest_engine.option_pricer import bs_price
+    T = max(dte_days, 0.0) / 365.0
+    return bs_price(underlying, strike, T, r, sigma, right, model=model)
+
+
+def bs_option_pct(
+    underlying_entry: float,
+    underlying_now: float,
+    *,
+    direction: str,               # 'LONG' or 'SHORT'
+    strike: float | None = None,  # defaults to ATM = underlying_entry
+    dte_at_entry_days: float = 7.0,
+    bars_held: int = 0,
+    bar_minutes: int = 5,
+    sigma: float = 0.20,
+    r: float = 0.04,
+    model: str = "bs",
+) -> float:
+    """Compute option P&L as a fraction of entry price using BS.
+
+    Replaces the flat-5× leverage proxy with realistic option behavior:
+    delta-weighted gains + theta decay. For ATM options near expiry
+    this will show small wins getting eaten by theta — exactly the
+    frictions issue the user wants to see accurately.
+
+    Returns (exit_price - entry_price) / entry_price. Sign is adjusted
+    for SHORT direction (positive = profit regardless of direction).
+    """
+    if strike is None:
+        strike = underlying_entry
+    right = "C" if direction == "LONG" else "P"
+
+    # Days elapsed during the hold
+    minutes_held = bars_held * bar_minutes
+    days_held = minutes_held / (24 * 60)  # calendar days approximation
+    dte_at_exit = max(dte_at_entry_days - days_held, 1e-4)
+
+    entry_opt = _option_price_bs(
+        underlying_entry, strike, dte_at_entry_days, right,
+        sigma=sigma, r=r, model=model,
+    )
+    exit_opt = _option_price_bs(
+        underlying_now, strike, dte_at_exit, right,
+        sigma=sigma, r=r, model=model,
+    )
+    if entry_opt <= 0:
+        return 0.0
+    return (exit_opt - entry_opt) / entry_opt
 
 
 def _bar_time_to_pt(ts: pd.Timestamp) -> datetime:
@@ -305,13 +366,23 @@ def _simulate_ticker(
 
         # ── Exit check for open trade ───────────────────────
         if open_trade is not None:
-            # Emulate option price using underlying-to-option proxy
-            option_pct = _option_pnl_from_underlying(
-                open_trade["_underlying_entry"],
-                current_price,
-                open_trade["direction"],
+            # Price the option with Black-Scholes (configurable DTE + vol).
+            # This is the ACCURATE option-P&L model — replaces the old
+            # flat-5× leverage proxy. Small underlying moves get eaten by
+            # theta decay + bid/ask; large moves show the delta-gamma
+            # convexity that real options have.
+            option_pct = bs_option_pct(
+                underlying_entry=open_trade["_underlying_entry"],
+                underlying_now=current_price,
+                direction=open_trade["direction"],
+                strike=open_trade.get("_strike"),
+                dte_at_entry_days=cfg.get("option_dte_days", 7.0),
+                bars_held=i - open_trade["entry_bar_idx"],
+                bar_minutes=cfg.get("bar_minutes", 5),
+                sigma=cfg.get("option_vol", 0.20),
+                r=cfg.get("option_rate", 0.04),
+                model=("black76" if cfg.get("sec_type") == "FOP" else "bs"),
             )
-            # Option price = entry * (1 + option_pct)
             option_price = open_trade["entry_price"] * (1 + option_pct)
 
             exit_result = evaluate_exit(open_trade, option_price, now_pt)
@@ -440,6 +511,7 @@ def _simulate_ticker(
             },
             # Engine-internal (underscore) keys stripped before write
             "_underlying_entry": underlying_entry,
+            "_strike": underlying_entry,   # ATM at open
             "_entry_ts": ts,
             "_entry_commission": entry_fill["commission"],
         }
@@ -450,10 +522,17 @@ def _simulate_ticker(
         last_bar = base.iloc[last_idx]
         last_ts = base.index[last_idx]
         now_pt = _bar_time_to_pt(last_ts)
-        option_pct = _option_pnl_from_underlying(
-            open_trade["_underlying_entry"],
-            float(last_bar["close"]),
-            open_trade["direction"],
+        option_pct = bs_option_pct(
+            underlying_entry=open_trade["_underlying_entry"],
+            underlying_now=float(last_bar["close"]),
+            direction=open_trade["direction"],
+            strike=open_trade.get("_strike"),
+            dte_at_entry_days=cfg.get("option_dte_days", 7.0),
+            bars_held=last_idx - open_trade["entry_bar_idx"],
+            bar_minutes=cfg.get("bar_minutes", 5),
+            sigma=cfg.get("option_vol", 0.20),
+            r=cfg.get("option_rate", 0.04),
+            model=("black76" if cfg.get("sec_type") == "FOP" else "bs"),
         )
         option_price = open_trade["entry_price"] * (1 + option_pct)
         exit_fill = simulate_exit_fill(
