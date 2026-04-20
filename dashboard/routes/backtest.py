@@ -692,21 +692,107 @@ def backtest_analytics(run_id: int):
         session.close()
 
 
+def _compute_feature_analysis(rows: list[tuple]) -> list[dict]:
+    """Given (pnl_usd, exit_result, indicators_dict) rows, compute a
+    ranked list of features by |WIN mean - LOSS mean| edge, each with
+    quartile-bucketed win rates. Pure function — shared between the
+    per-run and cross-run feature_analysis endpoints."""
+    # Collect all numeric feature keys
+    feature_values: dict[str, list[tuple[float, str]]] = {}
+    for pnl_usd, exit_result, indicators in rows:
+        if not isinstance(indicators, dict):
+            continue
+        for key, val in indicators.items():
+            if isinstance(val, (int, float)) and not isinstance(val, bool):
+                feature_values.setdefault(key, []).append(
+                    (float(val), exit_result or ("WIN" if pnl_usd > 0 else
+                                                 "LOSS" if pnl_usd < 0 else "SCRATCH"))
+                )
+
+    features: list[dict] = []
+    for key, pairs in feature_values.items():
+        wins = [v for v, r in pairs if r == "WIN"]
+        losses = [v for v, r in pairs if r == "LOSS"]
+        if not wins and not losses:
+            continue
+        win_mean = sum(wins) / len(wins) if wins else None
+        loss_mean = sum(losses) / len(losses) if losses else None
+
+        # Quartile bucket win rate
+        sorted_vals = sorted(v for v, _ in pairs)
+        n = len(sorted_vals)
+        buckets: list[dict] = []
+        if n >= 8:
+            q1 = sorted_vals[n // 4]
+            q2 = sorted_vals[n // 2]
+            q3 = sorted_vals[3 * n // 4]
+            raw_buckets = [
+                (f"<= {q1:.3g}",           None, q1),
+                (f"{q1:.3g} - {q2:.3g}",   q1,   q2),
+                (f"{q2:.3g} - {q3:.3g}",   q2,   q3),
+                (f"> {q3:.3g}",            q3,   None),
+            ]
+            for label, lo, hi in raw_buckets:
+                in_b = [r for v, r in pairs
+                        if (lo is None or v > lo) and (hi is None or v <= hi)]
+                decided = sum(1 for r in in_b if r in ("WIN", "LOSS"))
+                wins_b = sum(1 for r in in_b if r == "WIN")
+                buckets.append({
+                    "label": label,
+                    "count": len(in_b),
+                    "win_rate": round(100.0 * wins_b / decided, 1) if decided else 0.0,
+                })
+
+        # Quartile spread — max(win%) - min(win%) across quartiles.
+        # This is the most interpretable ranking: feature values where
+        # the best-vs-worst quartile differ by 15% is actionable;
+        # raw |win_mean - loss_mean| is biased by feature magnitude.
+        quartile_spread = None
+        if buckets:
+            wrs = [b["win_rate"] for b in buckets if b["count"] > 0]
+            if len(wrs) >= 2:
+                quartile_spread = round(max(wrs) - min(wrs), 1)
+
+        features.append({
+            "feature": key,
+            "n_total": len(pairs),
+            "n_wins": len(wins),
+            "n_losses": len(losses),
+            "win_mean": round(win_mean, 4) if win_mean is not None else None,
+            "loss_mean": round(loss_mean, 4) if loss_mean is not None else None,
+            "edge": round(win_mean - loss_mean, 4)
+                    if win_mean is not None and loss_mean is not None else None,
+            "quartile_win_rates": buckets,
+            "quartile_spread": quartile_spread,
+        })
+
+    # Sort by quartile_spread desc (most informative feature first),
+    # falling back to |edge| for features without quartiles.
+    features.sort(
+        key=lambda f: (
+            f.get("quartile_spread") or 0,
+            abs(f.get("edge") or 0),
+        ),
+        reverse=True,
+    )
+    return features
+
+
 @router.get("/backtests/{run_id}/feature_analysis")
 def backtest_feature_analysis(run_id: int):
-    """Data-science layer: correlate entry_indicators with outcomes.
+    """Per-run feature importance: correlate entry_indicators with outcomes.
 
     For each numeric feature found in entry_indicators, compute:
       - mean value for WIN trades vs LOSS trades
       - quartile-bucketed win rate (so we can see e.g. "trades with RSI
         in Q1 win 60% vs overall 45%")
-    This is the foundation for strategy-optimization analytics.
+    See ``_compute_feature_analysis`` for the math; this endpoint is a
+    thin wrapper that pulls one run's rows.
     """
     session = get_session()
     if session is None:
         raise HTTPException(503, "Database not available")
     try:
-        # Pull all trades with their indicators + outcome
         rows = session.execute(text(
             "SELECT pnl_usd, exit_result, entry_indicators "
             "FROM backtest_trades WHERE run_id = :id"
@@ -715,71 +801,83 @@ def backtest_feature_analysis(run_id: int):
         if not rows:
             return {"features": [], "total_trades": 0}
 
-        # Collect all numeric feature keys
-        feature_values: dict[str, list[tuple[float, str]]] = {}
-        for pnl_usd, exit_result, indicators in rows:
-            if not isinstance(indicators, dict):
-                continue
-            for key, val in indicators.items():
-                if isinstance(val, (int, float)) and not isinstance(val, bool):
-                    feature_values.setdefault(key, []).append(
-                        (float(val), exit_result or ("WIN" if pnl_usd > 0 else
-                                                     "LOSS" if pnl_usd < 0 else "SCRATCH"))
-                    )
+        return {
+            "features": _compute_feature_analysis(rows),
+            "total_trades": len(rows),
+        }
+    finally:
+        session.close()
 
-        features = []
-        for key, pairs in feature_values.items():
-            wins = [v for v, r in pairs if r == "WIN"]
-            losses = [v for v, r in pairs if r == "LOSS"]
-            if not wins and not losses:
-                continue
-            win_mean = sum(wins) / len(wins) if wins else None
-            loss_mean = sum(losses) / len(losses) if losses else None
 
-            # Quartile bucket win rate
-            sorted_vals = sorted(v for v, _ in pairs)
-            n = len(sorted_vals)
-            if n >= 8:
-                q1 = sorted_vals[n // 4]
-                q2 = sorted_vals[n // 2]
-                q3 = sorted_vals[3 * n // 4]
-                buckets = [
-                    {"label": f"≤ {q1:.3g}",        "lo": None, "hi": q1},
-                    {"label": f"{q1:.3g} – {q2:.3g}", "lo": q1,   "hi": q2},
-                    {"label": f"{q2:.3g} – {q3:.3g}", "lo": q2,   "hi": q3},
-                    {"label": f"> {q3:.3g}",        "lo": q3,   "hi": None},
-                ]
-                for b in buckets:
-                    in_b = [r for v, r in pairs
-                            if (b["lo"] is None or v > b["lo"])
-                            and (b["hi"] is None or v <= b["hi"])]
-                    decided = sum(1 for r in in_b if r in ("WIN", "LOSS"))
-                    wins_b = sum(1 for r in in_b if r == "WIN")
-                    b["count"] = len(in_b)
-                    b["win_rate"] = round(100.0 * wins_b / decided, 1) if decided else 0.0
-                    # Remove the numeric lo/hi before returning (display-only)
-                    b.pop("lo", None)
-                    b.pop("hi", None)
-            else:
-                buckets = []
+@router.get("/backtests/analytics/feature_importance")
+def backtest_feature_importance_cross_run(
+    strategy: Optional[str] = None,
+    ticker: Optional[str] = None,
+    source: str = Query("entry", pattern="^(entry|exit)$",
+                         description="'entry' or 'exit' indicator JSONB to analyze"),
+    status: Optional[str] = "completed",
+    min_trades: int = Query(30, ge=1, le=10000,
+                             description="Drop features appearing in <N trades"),
+    limit: int = Query(50, ge=1, le=500),
+):
+    """Cross-run feature importance: scan ``entry_indicators`` or
+    ``exit_indicators`` across every trade in every run matching the
+    filters, then for each numeric feature compute the WIN/LOSS mean
+    split + quartile-bucketed win rates.
 
-            features.append({
-                "feature": key,
-                "n_total": len(pairs),
-                "n_wins": len(wins),
-                "n_losses": len(losses),
-                "win_mean": round(win_mean, 4) if win_mean is not None else None,
-                "loss_mean": round(loss_mean, 4) if loss_mean is not None else None,
-                "edge": round(win_mean - loss_mean, 4)
-                        if win_mean is not None and loss_mean is not None else None,
-                "quartile_win_rates": buckets,
-            })
+    This answers "across 15,000 trades, which features actually
+    predict profit?" — the thing the per-run endpoint can't answer
+    because a single run has maybe 100–300 trades, not enough for a
+    stable signal per quartile.
 
-        # Sort by absolute edge (biggest win-vs-loss mean gap) so the
-        # most informative features show up first in the UI
-        features.sort(key=lambda f: abs(f.get("edge") or 0), reverse=True)
+    The ``source`` param toggles between entry and exit indicators
+    so the same endpoint powers both 'what setup works?' and 'what
+    exit condition works?' questions.
+    """
+    session = get_session()
+    if session is None:
+        raise HTTPException(503, "Database not available")
+    try:
+        col = "entry_indicators" if source == "entry" else "exit_indicators"
 
-        return {"features": features, "total_trades": len(rows)}
+        where = ["1=1"]
+        params: dict = {}
+        if status:
+            where.append("r.status = :status")
+            params["status"] = status
+        if strategy:
+            where.append("s.name = :strat")
+            params["strat"] = strategy
+        if ticker:
+            where.append("t.ticker = :tick")
+            params["tick"] = ticker
+        wh = " AND ".join(where)
+
+        rows = session.execute(text(
+            f"SELECT t.pnl_usd, t.exit_result, t.{col} "
+            f"FROM backtest_trades t "
+            f"JOIN backtest_runs r ON r.id = t.run_id "
+            f"JOIN strategies s ON s.strategy_id = r.strategy_id "
+            f"WHERE {wh}"
+        ), params).fetchall()
+
+        if not rows:
+            return {
+                "features": [], "total_trades": 0, "source": source,
+                "filter": {"strategy": strategy, "ticker": ticker},
+            }
+
+        features = _compute_feature_analysis(rows)
+        # Apply min_trades cutoff (noise floor)
+        features = [f for f in features if f["n_total"] >= min_trades]
+        features = features[:limit]
+
+        return {
+            "features": features,
+            "total_trades": len(rows),
+            "source": source,
+            "filter": {"strategy": strategy, "ticker": ticker},
+        }
     finally:
         session.close()
 

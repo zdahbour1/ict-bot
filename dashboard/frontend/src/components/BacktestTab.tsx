@@ -457,7 +457,19 @@ interface CrossRunAnalytics {
   trade_count: number;
 }
 
-type AnalyticsView = 'charts' | 'tables';
+type AnalyticsView = 'charts' | 'tables' | 'features';
+
+interface FeatureRow {
+  feature: string;
+  n_total: number;
+  n_wins: number;
+  n_losses: number;
+  win_mean: number | null;
+  loss_mean: number | null;
+  edge: number | null;
+  quartile_win_rates: { label: string; count: number; win_rate: number }[];
+  quartile_spread: number | null;
+}
 
 function ChartCard({ title, children, hint }: {
   title: string; children: React.ReactNode; hint?: string;
@@ -628,20 +640,22 @@ function AnalyticsPanel({ onOpenRun, onApplyFilter, filter }: {
           {err && <div className="text-red-400 text-xs">Error: {err}</div>}
           {/* View switcher */}
           <div className="flex items-center gap-1 flex-wrap">
-            {(['charts', 'tables'] as AnalyticsView[]).map(v => (
+            {(['charts', 'tables', 'features'] as AnalyticsView[]).map(v => (
               <button key={v} onClick={() => setView(v)}
                       className={`px-2.5 py-1 text-xs rounded ${
                         view === v
                           ? 'bg-blue-500/20 text-blue-400 border border-blue-500/40'
                           : 'bg-[#21262d] border border-[#30363d] text-gray-400 hover:text-white'
                       }`}>
-                {v === 'charts' ? 'Charts' : 'Tables'}
+                {v === 'charts' ? 'Charts' : v === 'tables' ? 'Tables' : 'Feature Importance'}
               </button>
             ))}
             <span className="text-xs text-gray-600 ml-2">
               {view === 'charts'
                 ? 'Click any bar to drill down into matching trades'
-                : 'Sort/filter any column; click a run ID to open it'}
+                : view === 'tables'
+                ? 'Sort/filter any column; click a run ID to open it'
+                : 'Which entry/exit indicators actually predict WIN vs LOSS across all trades'}
             </span>
           </div>
 
@@ -794,6 +808,140 @@ function AnalyticsPanel({ onOpenRun, onApplyFilter, filter }: {
               </div>
             </div>
           )}
+
+          {view === 'features' && (
+            <FeatureImportanceView filter={filter} />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+// ─────────────────────────────────────────────────────────
+// FeatureImportanceView — #1: which indicators actually predict WIN?
+// ─────────────────────────────────────────────────────────
+
+function FeatureImportanceView({ filter }: { filter: RunsFilter }) {
+  const [source, setSource] = useState<'entry' | 'exit'>('entry');
+  const [minTrades, setMinTrades] = useState<number>(500);
+  const [data, setData] = useState<{
+    features: FeatureRow[];
+    total_trades: number;
+  } | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    setLoading(true); setErr(null);
+    const qs = new URLSearchParams();
+    qs.set('source', source);
+    qs.set('min_trades', String(minTrades));
+    qs.set('limit', '40');
+    if (filter.strategy) qs.set('strategy', filter.strategy);
+    if (filter.ticker)   qs.set('ticker',   filter.ticker);
+    fetch(`/api/backtests/analytics/feature_importance?${qs.toString()}`)
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .then(d => { setData(d); setLoading(false); })
+      .catch(e => { setErr(e.message); setLoading(false); });
+  }, [source, minTrades, filter.strategy, filter.ticker]);
+
+  return (
+    <div className="space-y-3">
+      {/* Controls */}
+      <div className="flex items-center gap-3 flex-wrap bg-[#0d1117] border border-[#30363d] rounded p-2">
+        <div className="flex items-center gap-1">
+          <span className="text-xs text-gray-500 mr-1">Indicator source:</span>
+          {(['entry', 'exit'] as const).map(s => (
+            <button key={s} onClick={() => setSource(s)}
+                    className={`px-2 py-0.5 text-xs rounded ${
+                      source === s
+                        ? 'bg-blue-500/20 text-blue-400 border border-blue-500/40'
+                        : 'bg-[#21262d] text-gray-400 hover:text-white'
+                    }`}>
+              {s === 'entry' ? 'Entry indicators' : 'Exit indicators'}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-1 text-xs text-gray-500">
+          <span>Min trades/feature:</span>
+          <input type="number" min={1} max={10000} value={minTrades}
+                 onChange={e => setMinTrades(Math.max(1, parseInt(e.target.value) || 1))}
+                 className="w-20 px-1.5 py-0.5 bg-[#21262d] border border-[#30363d] rounded text-gray-300" />
+        </div>
+        <span className="text-xs text-gray-600 ml-auto">
+          {data ? `${data.total_trades.toLocaleString()} trades · ${data.features.length} informative features` : '—'}
+        </span>
+      </div>
+
+      {err && <div className="text-red-400 text-xs">Error: {err}</div>}
+      {loading && !data && <div className="text-gray-500 text-sm text-center py-6">Loading…</div>}
+
+      {data && data.features.length === 0 && (
+        <div className="text-gray-500 text-sm text-center py-6">
+          No features pass the min_trades cutoff. Try lowering it, or switch indicator source.
+        </div>
+      )}
+
+      {data && data.features.length > 0 && (
+        <div className="space-y-2">
+          <div className="text-xs text-gray-500 px-2">
+            Sorted by <b>quartile spread</b> (biggest gap between best and worst quartile's win rate).
+            A spread &gt;10% means the feature is actionable.
+          </div>
+          {data.features.map(f => <FeatureRowCard key={f.feature} f={f} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FeatureRowCard({ f }: { f: FeatureRow }) {
+  const hasQuartiles = f.quartile_win_rates.length === 4;
+  const spread = f.quartile_spread ?? 0;
+  const spreadColor = spread >= 15 ? 'text-green-400'
+                     : spread >= 8  ? 'text-yellow-400'
+                     : 'text-gray-500';
+
+  return (
+    <div className="bg-[#0d1117] border border-[#30363d] rounded p-3">
+      <div className="flex items-baseline gap-3 mb-2 flex-wrap">
+        <div className="text-sm font-semibold text-gray-200">{f.feature}</div>
+        <div className={`text-xs font-mono ${spreadColor}`}>
+          spread = {f.quartile_spread != null ? `${f.quartile_spread.toFixed(1)}%` : '—'}
+        </div>
+        <div className="text-xs text-gray-500">
+          n={f.n_total.toLocaleString()} · wins={f.n_wins} · losses={f.n_losses}
+        </div>
+        <div className="text-xs text-gray-500 ml-auto">
+          WIN mean: <span className="text-gray-300 font-mono">{f.win_mean ?? '—'}</span>
+          {' · '}
+          LOSS mean: <span className="text-gray-300 font-mono">{f.loss_mean ?? '—'}</span>
+        </div>
+      </div>
+
+      {hasQuartiles && (
+        <div className="grid grid-cols-4 gap-2">
+          {f.quartile_win_rates.map((b, i) => {
+            const wr = b.win_rate;
+            const barColor = wr >= 60 ? 'bg-green-500/40' : wr >= 50 ? 'bg-yellow-500/40' : 'bg-red-500/40';
+            const textColor = wr >= 60 ? 'text-green-300' : wr >= 50 ? 'text-yellow-300' : 'text-red-300';
+            return (
+              <div key={i} className="bg-[#161b22] border border-[#30363d] rounded p-2">
+                <div className="text-[10px] text-gray-500 font-mono truncate" title={b.label}>{b.label}</div>
+                <div className={`text-lg font-bold ${textColor}`}>{wr.toFixed(1)}%</div>
+                <div className="text-[10px] text-gray-600">n={b.count}</div>
+                <div className={`h-1 mt-1 ${barColor} rounded`}
+                     style={{ width: `${Math.min(100, wr)}%` }} />
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {!hasQuartiles && (
+        <div className="text-[11px] text-gray-600">
+          Not enough samples for quartile breakdown (need ≥8).
         </div>
       )}
     </div>

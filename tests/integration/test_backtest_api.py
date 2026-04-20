@@ -511,6 +511,49 @@ class TestCrossRunAnalytics:
 
 # ── GET /backtests/{id}/feature_analysis ─────────────────
 
+class TestCrossRunFeatureImportance:
+    def test_endpoint_shape(self, client, seeded_run):
+        r = client.get("/api/backtests/analytics/feature_importance?min_trades=1")
+        assert r.status_code == 200
+        d = r.json()
+        for key in ("features", "total_trades", "source", "filter"):
+            assert key in d
+        assert d["source"] == "entry"
+
+    def test_exit_source_uses_exit_indicators(self, client, seeded_run):
+        # seeded_run only populates entry_indicators; exit source may
+        # return no features but the endpoint still responds 200.
+        r = client.get("/api/backtests/analytics/feature_importance?source=exit&min_trades=1")
+        assert r.status_code == 200
+        assert r.json()["source"] == "exit"
+
+    def test_rejects_bad_source(self, client):
+        r = client.get("/api/backtests/analytics/feature_importance?source=bogus")
+        assert r.status_code == 422
+
+    def test_min_trades_cutoff_applied(self, client, seeded_run):
+        # With a huge min_trades, most features drop out
+        r = client.get("/api/backtests/analytics/feature_importance?min_trades=9999")
+        for f in r.json()["features"]:
+            assert f["n_total"] >= 9999
+
+    def test_filter_by_strategy_and_ticker(self, client, seeded_run):
+        r = client.get("/api/backtests/analytics/feature_importance?strategy=ict&ticker=QQQ&min_trades=1")
+        assert r.status_code == 200
+        assert r.json()["filter"] == {"strategy": "ict", "ticker": "QQQ"}
+
+    def test_quartile_spread_present_when_enough_trades(self, client):
+        # Using real DB data — at least one feature should have quartile_spread
+        r = client.get("/api/backtests/analytics/feature_importance?min_trades=100&limit=5")
+        if r.json()["total_trades"] >= 100:
+            # At least one feature should carry quartile metrics
+            any_spread = any(
+                f.get("quartile_spread") is not None and len(f.get("quartile_win_rates", [])) == 4
+                for f in r.json()["features"]
+            )
+            assert any_spread
+
+
 class TestFeatureAnalysis:
     def test_features_extracted(self, client, seeded_run):
         r = client.get(f"/api/backtests/{seeded_run}/feature_analysis")
