@@ -175,9 +175,14 @@ def main():
 
     # ── Reset scan state on startup — user must explicitly start scans ──
     try:
-        from db.writer import set_scans_active, set_stop_requested
+        from db.writer import set_scans_active, set_stop_requested, update_thread_status
         set_scans_active(False)
         set_stop_requested(False)
+        # Register entry-manager thread so the Threads page shows it
+        # from startup, not only on the first signal. Scanners and
+        # exit_manager get registered later when they first emit status.
+        update_thread_status("entry-manager", None, "idle",
+                             "Waiting for signal (no entry in flight)")
         log.info("Scans not active — user must click 'Start Scans' in dashboard.")
     except Exception as e:
         pass
@@ -324,6 +329,7 @@ def _shutdown_cleanup(pool=None):
         for ticker in config.TICKERS:
             update_thread_status(f"scanner-{ticker}", ticker, "stopped", "Bot shut down")
         update_thread_status("exit_manager", None, "stopped", "Bot shut down")
+        update_thread_status("entry-manager", None, "stopped", "Bot shut down")
         update_thread_status("bot-main", None, "stopped", "Bot shut down")
         add_system_log("bot", "info", "Bot shut down gracefully")
         log.info("DB updated: bot and threads marked as stopped")

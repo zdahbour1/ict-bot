@@ -25,6 +25,36 @@ PT = pytz.timezone("America/Los_Angeles")
 MAX_TRADES_PER_DAY = 8
 
 
+# ── Shared entry-manager thread status ───────────────────────────
+# All per-ticker TradeEntryManager instances share a single
+# "entry-manager" row in thread_status so the Threads page shows a
+# live feed of entry activity across all tickers, not just the
+# per-scanner rows (which get overwritten by post-scan idle messages).
+def _update_entry_thread(stage: str, ticker: str, detail: str = "") -> None:
+    """Update the shared 'entry-manager' thread_status row AND write a
+    system_log entry tagged ``entry-manager`` so the Threads page log
+    filter surfaces it alongside reconcile/exit events.
+
+    Thread-safe because update_thread_status uses an UPSERT on thread_name.
+    Silent on failure — thread status is observational, must not break
+    the trade flow.
+    """
+    msg = f"{stage.upper()}: {ticker}"
+    if detail:
+        msg += f" — {detail}"
+    try:
+        from db.writer import update_thread_status, add_system_log
+        # Status row — one per stage, overwrites previous
+        update_thread_status("entry-manager", None, stage, msg)
+        # System_log — append-only trail. Use level by stage severity.
+        level = ("error" if stage == "failed"
+                 else "warn" if stage == "blocked"
+                 else "info")
+        add_system_log("entry-manager", level, msg)
+    except Exception:
+        pass
+
+
 class TradeEntryManager:
     """
     Manages trade entry decisions and execution for a single ticker.
@@ -177,16 +207,20 @@ class TradeEntryManager:
             f"entry=${signal.entry_price:.2f} sl=${signal.sl:.2f} tp=${signal.tp:.2f} "
             f"— running pre-flight"
         )
+        _update_entry_thread("preflight", self.ticker,
+                             f"{signal.signal_type} @ ${signal.entry_price:.2f}")
 
         allowed, reason = self.can_enter()
         if not allowed:
             log.info(f"[{self.ticker}] Entry blocked: {reason}")
+            _update_entry_thread("blocked", self.ticker, reason)
             return None
 
         # IB pre-flight: check IB directly for existing positions/orders
         ib_clear, ib_reason = self._ib_preflight_check()
         if not ib_clear:
             log.warning(f"[{self.ticker}] Entry blocked by IB pre-flight: {ib_reason}")
+            _update_entry_thread("blocked", self.ticker, f"IB pre-flight: {ib_reason}")
             # Trigger reconciliation to sync DB with IB reality
             try:
                 from strategy.reconciliation import periodic_reconciliation
@@ -232,18 +266,24 @@ class TradeEntryManager:
                 self._last_trade_time = datetime.now(PT)
                 log.info(f"[{self.ticker}] Trade #{self._trades_today}/{MAX_TRADES_PER_DAY} opened: {trade.get('symbol')}")
 
-                # Update thread status
+                # Update thread status (both the scanner row and the
+                # shared entry-manager row)
                 self._update_thread_status(f"Trade #{self._trades_today} opened")
+                _update_entry_thread("filled", self.ticker,
+                                     f"{trade.get('symbol', '?')} @ "
+                                     f"${trade.get('entry_price', 0):.2f}")
 
             return trade
 
         except concurrent.futures.TimeoutError:
             self._handle_timeout(signal)
+            _update_entry_thread("failed", self.ticker, "timeout (see bot.log)")
             return None
 
         except Exception as e:
             self._entry_pending = False
             self._errors_today += 1
+            _update_entry_thread("failed", self.ticker, f"exception: {type(e).__name__}")
             handle_error(f"scanner-{self.ticker}", "trade_entry", e,
                          context={"ticker": self.ticker}, critical=True)
             return None
@@ -265,6 +305,9 @@ class TradeEntryManager:
                 f"leg={leg} (entry=${signal.entry_price:.2f} "
                 f"sl=${signal.sl:.2f} tp=${signal.tp:.2f})"
             )
+            _update_entry_thread("placing", self.ticker,
+                                 f"{signal.signal_type} {leg} "
+                                 f"@ ${signal.entry_price:.2f}")
             if signal.direction == "SHORT":
                 future = pool.submit(select_and_enter_put, self.client, self.ticker)
             else:
