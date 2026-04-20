@@ -1195,6 +1195,244 @@ function TradesModal(props: TradesModalProps) {
 }
 
 
+// ─────────────────────────────────────────────────────────
+// SweepDialog — #3: grid-search launch form
+// ─────────────────────────────────────────────────────────
+
+function SweepDialog({ onClose, onLaunched, strategies }: {
+  onClose: () => void;
+  onLaunched: () => void;
+  strategies: Strategy[];
+}) {
+  const defStrategy = strategies.find(s => s.is_default) || strategies[0];
+  const today = new Date();
+  const sixty = new Date(today.getTime() - 60 * 86_400_000);
+
+  const [namePrefix, setNamePrefix] = useState(
+    `${defStrategy?.name || 'ict'} sweep ${isoDate(today)}`);
+  const [strategyName, setStrategyName] = useState(defStrategy?.name || 'ict');
+  const [tickers, setTickers] = useState('QQQ,SPY,IWM');
+  const [startDate, setStartDate] = useState(isoDate(sixty));
+  const [endDate, setEndDate] = useState(isoDate(today));
+  const [baseInterval, setBaseInterval] = useState('5m');
+  const [optionDTE, setOptionDTE] = useState('7');
+  const [optionVol, setOptionVol] = useState('0.20');
+  const [perTicker, setPerTicker] = useState(true);
+
+  // Grid: each param as comma-separated. Empty = don't sweep.
+  const [gridPT, setGridPT] = useState('0.5, 1.0, 1.5');
+  const [gridSL, setGridSL] = useState('0.4, 0.6, 0.8');
+  const [gridInterval, setGridInterval] = useState('');      // e.g. "5m, 15m"
+  const [gridDTE, setGridDTE] = useState('');                 // e.g. "1, 3, 7"
+
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Parse a comma list into typed values; empty string → [] (don't sweep).
+  const parseList = (s: string, asNumber: boolean): (number | string)[] => {
+    return s.split(',').map(x => x.trim()).filter(Boolean)
+      .map(x => asNumber ? parseFloat(x) : x)
+      .filter(x => !asNumber || !isNaN(x as number));
+  };
+
+  const grid = useMemo(() => {
+    const g: Record<string, (number | string)[]> = {};
+    const pt = parseList(gridPT, true);
+    const sl = parseList(gridSL, true);
+    const iv = parseList(gridInterval, false);
+    const dte = parseList(gridDTE, true);
+    if (pt.length)  g.profit_target = pt;
+    if (sl.length)  g.stop_loss = sl;
+    if (iv.length)  g.base_interval = iv;
+    if (dte.length) g.option_dte_days = dte;
+    return g;
+  }, [gridPT, gridSL, gridInterval, gridDTE]);
+
+  const cellCount = Math.max(1,
+    Object.values(grid).reduce((a, v) => a * v.length, 1));
+  const tickerList = tickers.split(',').map(t => t.trim()).filter(Boolean);
+  const totalRuns = perTicker ? cellCount * tickerList.length : cellCount;
+
+  const launch = async () => {
+    setSubmitting(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/backtests/sweep/launch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name_prefix: namePrefix,
+          strategy: strategyName,
+          tickers: tickerList,
+          start_date: startDate,
+          end_date: endDate,
+          base_config: {
+            base_interval: baseInterval,
+            option_dte_days: parseFloat(optionDTE),
+            option_vol: parseFloat(optionVol),
+          },
+          grid,
+          per_ticker: perTicker,
+        }),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        setError(j.detail || `HTTP ${res.status}`);
+        setSubmitting(false);
+        return;
+      }
+      onLaunched();
+      onClose();
+    } catch (e: any) {
+      setError(e?.message || 'launch failed');
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={onClose}>
+      <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-6 w-[640px] max-h-[90vh] overflow-y-auto"
+           onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-bold">Parameter Sweep</h3>
+          <button onClick={onClose} className="text-gray-500 hover:text-white text-xl">&times;</button>
+        </div>
+        <div className="space-y-3 text-sm">
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs text-gray-400 mb-1">Name prefix</label>
+              <input value={namePrefix} onChange={e => setNamePrefix(e.target.value)}
+                     className="w-full px-2 py-1 bg-[#0d1117] border border-[#30363d] rounded" />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-400 mb-1">Strategy</label>
+              <select value={strategyName} onChange={e => setStrategyName(e.target.value)}
+                      className="w-full px-2 py-1 bg-[#0d1117] border border-[#30363d] rounded">
+                {strategies.map(s =>
+                  <option key={s.strategy_id} value={s.name}>{s.display_name} ({s.name})</option>
+                )}
+              </select>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">Tickers (comma-separated)</label>
+            <input value={tickers} onChange={e => setTickers(e.target.value)}
+                   className="w-full px-2 py-1 bg-[#0d1117] border border-[#30363d] rounded" />
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs text-gray-400 mb-1">Start Date</label>
+              <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)}
+                     className="w-full px-2 py-1 bg-[#0d1117] border border-[#30363d] rounded" />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-400 mb-1">End Date</label>
+              <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)}
+                     className="w-full px-2 py-1 bg-[#0d1117] border border-[#30363d] rounded" />
+            </div>
+          </div>
+
+          <div className="border border-[#30363d] rounded p-3 space-y-2 bg-[#0d1117]">
+            <div className="text-xs text-gray-400 font-semibold">Base config (used for any param NOT swept)</div>
+            <div className="grid grid-cols-3 gap-3">
+              <div>
+                <label className="block text-[11px] text-gray-500 mb-1">Base interval</label>
+                <select value={baseInterval} onChange={e => setBaseInterval(e.target.value)}
+                        className="w-full px-2 py-1 bg-[#161b22] border border-[#30363d] rounded">
+                  <option value="1m">1m</option>
+                  <option value="5m">5m</option>
+                  <option value="15m">15m</option>
+                  <option value="1h">1h</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[11px] text-gray-500 mb-1">Option DTE (days)</label>
+                <input value={optionDTE} onChange={e => setOptionDTE(e.target.value)}
+                       className="w-full px-2 py-1 bg-[#161b22] border border-[#30363d] rounded" />
+              </div>
+              <div>
+                <label className="block text-[11px] text-gray-500 mb-1">Option vol</label>
+                <input value={optionVol} onChange={e => setOptionVol(e.target.value)}
+                       className="w-full px-2 py-1 bg-[#161b22] border border-[#30363d] rounded" />
+              </div>
+            </div>
+          </div>
+
+          <div className="border border-[#30363d] rounded p-3 space-y-2 bg-[#0d1117]">
+            <div className="text-xs text-gray-400 font-semibold">
+              Grid (leave blank to NOT sweep that param)
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-[11px] text-gray-500 mb-1">profit_target</label>
+                <input value={gridPT} onChange={e => setGridPT(e.target.value)}
+                       placeholder="0.5, 1.0, 1.5"
+                       className="w-full px-2 py-1 bg-[#161b22] border border-[#30363d] rounded font-mono text-xs" />
+              </div>
+              <div>
+                <label className="block text-[11px] text-gray-500 mb-1">stop_loss</label>
+                <input value={gridSL} onChange={e => setGridSL(e.target.value)}
+                       placeholder="0.4, 0.6, 0.8"
+                       className="w-full px-2 py-1 bg-[#161b22] border border-[#30363d] rounded font-mono text-xs" />
+              </div>
+              <div>
+                <label className="block text-[11px] text-gray-500 mb-1">base_interval</label>
+                <input value={gridInterval} onChange={e => setGridInterval(e.target.value)}
+                       placeholder="5m, 15m, 1h"
+                       className="w-full px-2 py-1 bg-[#161b22] border border-[#30363d] rounded font-mono text-xs" />
+              </div>
+              <div>
+                <label className="block text-[11px] text-gray-500 mb-1">option_dte_days</label>
+                <input value={gridDTE} onChange={e => setGridDTE(e.target.value)}
+                       placeholder="1, 3, 7"
+                       className="w-full px-2 py-1 bg-[#161b22] border border-[#30363d] rounded font-mono text-xs" />
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <input type="checkbox" id="per_ticker" checked={perTicker}
+                   onChange={e => setPerTicker(e.target.checked)} />
+            <label htmlFor="per_ticker" className="text-xs text-gray-400">
+              Run each ticker as its own backtest (so you can see per-ticker results)
+            </label>
+          </div>
+
+          <div className="bg-[#0d1117] border border-[#30363d] rounded px-3 py-2 text-xs">
+            <div className="text-gray-400">
+              Grid cells: <span className="text-gray-200 font-mono">{cellCount}</span>
+              {' · '}Tickers: <span className="text-gray-200 font-mono">{tickerList.length}</span>
+              {' · '}<span className="text-yellow-400">
+                Total runs to spawn: <b>{totalRuns}</b>
+              </span>
+            </div>
+            {totalRuns > 30 && (
+              <div className="text-orange-400 mt-1">
+                ⚠ Large sweep — this may take 10+ minutes on a 60-day window.
+              </div>
+            )}
+          </div>
+
+          {error && <div className="text-red-400 text-xs">{error}</div>}
+          <div className="flex justify-end gap-2 pt-2">
+            <button onClick={onClose}
+                    className="px-3 py-1.5 text-xs bg-[#21262d] border border-[#30363d] rounded">
+              Cancel
+            </button>
+            <button onClick={launch} disabled={submitting || totalRuns < 1}
+                    className="px-3 py-1.5 text-xs bg-green-600 text-white rounded disabled:opacity-50">
+              {submitting ? 'Starting…' : `Launch ${totalRuns} run${totalRuns === 1 ? '' : 's'}`}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 function LaunchDialog({ onClose, onLaunched, strategies }: {
   onClose: () => void;
   onLaunched: () => void;
@@ -1353,6 +1591,7 @@ export default function BacktestTab() {
   const [strategies, setStrategies] = useState<Strategy[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
   const [showLaunch, setShowLaunch] = useState(false);
+  const [showSweep, setShowSweep] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   // Server-side sort state for the runs table
@@ -1438,6 +1677,10 @@ export default function BacktestTab() {
                 className="px-3 py-1.5 text-sm bg-green-600 text-white rounded font-medium">
           + Run Backtest
         </button>
+        <button onClick={() => setShowSweep(true)}
+                className="px-3 py-1.5 text-sm bg-purple-600 text-white rounded font-medium">
+          + Parameter Sweep
+        </button>
         <button onClick={fetchRuns}
                 className="px-3 py-1.5 text-sm bg-[#21262d] border border-[#30363d] text-gray-300 rounded hover:text-white">
           Refresh
@@ -1513,6 +1756,11 @@ export default function BacktestTab() {
         <LaunchDialog onClose={() => setShowLaunch(false)}
                       onLaunched={fetchRuns}
                       strategies={strategies} />
+      )}
+      {showSweep && (
+        <SweepDialog onClose={() => setShowSweep(false)}
+                     onLaunched={fetchRuns}
+                     strategies={strategies} />
       )}
     </div>
   );

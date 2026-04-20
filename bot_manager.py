@@ -31,6 +31,9 @@ _test_process = None
 # Backtest runner state (backtest_engine subprocess)
 _backtest_process = None
 
+# Parameter-sweep runner state (run_sweep.py subprocess)
+_sweep_process = None
+
 BOT_DIR = os.path.dirname(os.path.abspath(__file__))
 PYTHON = sys.executable
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://ict_bot:ict_bot_dev@localhost:5432/ict_bot")
@@ -72,6 +75,8 @@ class BotManagerHandler(BaseHTTPRequestHandler):
             self._handle_run_tests()
         elif self.path == "/run-backtest":
             self._handle_run_backtest()
+        elif self.path == "/run-sweep":
+            self._handle_run_sweep()
         else:
             self._send_json({"error": "not found"}, 404)
 
@@ -137,6 +142,75 @@ class BotManagerHandler(BaseHTTPRequestHandler):
             "status": "started",
             "pid": _backtest_process.pid,
             "log_file": "backtest.log",
+        }, status=202)
+
+    def _handle_run_sweep(self):
+        """Spawn a parameter-sweep subprocess via run_sweep.py. Body:
+            {"name_prefix": str, "strategy": str, "tickers": [str],
+             "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD",
+             "base_config": {...}, "grid": {key: [values]},
+             "per_ticker": bool}
+        Each cell of the grid spawns a backtest_runs row visible in
+        the Backtest tab as it completes. Returns 202 immediately."""
+        global _sweep_process
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = json.loads(self.rfile.read(content_length)) if content_length > 0 else {}
+        except Exception:
+            body = {}
+
+        # Validate required fields
+        for k in ("strategy", "tickers", "start_date", "end_date"):
+            if not body.get(k):
+                self._send_json({"error": f"{k} required"}, 400)
+                return
+        if not isinstance(body["tickers"], list) or not body["tickers"]:
+            self._send_json({"error": "tickers must be a non-empty list"}, 400)
+            return
+        if "grid" not in body:
+            body["grid"] = {}
+        if "base_config" not in body:
+            body["base_config"] = {}
+
+        if _sweep_process is not None and _sweep_process.poll() is None:
+            self._send_json({
+                "error": "a sweep is already running",
+                "pid": _sweep_process.pid,
+            }, 409)
+            return
+
+        runner = os.path.join(BOT_DIR, "run_sweep.py")
+        if not os.path.exists(runner):
+            self._send_json({"error": f"runner not found: {runner}"}, 500)
+            return
+
+        args = [PYTHON, runner, json.dumps(body)]
+        env = os.environ.copy()
+        env["DATABASE_URL"] = DATABASE_URL
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUTF8"] = "1"
+
+        log_file = os.path.join(BOT_DIR, "sweep.log")
+        log.info(f"Spawning sweep: strategy={body.get('strategy')} "
+                 f"tickers={body['tickers']} grid={body.get('grid')}")
+        try:
+            with open(log_file, "w", encoding="utf-8") as f:
+                f.write(f"=== sweep started at {datetime.now().isoformat()} ===\n")
+                f.write(f"Request: {json.dumps(body)}\n\n")
+                f.flush()
+                _sweep_process = subprocess.Popen(
+                    args, cwd=BOT_DIR, env=env,
+                    stdout=f, stderr=subprocess.STDOUT,
+                )
+        except Exception as e:
+            log.error(f"Failed to spawn sweep: {e}")
+            self._send_json({"error": f"spawn failed: {e}"}, 500)
+            return
+
+        self._send_json({
+            "status": "started",
+            "pid": _sweep_process.pid,
+            "log_file": "sweep.log",
         }, status=202)
 
     def _handle_run_tests(self):

@@ -1155,3 +1155,45 @@ async def launch_backtest(payload: dict = Body(default={})):
         raise HTTPException(504, "Sidecar timed out starting backtest")
 
 
+@router.post("/backtests/sweep/launch")
+async def launch_sweep(payload: dict = Body(default={})):
+    """Kick off a parameter sweep on the host via bot_manager.
+
+    Body: {
+        "name_prefix": "optional prefix for each run name",
+        "strategy":    "ict" | "orb" | "vwap_revert",
+        "tickers":     ["QQQ", "SPY"],
+        "start_date":  "2026-03-01",
+        "end_date":    "2026-04-01",
+        "base_config": { "base_interval": "5m", "option_dte_days": 7 },
+        "grid":        { "profit_target": [0.5, 1.0, 1.5],
+                         "stop_loss":     [0.4, 0.6, 0.8] },
+        "per_ticker":  false
+    }
+
+    Cells expand cross-product: 3 PT values × 3 SL values = 9 runs.
+    With per_ticker=true: × len(tickers) more. Each cell becomes a
+    backtest_runs row and appears in the Backtest tab as it completes.
+    """
+    for k in ("strategy", "tickers", "start_date", "end_date"):
+        if not payload.get(k):
+            raise HTTPException(400, f"{k} is required")
+    if not isinstance(payload["tickers"], list) or not payload["tickers"]:
+        raise HTTPException(400, "tickers must be a non-empty list")
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(f"{SIDECAR_URL}/run-sweep", json=payload)
+            data = resp.json()
+            if resp.status_code >= 400:
+                raise HTTPException(resp.status_code, data.get("error", "sidecar error"))
+            return data
+    except httpx.ConnectError:
+        raise HTTPException(
+            503,
+            "Bot manager sidecar not running. Start it: python bot_manager.py"
+        )
+    except httpx.TimeoutException:
+        raise HTTPException(504, "Sidecar timed out starting sweep")
+
+

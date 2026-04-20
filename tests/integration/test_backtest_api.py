@@ -571,6 +571,40 @@ class TestFeatureAnalysis:
         assert rsi["n_losses"] == 1
 
 
+# ── POST /backtests/sweep/launch ─────────────────────────
+
+class TestSweepLaunch:
+    def test_rejects_missing_strategy(self, client):
+        r = client.post("/api/backtests/sweep/launch", json={
+            "tickers": ["QQQ"],
+            "start_date": "2026-03-01", "end_date": "2026-03-02",
+        })
+        assert r.status_code == 400
+
+    def test_rejects_missing_tickers(self, client):
+        r = client.post("/api/backtests/sweep/launch", json={
+            "strategy": "ict",
+            "start_date": "2026-03-01", "end_date": "2026-03-02",
+        })
+        assert r.status_code == 400
+
+    def test_rejects_empty_tickers_list(self, client):
+        r = client.post("/api/backtests/sweep/launch", json={
+            "strategy": "ict", "tickers": [],
+            "start_date": "2026-03-01", "end_date": "2026-03-02",
+        })
+        assert r.status_code == 400
+
+    def test_surfaces_sidecar_errors_cleanly(self, client):
+        # Should never 500 — if sidecar is down, return 503/504
+        r = client.post("/api/backtests/sweep/launch", json={
+            "strategy": "ict", "tickers": ["QQQ"],
+            "start_date": "2026-03-01", "end_date": "2026-03-02",
+            "base_config": {}, "grid": {},
+        })
+        assert r.status_code != 500, f"launch 500d: {r.text}"
+
+
 # ── POST /backtests/launch ───────────────────────────────
 
 class TestLaunch:
