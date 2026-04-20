@@ -4,8 +4,22 @@ WORKDIR /app
 COPY dashboard/requirements.txt ./dashboard/
 RUN pip install --no-cache-dir -r dashboard/requirements.txt
 
+# Core DB + dashboard code
 COPY db/ ./db/
 COPY dashboard/ ./dashboard/
+
+# Extras the dashboard routes import at request-time:
+#  - backtest_engine : used by dashboard/routes/backtest.py
+#                      (get_run_trades / record_trade / summary)
+#  - strategy        : StrategyRegistry lookups for the Strategies tab
+#                      and dynamic class_path resolution
+#  - utils           : occ_parser used by trades routes
+#  - config.py       : imported transitively by some strategy modules
+COPY backtest_engine/ ./backtest_engine/
+COPY strategy/ ./strategy/
+COPY utils/ ./utils/
+COPY config.py ./
+
 COPY .env* ./
 
 CMD ["uvicorn", "dashboard.app:socket_app", "--host", "0.0.0.0", "--port", "8000"]

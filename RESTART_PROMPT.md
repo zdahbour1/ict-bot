@@ -8,9 +8,9 @@ points here.
 
 ## Last updated
 
-**Apr 19 2026 — late evening session**
-Latest commit on current branch: **`dbc0eaa`** on `feature/active-strategy-ui`
-("Fix: auto-heal bot_state when DB says running but process is dead")
+**Apr 19 2026 — post-backtest-drilldown fix**
+Latest commit on current branch: **`(pending this commit)`** on `feature/active-strategy-ui`
+("Fix: Dockerfile.api missing backtest_engine module — /api/backtests/{id} was 500ing")
 
 ---
 
@@ -46,7 +46,7 @@ Latest commit on current branch: **`dbc0eaa`** on `feature/active-strategy-ui`
 
 ## Test suite
 
-- **251 passed + 3 expected skips** as of `dbc0eaa`
+- **271 passed + 3 expected skips** as of latest commit
 - Run: `DATABASE_URL="postgresql://ict_bot:ict_bot_dev@localhost:5432/ict_bot" python -m pytest tests/ -q`
 - DB-persistent runs: `PYTEST_DB_REPORT=1 ...` then view at Tests tab
 
