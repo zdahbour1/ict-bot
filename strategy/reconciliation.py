@@ -87,6 +87,11 @@ def _reconcile(client, exit_manager, ib_positions):
         return
 
     # ══════════════════════════════════════════════════════════
+    # Detailed tracking so the summary shows WHAT was closed/adopted,
+    # not just counts. Each entry is a single-line human-readable string.
+    closed_items: list[str] = []
+    adopted_items: list[str] = []
+
     # PASS 1: DB → IB (close DB trades that no longer exist on IB)
     # ══════════════════════════════════════════════════════════
     closed_count = 0
@@ -118,6 +123,7 @@ def _reconcile(client, exit_manager, ib_positions):
             from db.writer import close_trade
             close_trade(db_id, exit_price, result, "RECONCILE", {"source": "periodic", "detail": "closed on IB"})
             closed_count += 1
+            closed_items.append(f"{ticker} {symbol} db_id={db_id} {result}({pnl_pct:+.1%})")
             log.info(f"[RECONCILE] Closed db_id={db_id} {ticker}: {result} P&L={pnl_pct:+.1%}")
         except Exception as e:
             log.error(f"[RECONCILE] Failed to close db_id={db_id}: {e}")
@@ -181,17 +187,33 @@ def _reconcile(client, exit_manager, ib_positions):
                 log.error(f"[RECONCILE] DB retry failed for {ticker} {sym}: {e}")
 
         adopted_count += 1
+        adopted_items.append(
+            f"{ticker} {sym} {qty}x@${avg_cost:.2f} {direction} "
+            f"db_id={trade.get('db_id', 'MISSING')}"
+        )
         log.info(f"[RECONCILE] Adopted {ticker} {sym} (conId={con_id}): "
                  f"{qty}x @ ${avg_cost:.2f} {direction} db_id={trade.get('db_id', 'MISSING')}")
 
     # ── Summary ──
     total_ib = len(ib_by_con_id)
     total_db = len(db_open_trades)
-    summary = (f"closed={closed_count}, adopted={adopted_count}, "
-               f"IB={total_ib}, DB was={total_db}, DB now={total_db - closed_count + adopted_count}")
-    log.info(f"[RECONCILE] Done: {summary}")
-    _log_to_db("info", f"Reconciliation: {summary}")
-    _update_thread("idle", f"Done: {summary}")
+    headline = (f"closed={closed_count}, adopted={adopted_count}, "
+                f"IB={total_ib}, DB was={total_db}, "
+                f"DB now={total_db - closed_count + adopted_count}")
+
+    # Build a detail string that names WHICH trades were touched. When
+    # counts are 0 on both sides, omit detail so the log stays concise.
+    details_parts: list[str] = []
+    if closed_items:
+        details_parts.append("closed: [" + "; ".join(closed_items) + "]")
+    if adopted_items:
+        details_parts.append("adopted: [" + "; ".join(adopted_items) + "]")
+    detail = (" | " + " | ".join(details_parts)) if details_parts else ""
+
+    full_summary = headline + detail
+    log.info(f"[RECONCILE] Done: {full_summary}")
+    _log_to_db("info", f"Reconciliation: {full_summary}")
+    _update_thread("idle", f"Done: {headline}")  # thread status stays terse
     log.info("=" * 50)
 
     exit_manager.invalidate_cache()  # Force refresh from DB on next access

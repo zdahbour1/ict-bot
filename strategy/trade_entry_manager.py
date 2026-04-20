@@ -170,6 +170,14 @@ class TradeEntryManager:
         2. _ib_preflight_check() — IB check (positions, open orders)
         Only if BOTH pass do we place the order.
         """
+        # Top-line log so the order flow is easy to follow in bot.log:
+        # "signal found → pre-flight → place order → bracket back".
+        log.info(
+            f"[{self.ticker}] SIGNAL→ORDER: {signal.signal_type} "
+            f"entry=${signal.entry_price:.2f} sl=${signal.sl:.2f} tp=${signal.tp:.2f} "
+            f"— running pre-flight"
+        )
+
         allowed, reason = self.can_enter()
         if not allowed:
             log.info(f"[{self.ticker}] Entry blocked: {reason}")
@@ -251,6 +259,12 @@ class TradeEntryManager:
         """
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         try:
+            leg = "PUT" if signal.direction == "SHORT" else "CALL"
+            log.info(
+                f"[{self.ticker}] PLACING ORDER: signal={signal.signal_type} "
+                f"leg={leg} (entry=${signal.entry_price:.2f} "
+                f"sl=${signal.sl:.2f} tp=${signal.tp:.2f})"
+            )
             if signal.direction == "SHORT":
                 future = pool.submit(select_and_enter_put, self.client, self.ticker)
             else:

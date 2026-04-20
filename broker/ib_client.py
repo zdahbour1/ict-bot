@@ -491,7 +491,8 @@ class IBClient:
         log.info(f"[IB] BRACKET {action}: {contracts}x {option_symbol} — "
                  f"parent={parent.orderId} permId={perm_id} conId={con_id} "
                  f"status={status} fill=${fill_price:.2f} "
-                 f"TP={tp_order.orderId}(perm={tp_perm_id}) SL={sl_order.orderId}(perm={sl_perm_id})")
+                 f"TP={tp_order.orderId}(perm={tp_perm_id}) @ ${tp_price:.2f} "
+                 f"SL={sl_order.orderId}(perm={sl_perm_id}) @ ${sl_price:.2f}")
 
         result = {
             "symbol": option_symbol,

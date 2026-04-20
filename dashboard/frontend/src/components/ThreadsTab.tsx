@@ -27,6 +27,22 @@ function relativeTime(ts: string | null): string {
   return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m ago`;
 }
 
+// Format a DB timestamp as MM-DD HH:MM:SS explicitly in Pacific Time.
+// DB stores UTC; we always render PT to match bot.log (which uses PT).
+// Returns "04-20 07:25:58 PT"; adds date prefix so day boundaries are visible.
+function fmtLogTime(ts: string | null): string {
+  if (!ts) return '-';
+  const d = new Date(ts);
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Los_Angeles',
+    month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: false,
+  }).formatToParts(d);
+  const get = (t: string) => parts.find(p => p.type === t)?.value ?? '';
+  return `${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')} PT`;
+}
+
 function StatusBadge({ status, health }: { status: string; health: 'ok' | 'stale' | 'dead' }) {
   // Override status display if stale or dead
   if (health === 'dead' && status !== 'stopped') {
@@ -328,7 +344,12 @@ export default function ThreadsTab() {
       {showSysLog && (
         <div className="mt-4 bg-[#161b22] border border-[#30363d] rounded-lg">
           <div className="flex items-center justify-between px-4 py-3 border-b border-[#30363d]">
-            <h3 className="text-sm font-semibold text-gray-300">System Log</h3>
+            <h3 className="text-sm font-semibold text-gray-300">
+              System Log
+              <span className="ml-2 text-[10px] text-gray-500 font-normal">
+                (times shown in Pacific Time · MM-DD HH:MM:SS)
+              </span>
+            </h3>
             <div className="flex items-center gap-2">
               {['all', 'error', 'warn'].map(level => (
                 <button key={level} onClick={() => setSysLogLevel(level)}
@@ -365,7 +386,7 @@ export default function ThreadsTab() {
                     return (
                       <tr key={log.id} className="hover:bg-[#1c2128] border-b border-[#21262d]">
                         <td className="px-3 py-1.5 text-gray-500 whitespace-nowrap">
-                          {log.created_at ? new Date(log.created_at).toLocaleTimeString() : '-'}
+                          {fmtLogTime(log.created_at)}
                         </td>
                         <td className="px-3 py-1.5">
                           <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${levelColors[log.level] || 'text-gray-400'}`}>
@@ -421,7 +442,7 @@ export default function ThreadsTab() {
                     <div key={log.id} className="bg-[#0d1117] border border-[#21262d] rounded px-3 py-2">
                       <div className="flex items-center gap-2 mb-1">
                         <span className="text-xs text-gray-500">
-                          {log.created_at ? new Date(log.created_at).toLocaleTimeString() : '-'}
+                          {fmtLogTime(log.created_at)}
                         </span>
                         <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${levelColors[log.level] || 'text-gray-400'}`}>
                           {log.level.toUpperCase()}
@@ -458,7 +479,7 @@ export default function ThreadsTab() {
                   <div key={e.id} className="bg-[#0d1117] border border-[#21262d] rounded-lg p-3">
                     <div className="flex items-center justify-between mb-1">
                       <span className="text-xs font-semibold text-red-400">{e.error_type}</span>
-                      <span className="text-xs text-gray-500">{new Date(e.created_at).toLocaleString()}</span>
+                      <span className="text-xs text-gray-500">{fmtLogTime(e.created_at)}</span>
                     </div>
                     <div className="text-sm text-gray-300 mb-1">{e.message}</div>
                     {e.traceback && (
