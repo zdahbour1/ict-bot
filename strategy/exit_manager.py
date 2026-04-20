@@ -292,6 +292,93 @@ class ExitManager:
         # ── Process UI commands ───────────────────────
         self._process_ui_commands()
 
+    def _verify_close_on_ib(self, trade: dict) -> bool:
+        """Post-close verification (Fix C — docs/roll_close_bug_fixes.md).
+
+        Poll IB for up to 3 seconds, expecting:
+          1. Position qty for this contract = 0 (our SELL filled, or
+             the bracket fired)
+          2. No remaining working orders (any stragglers get cancelled
+             defensively to prevent a later bracket trigger from
+             flipping us short)
+
+        Returns True if IB side is clean, False if position is still
+        non-zero after the poll window. False means the caller MUST
+        release the DB lock WITHOUT calling finalize_close so the next
+        exit cycle retries.
+
+        If we cannot verify (no conId, IB queries all fail) we return
+        True to avoid blocking the close — the pre-existing behavior.
+        The caller's reconciliation loop is the backstop.
+        """
+        import time
+        ticker = trade.get("ticker", "UNK")
+        con_id = trade.get("ib_con_id")
+        symbol = trade.get("symbol", "")
+
+        if not con_id:
+            log.warning(f"[{ticker}] VERIFY CLOSE: no conId — skipping verification")
+            return True
+
+        # _bracket_fired flag is set by execute_exit when the bracket
+        # closed the position before we could send our own SELL. In
+        # that case we already know position is 0; skip the poll.
+        if trade.get("_bracket_fired"):
+            log.info(f"[{ticker}] VERIFY CLOSE: bracket already fired, skipping poll")
+            # Still refresh + sweep orders defensively
+            self._cancel_stragglers(trade)
+            return True
+
+        # Poll position up to 3s (6 × 500ms). Our SELL may still be
+        # working when we arrive here; give it time to fill.
+        final_qty = None
+        for attempt in range(6):
+            time.sleep(0.5)
+            try:
+                qty = self.client.get_position_quantity(con_id)
+                final_qty = qty
+                if qty == 0:
+                    log.info(f"[{ticker}] VERIFY CLOSE: position=0 after "
+                             f"{(attempt + 1) * 0.5:.1f}s — sweeping stragglers")
+                    self._cancel_stragglers(trade)
+                    return True
+            except Exception as e:
+                log.warning(f"[{ticker}] VERIFY CLOSE attempt {attempt}: {e}")
+
+        log.error(f"[{ticker}] VERIFY CLOSE FAILED: position still "
+                  f"{final_qty} after 3s (symbol={symbol}, conId={con_id}) — "
+                  f"releasing DB lock, will retry next cycle")
+        return False
+
+    def _cancel_stragglers(self, trade: dict) -> None:
+        """Cancel any leftover working orders for this contract. Called
+        after a verified close to prevent a forgotten bracket from
+        firing later and flipping us into a short position (the IWM
+        incident 2026-04-20)."""
+        ticker = trade.get("ticker", "UNK")
+        con_id = trade.get("ib_con_id")
+        symbol = (trade.get("symbol") or "").replace(" ", "")
+        if not con_id:
+            return
+        try:
+            # Refresh cross-client view first (Fix A)
+            self.client.refresh_all_open_orders()
+            stragglers = self.client.find_open_orders_for_contract(con_id, symbol)
+        except Exception as e:
+            log.warning(f"[{ticker}] VERIFY CLOSE: straggler query failed: {e}")
+            return
+        if not stragglers:
+            return
+        log.warning(f"[{ticker}] VERIFY CLOSE: {len(stragglers)} straggler "
+                    f"orders found after close — cancelling defensively: "
+                    f"{[o.get('orderId') for o in stragglers]}")
+        for o in stragglers:
+            try:
+                self.client.cancel_order_by_id(o["orderId"])
+            except Exception as e:
+                log.warning(f"[{ticker}] VERIFY CLOSE: failed to cancel "
+                            f"orderId={o.get('orderId')}: {e}")
+
     def _atomic_close(self, trade: dict, current_price: float, result: str,
                       reason: str, pnl_pct: float, should_roll: bool,
                       reason_detail: str = ""):
@@ -355,6 +442,23 @@ class ExitManager:
             else:
                 execute_exit(self.client, live_trade, reason)
                 rolled = None
+
+            # ── FIX C (docs/roll_close_bug_fixes.md) ─────────────────
+            # Verify IB actually flattened BEFORE we mark the trade
+            # closed in the DB. If the sell never fired (Bug A or B),
+            # or if it fired but the fill was partial, or if brackets
+            # stayed alive and caused a position flip, we MUST NOT
+            # call finalize_close. Release the lock and let the next
+            # exit cycle retry. Violates ARCH-005 otherwise.
+            close_ok = self._verify_close_on_ib(live_trade)
+            if not close_ok:
+                log.error(
+                    f"[{ticker}] CLOSE VERIFICATION FAILED — not finalizing DB close. "
+                    f"db_id={trade_id} will stay open, next exit cycle will retry."
+                )
+                release_trade_lock(session)
+                self.invalidate_cache()
+                return
 
             # Step 4: Collect enrichment
             exit_enrichment = safe_call(

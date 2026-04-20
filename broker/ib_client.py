@@ -553,6 +553,45 @@ class IBClient:
                 self.ib.cancelOrder(trade.order)
                 log.info(f"[IB] Cancelled orderId={trade.order.orderId}")
 
+    def refresh_all_open_orders(self) -> int:
+        """Refresh local ``openTrades()`` cache with orders from EVERY
+        clientId in the IB account, not just this connection's.
+
+        Fix for cross-client bracket blindness (docs/roll_close_bug_fixes.md):
+        brackets are placed via the entry manager's IB client (e.g. clientId=3);
+        the exit manager queries via its own client (e.g. clientId=1) which by
+        default only sees its own orders. Calling ``reqAllOpenOrders()`` is a
+        one-shot RPC that delivers ``openOrder`` callbacks for all clients,
+        merging them into this connection's ``wrapper.trades`` dict.
+
+        Call this BEFORE any ``find_open_orders_for_contract`` query that
+        cares about brackets placed by a different pool connection (e.g.
+        the exit/close flow). Returns the number of trades visible after
+        refresh.
+        """
+        try:
+            return self._submit_to_ib(self._ib_refresh_all_open_orders, timeout=10)
+        except Exception as e:
+            log.warning(f"refresh_all_open_orders failed: {e}")
+            return 0
+
+    def _ib_refresh_all_open_orders(self) -> int:
+        """Runs on IB thread. Triggers reqAllOpenOrders and gives ib_async
+        a moment to process the incoming events before we read openTrades()."""
+        try:
+            self.ib.reqAllOpenOrders()
+        except Exception as e:
+            log.warning(f"[IB] reqAllOpenOrders failed: {e}")
+            return len(self.ib.openTrades())
+        # Give ib_async a brief window to process the returned events.
+        # reqAllOpenOrders returns immediately; the callbacks populate
+        # wrapper.trades asynchronously. 250ms is enough in practice.
+        try:
+            self.ib.sleep(0.25)
+        except Exception:
+            pass
+        return len(self.ib.openTrades())
+
     def find_open_orders_for_contract(self, con_id: int, symbol: str) -> list:
         """Find ALL open orders on IB for a specific contract.
         Searches by conId (primary) and symbol (fallback). Thread-safe."""

@@ -57,6 +57,18 @@ def cancel_all_orders_and_verify(client, trade: dict) -> bool:
     con_id = trade.get("ib_con_id")
     symbol = (trade.get("symbol") or "").replace(" ", "")
 
+    # FIX A (docs/roll_close_bug_fixes.md): refresh openTrades() with orders
+    # from every client in the account before querying. Entry manager places
+    # brackets on clientId=3; exit manager queries on clientId=1. Without
+    # this refresh, cross-client brackets are invisible and we leave them
+    # alive on IB after the close.
+    try:
+        total_visible = client.refresh_all_open_orders()
+        _trace(ticker, f"STEP 0: reqAllOpenOrders → {total_visible} trades "
+                       "visible (cross-client merge)")
+    except Exception as e:
+        _trace(ticker, f"STEP 0: refresh_all_open_orders failed: {e}", "warn")
+
     _trace(ticker, f"STEP 1: Finding ALL open orders for conId={con_id} symbol={symbol}")
 
     # STEP 1: Find all open orders
@@ -226,12 +238,19 @@ def execute_exit(client, trade: dict, reason: str) -> float | None:
         log.info(f"{'='*60}")
         return None
 
-    if (trade.get("direction") == "LONG" and ib_qty < 0) or \
-       (trade.get("direction") == "SHORT" and ib_qty > 0):
-        log.error(f"[{ticker}] EXECUTE EXIT ABORTED — direction mismatch! "
-                  f"Trade={trade.get('direction')} but IB qty={ib_qty}")
+    # FIX B (docs/roll_close_bug_fixes.md): the previous check was inverted
+    # for ICT's convention where direction=SHORT means "bearish / long puts"
+    # (we BUY puts, so ib_qty is POSITIVE, not negative). The bot currently
+    # supports only long-options strategies — any active trade should have
+    # ib_qty > 0 on IB regardless of direction. Any negative qty indicates
+    # either a reconciliation bug or a naked-short position we can't close
+    # with a simple SELL.
+    if ib_qty < 0:
+        log.error(f"[{ticker}] EXECUTE EXIT ABORTED — NEGATIVE position on IB "
+                  f"(qty={ib_qty}). Bot only supports long-options strategies; "
+                  f"a SELL here would widen the short. Manual intervention required.")
         from strategy.error_handler import handle_error
-        handle_error(f"exit_executor-{ticker}", "position_direction_mismatch",
+        handle_error(f"exit_executor-{ticker}", "negative_position_on_close",
                      RuntimeError(f"Direction={trade.get('direction')}, IB qty={ib_qty}"),
                      context={"ticker": ticker, "symbol": symbol,
                               "ib_qty": ib_qty, "con_id": con_id},
