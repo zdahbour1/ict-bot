@@ -19,21 +19,58 @@ def _trigger_orphan_scan_fast_path(client, ticker: str, option_symbol: str,
                                     order_result: dict) -> None:
     """Immediate orphan scan when IB error 201 indicates stale brackets.
 
-    Bypasses the 60s grace period that the periodic detector uses, because
-    IB's error 201 ("Cannot have open orders on both sides of the same
-    US Option contract") is direct, unambiguous evidence that orphaned
-    SELL brackets exist on this contract. We can cancel them now and
-    unblock the next entry attempt.
+    IB error 201 ("Cannot have open orders on both sides of the same US
+    Option contract") has TWO possible causes:
 
-    Skips the suspect-queue dance entirely: refresh, find SELL orders on
-    this contract, cancel them, audit. The periodic detector's
-    multi-phase logic is still the right default for the general case;
-    this is a directed fast-path for the one error pattern where
-    single-phase action is demonstrably safe.
+      (a) ORPHANS — SELL orders left over from a closed trade. The
+          intended target of this fast-path.
+      (b) LEGITIMATE DUPLICATE — an existing open trade on the same
+          contract is running its bracket, and we just tried to stack
+          another BUY on top. Cancelling those SELLs would strip the
+          live trade of its TP/SL. DANGEROUS.
+
+    We discriminate by checking the DB: if there's an open trade with
+    the same conId, we SKIP the fast-path entirely. The 201 is
+    legitimate — whoever fired the duplicate entry is the one with
+    the bug, not IB.
+
+    When we DO cancel, we target by permId (globally unique across IB
+    clients) rather than orderId (which is per-client and can collide).
+    Audit messages reflect the ACTUAL cancelled order's symbol/price,
+    not the rejected entry's — important when orderIds collide across
+    stale sessions.
     """
     con_id = order_result.get("con_id")
     if not con_id:
         log.warning(f"[{ticker}] Orphan fast-path: no conId on order_result — skip")
+        return
+
+    # GUARD: don't run the fast-path if an open DB trade lives on this
+    # contract. Its bracket is legitimate, not orphaned.
+    try:
+        from db.connection import get_session
+        from sqlalchemy import text
+        session = get_session()
+        has_open_trade = False
+        if session is not None:
+            row = session.execute(
+                text("SELECT id FROM trades "
+                     "WHERE ib_con_id = :cid AND status = 'open' LIMIT 1"),
+                {"cid": con_id},
+            ).fetchone()
+            session.close()
+            has_open_trade = row is not None
+        if has_open_trade:
+            log.info(
+                f"[{ticker}] Orphan fast-path: SKIPPED — open DB trade exists "
+                f"on conId={con_id}. Error 201 is legitimate (duplicate entry "
+                f"guard). Not touching any SELL orders on this contract."
+            )
+            return
+    except Exception as e:
+        # If the DB check fails we prefer the SAFE default — skip, not act.
+        log.warning(f"[{ticker}] Orphan fast-path: DB guard query failed: {e} "
+                    f"— skipping to stay safe")
         return
 
     try:
@@ -48,39 +85,48 @@ def _trigger_orphan_scan_fast_path(client, ticker: str, option_symbol: str,
         o for o in orders
         if o.get("action") == "SELL"
         and o.get("status") in ("Submitted", "PreSubmitted", "PendingSubmit")
+        and (o.get("parentId") or 0) != 0  # bracket children only — never touch standalone SELLs
     ]
     if not candidates:
-        log.info(f"[{ticker}] Orphan fast-path: no SELL orders found on "
+        log.info(f"[{ticker}] Orphan fast-path: no SELL bracket children found on "
                  f"{option_symbol} — 201 may be stale; no action")
         return
 
     log.warning(f"[{ticker}] Orphan fast-path: IB error 201 on {option_symbol} "
                 f"— cancelling {len(candidates)} stale SELL order(s): "
-                f"{[o.get('orderId') for o in candidates]}")
+                f"{[(o.get('orderId'), o.get('permId')) for o in candidates]}")
 
     from strategy.audit import log_trade_action
     for o in candidates:
         order_id = o.get("orderId")
+        perm_id = o.get("permId")
+        # Each candidate order has its OWN symbol/price — use that in
+        # the audit, not the rejected-entry's option_symbol. OrderIds
+        # aren't unique across clients; permId is.
+        actual_symbol = o.get("symbol") or option_symbol
+        actual_price = o.get("lmtPrice") or o.get("auxPrice")
         try:
             client.cancel_order_by_id(order_id)
         except Exception as e:
             log.warning(f"[{ticker}] Orphan fast-path: cancel of "
-                        f"orderId={order_id} failed: {e}")
+                        f"orderId={order_id} permId={perm_id} failed: {e}")
         log_trade_action(
             None, "cancel_orphan_bracket", "option_selector",
             f"IB error 201 fast-path: cancelled orderId={order_id} "
-            f"on {option_symbol} ({o.get('orderType')} @ "
-            f"${o.get('lmtPrice') or o.get('auxPrice')})",
+            f"permId={perm_id} on {actual_symbol} "
+            f"({o.get('orderType')} @ ${actual_price})",
             level="warn",
             extra={
                 "ticker":    ticker,
                 "orderId":   order_id,
-                "permId":    o.get("permId"),
+                "permId":    perm_id,
                 "conId":     con_id,
-                "symbol":    option_symbol,
+                "symbol":    actual_symbol,         # actual cancelled order's symbol
+                "rejected_entry_symbol": option_symbol,  # for context
                 "orderType": o.get("orderType"),
                 "trigger":   "ib_error_201_fast_path",
-                "price_level": o.get("lmtPrice") or o.get("auxPrice"),
+                "price_level": actual_price,
+                "clientId":  o.get("clientId"),
             },
         )
 
