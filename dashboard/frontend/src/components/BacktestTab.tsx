@@ -418,7 +418,15 @@ export default function BacktestTab() {
       </div>
 
       {/* ── Drill-down ── */}
-      {selectedRunId != null && <RunDetail runId={selectedRunId} />}
+      {selectedRunId != null ? (
+        <RunDetail runId={selectedRunId} />
+      ) : (
+        <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-6 text-center text-gray-500">
+          Click a run in the table above to see details.
+          <br />
+          <span className="text-xs">(selectedRunId is null; auto-select fires when runs finish loading)</span>
+        </div>
+      )}
 
       {showLaunch && (
         <LaunchDialog
@@ -436,42 +444,104 @@ export default function BacktestTab() {
 // ─────────────────────────────────────────────────────────
 
 function RunDetail({ runId }: { runId: number }) {
-  // Detail: one-shot (no polling). Backtests are immutable once complete
-  // and runs can have 400+ trades — polling was downloading 600KB+ every
-  // 10s and freezing the browser on large runs.
-  const { data: detail } = useApi<{ run: BacktestRun; trade_count: number }>(
-    `/backtests/${runId}`
-  );
-  const { data: analytics } = useApi<Analytics>(
-    `/backtests/${runId}/analytics`
-  );
-  const { data: features } = useApi<FeatureAnalysis>(
-    `/backtests/${runId}/feature_analysis`
-  );
+  // ─── DIRECT FETCH (bypasses useApi — isolates from any hook bug) ───
+  const [detail, setDetail] = useState<{ run: BacktestRun; trade_count: number } | null>(null);
+  const [detailErr, setDetailErr] = useState<string | null>(null);
+  const [analytics, setAnalytics] = useState<Analytics | null>(null);
+  const [features, setFeatures] = useState<FeatureAnalysis | null>(null);
 
-  const run = detail?.run;
-
-  // Trades fetched separately with pagination + filter
+  // Trades (pagination + filter)
   const [tradeFilter, setTradeFilter] = useState<'all' | 'WIN' | 'LOSS'>('all');
   const [page, setPage] = useState(0);
   const pageSize = 100;
-  const outcomeParam = tradeFilter === 'all' ? '' : `&outcome=${tradeFilter}`;
-  const { data: tradesResp } = useApi<{
+  const [tradesResp, setTradesResp] = useState<{
     trades: BacktestTrade[]; total: number; limit: number; offset: number;
-  }>(`/backtests/${runId}/trades?limit=${pageSize}&offset=${page * pageSize}${outcomeParam}`);
+  } | null>(null);
+  const [tradesErr, setTradesErr] = useState<string | null>(null);
+  const [tradesLoading, setTradesLoading] = useState(false);
 
+  useEffect(() => {
+    console.log(`[RunDetail ${runId}] mounting / runId changed; fetching detail`);
+    setDetail(null);
+    setDetailErr(null);
+    setPage(0);
+    fetch(`/api/backtests/${runId}`)
+      .then(r => {
+        if (!r.ok) throw new Error(`GET /api/backtests/${runId} → HTTP ${r.status}`);
+        return r.json();
+      })
+      .then(d => { console.log(`[RunDetail ${runId}] detail ok:`, d); setDetail(d); })
+      .catch(e => { console.error(`[RunDetail ${runId}] detail err:`, e); setDetailErr(e.message); });
+
+    fetch(`/api/backtests/${runId}/analytics`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => setAnalytics(d))
+      .catch(e => console.warn(`[RunDetail ${runId}] analytics err:`, e));
+
+    fetch(`/api/backtests/${runId}/feature_analysis`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => setFeatures(d))
+      .catch(e => console.warn(`[RunDetail ${runId}] features err:`, e));
+  }, [runId]);
+
+  useEffect(() => {
+    const outcomeParam = tradeFilter === 'all' ? '' : `&outcome=${tradeFilter}`;
+    const url = `/api/backtests/${runId}/trades?limit=${pageSize}&offset=${page * pageSize}${outcomeParam}`;
+    console.log(`[RunDetail ${runId}] fetching trades: ${url}`);
+    setTradesLoading(true);
+    setTradesErr(null);
+    fetch(url)
+      .then(r => {
+        if (!r.ok) throw new Error(`GET trades → HTTP ${r.status}`);
+        return r.json();
+      })
+      .then(d => { console.log(`[RunDetail ${runId}] trades ok: ${d?.trades?.length}/${d?.total}`); setTradesResp(d); })
+      .catch(e => { console.error(`[RunDetail ${runId}] trades err:`, e); setTradesErr(e.message); })
+      .finally(() => setTradesLoading(false));
+  }, [runId, page, tradeFilter]);
+
+  const run = detail?.run;
   const trades = tradesResp?.trades || [];
   const totalTrades = tradesResp?.total ?? detail?.trade_count ?? 0;
   const totalPages = Math.max(1, Math.ceil(totalTrades / pageSize));
-
-  // Reset to page 0 on filter change
-  const filteredTrades = trades;  // Already filtered by the API
+  const filteredTrades = trades;  // API-filtered
   const onFilterChange = (f: 'all' | 'WIN' | 'LOSS') => {
-    setTradeFilter(f);
-    setPage(0);
+    setTradeFilter(f); setPage(0);
   };
 
-  if (!run) return <div className="text-gray-500 py-8 text-center">Loading run…</div>;
+  // ─── Explicit error + loading states so we never show blank ───
+  if (detailErr) {
+    return (
+      <div className="bg-red-500/10 border border-red-500/30 text-red-400 rounded p-4">
+        <div className="font-bold mb-2">Failed to load run #{runId}</div>
+        <div className="text-xs font-mono">{detailErr}</div>
+        <div className="text-xs text-gray-500 mt-2">
+          Check browser DevTools Network tab and F12 console for details.
+        </div>
+      </div>
+    );
+  }
+  if (!run) {
+    return (
+      <div className="bg-[#161b22] border border-[#30363d] rounded p-6 text-center">
+        <div className="text-gray-400">Loading run #{runId}...</div>
+        <div className="text-xs text-gray-500 mt-2">
+          Open F12 console — you'll see fetch events prefixed [RunDetail {runId}]
+        </div>
+      </div>
+    );
+  }
+
+  // Defensive access for ALL fields used in the render — any undefined
+  // that would've crashed .toFixed() previously now falls back to 0.
+  const _winRate = run.win_rate ?? 0;
+  const _totalPnl = run.total_pnl ?? 0;
+  const _maxDD = run.max_drawdown ?? 0;
+  const _avgHold = run.avg_hold_min ?? 0;
+  const _totalTradesRun = run.total_trades ?? 0;
+  const _wins = run.wins ?? 0;
+  const _losses = run.losses ?? 0;
+  const _profitFactor = run.profit_factor;
 
   const maxTickerPnl = Math.max(1, ...(analytics?.pnl_by_ticker || []).map(t => Math.abs(t.pnl)));
   const maxReasonCount = Math.max(1, ...(analytics?.by_reason || []).map(t => t.count));
@@ -481,12 +551,12 @@ function RunDetail({ runId }: { runId: number }) {
     <div className="space-y-4">
       {/* Summary cards */}
       <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
-        <SummaryCard label="Trades" value={String(run.total_trades)} sub={`${run.wins}W / ${run.losses}L`} />
-        <SummaryCard label="Win Rate" value={`${run.win_rate.toFixed(1)}%`} />
-        <SummaryCard label="Total P&L" value={fmtUsd(run.total_pnl)} color={pnlColor(run.total_pnl)} />
-        <SummaryCard label="Profit Factor" value={run.profit_factor != null ? run.profit_factor.toFixed(2) : '—'} />
-        <SummaryCard label="Max DD" value={fmtUsd(run.max_drawdown)} color="text-red-400" />
-        <SummaryCard label="Avg Hold" value={`${run.avg_hold_min.toFixed(0)}m`} />
+        <SummaryCard label="Trades" value={String(_totalTradesRun)} sub={`${_wins}W / ${_losses}L`} />
+        <SummaryCard label="Win Rate" value={`${Number(_winRate).toFixed(1)}%`} />
+        <SummaryCard label="Total P&L" value={fmtUsd(_totalPnl)} color={pnlColor(_totalPnl)} />
+        <SummaryCard label="Profit Factor" value={_profitFactor != null ? Number(_profitFactor).toFixed(2) : '—'} />
+        <SummaryCard label="Max DD" value={fmtUsd(_maxDD)} color="text-red-400" />
+        <SummaryCard label="Avg Hold" value={`${Number(_avgHold).toFixed(0)}m`} />
       </div>
 
       {/* Charts row */}
@@ -562,7 +632,13 @@ function RunDetail({ runId }: { runId: number }) {
           <h3 className="text-sm font-semibold text-gray-300">
             Trades {' '}
             <span className="text-gray-500 font-normal">
-              ({page * pageSize + 1}–{Math.min((page + 1) * pageSize, totalTrades)} of {totalTrades})
+              {tradesLoading
+                ? '(loading…)'
+                : tradesErr
+                  ? <span className="text-red-400">(ERROR: {tradesErr})</span>
+                  : totalTrades > 0
+                    ? `(${page * pageSize + 1}–${Math.min((page + 1) * pageSize, totalTrades)} of ${totalTrades})`
+                    : '(0 trades)'}
             </span>
           </h3>
           <div className="flex items-center gap-2">
@@ -622,9 +698,20 @@ function RunDetail({ runId }: { runId: number }) {
                   </td>
                 </tr>
               ))}
-              {filteredTrades.length === 0 && (
+              {filteredTrades.length === 0 && !tradesLoading && (
                 <tr>
-                  <td colSpan={9} className="px-2 py-4 text-center text-gray-500">No trades.</td>
+                  <td colSpan={9} className="px-2 py-4 text-center text-gray-500">
+                    {tradesErr
+                      ? `Error: ${tradesErr}`
+                      : totalTrades === 0
+                        ? `No trades in this run.`
+                        : `No trades on this page (page ${page + 1} of ${totalPages}).`}
+                  </td>
+                </tr>
+              )}
+              {tradesLoading && (
+                <tr>
+                  <td colSpan={9} className="px-2 py-4 text-center text-gray-500">Loading trades…</td>
                 </tr>
               )}
             </tbody>
