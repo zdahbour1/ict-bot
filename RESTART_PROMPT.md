@@ -8,16 +8,30 @@ points here.
 
 ## Last updated
 
-**Apr 19 2026 — FOP data provider shipped; profitability next**
-Latest commit on current branch: **`(pending this commit)`** on `feature/fop-data-provider`
-("FOP IB historical data provider + engine dispatch + 31 unit + 1 real-IB test passed")
+**Apr 19-20 2026 — Profitability research: ICT + ORB now profitable**
+Latest commit: `c14dd1c` on `feature/profitability-research`
+("Engine: wire Black-Scholes pricer — ICT + ORB now profitable")
 
-Previous: drill-down UI parked per user direction. Three fixes applied
-(0d69e86 API module, e980b2c pagination, b1ffb50 nginx cache) are all
-correct and shipped; user's browser state couldn't confirm them.
+Headline: with realistic BS option pricing (replacing the 5x leverage
+proxy), ICT and ORB both show profit over 60 days on QQQ+SPY+IWM.
+Runs visible in dashboard: 717 (ICT +$1,616), 718 (ORB +$1,302),
+719 (VWAP -$1,728).
 
-Next: `feature/profitability-research` — Black-Scholes pricer,
-parameter sweeps, honest P&L numbers.
+Still to ship on this branch:
+  - Parameter sweep framework (find optimal PT/SL combos, especially
+    for VWAP which still loses)
+  - Per-ticker breakdown
+  - Longer backtests (yfinance 1h goes back 2 years)
+
+Previous work landed on parallel branches:
+  - feature/fop-data-provider (80f3b51)  IB historical data + UI drill-down defensive rewrite
+  - feature/active-strategy-ui          Strategies tab, bot-stuck heal, drill-down fixes
+  - feature/futures-options             FOP contract foundation
+  - feature/vwap-revert, feature/orb-live — strategy plugins
+
+Drill-down UI still broken per user (confirmed in incognito + Edge).
+Defensive rewrite with console diagnostics on feature/fop-data-provider
+(commit 80f3b51) — awaits user browser evidence.
 
 ## ⚠️ KNOWN ISSUE: backtest drill-down UI
 
@@ -77,7 +91,7 @@ revalidated or users pin to stale code.
 
 ## Test suite
 
-- **279 passed + 3 expected skips** as of latest commit
+- **347 passed + 4 expected skips** as of c14dd1c
 - Run: `DATABASE_URL="postgresql://ict_bot:ict_bot_dev@localhost:5432/ict_bot" python -m pytest tests/ -q`
 - DB-persistent runs: `PYTEST_DB_REPORT=1 ...` then view at Tests tab
 
