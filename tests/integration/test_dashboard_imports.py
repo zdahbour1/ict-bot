@@ -109,7 +109,7 @@ class TestBacktestDetailRegression:
         yield run_id
         delete_run(run_id)
 
-    def test_get_backtest_returns_200_and_trades(
+    def test_get_backtest_returns_200(
         self, client, seeded_run_with_trades,
     ):
         run_id = seeded_run_with_trades
@@ -124,8 +124,20 @@ class TestBacktestDetailRegression:
         assert r.status_code == 200, r.text
         data = r.json()
         assert "run" in data
-        assert "trades" in data
         assert data["trade_count"] >= 1
+
+    def test_trades_pagination_endpoint_works(
+        self, client, seeded_run_with_trades,
+    ):
+        """The new /trades paginated endpoint should also be reachable."""
+        run_id = seeded_run_with_trades
+        r = client.get(f"/api/backtests/{run_id}/trades?limit=5")
+        assert r.status_code != 500, r.text
+        assert r.status_code == 200
+        data = r.json()
+        assert "trades" in data
+        assert "total" in data
+        assert data["total"] >= 1
 
     def test_analytics_and_feature_analysis_too(
         self, client, seeded_run_with_trades,

@@ -103,8 +103,20 @@ def list_strategies_for_backtest():
 
 
 @router.get("/backtests/{run_id}")
-def get_backtest(run_id: int):
-    """Run + its config + trades (drill-down)."""
+def get_backtest(
+    run_id: int,
+    include_trades: bool = Query(False, description="Include trades inline (capped at `trade_limit`). "
+                                                     "Prefer /backtests/{id}/trades with pagination for "
+                                                     "large runs."),
+    trade_limit: int = Query(100, ge=1, le=2000),
+):
+    """Run + its config. Returns trade_count but NOT the full trade list by
+    default — historical backtests can have 100s of trades each ~1.5KB
+    with indicator enrichment. Fetch trades via /backtests/{id}/trades
+    with pagination.
+
+    For small runs or backward-compat callers that expected the inline
+    'trades' array, pass ?include_trades=true (capped at trade_limit)."""
     session = get_session()
     if session is None:
         raise HTTPException(503, "Database not available")
@@ -115,20 +127,184 @@ def get_backtest(run_id: int):
         if row is None:
             raise HTTPException(404, f"backtest {run_id} not found")
 
-        # Fetch config separately (not in the base SELECT)
         cfg_row = session.execute(
             text("SELECT config, notes FROM backtest_runs WHERE id = :id"),
             {"id": run_id},
         ).fetchone()
+        trade_count = session.execute(
+            text("SELECT COUNT(*) FROM backtest_trades WHERE run_id = :id"),
+            {"id": run_id},
+        ).scalar() or 0
 
         run = _run_to_dict(row)
         run["config"] = cfg_row[0] if cfg_row else {}
         run["notes"] = cfg_row[1] if cfg_row else None
 
-        # Trades
-        from backtest_engine.writer import get_run_trades
-        trades = get_run_trades(run_id)
-        return {"run": run, "trades": trades, "trade_count": len(trades)}
+        result = {
+            "run": run,
+            "trade_count": int(trade_count),
+            "trades": [],   # always present so old callers don't KeyError
+        }
+        if include_trades:
+            result["trades"] = _fetch_trades_page(
+                session, run_id, limit=trade_limit, offset=0,
+                outcome=None,
+            )
+        return result
+    finally:
+        session.close()
+
+
+def _fetch_trades_page(
+    session,
+    run_id: int,
+    *,
+    limit: int,
+    offset: int,
+    outcome: Optional[str],
+) -> list[dict]:
+    """Shared pagination helper used by both the inline-include path
+    and the dedicated /trades endpoint."""
+    clauses = ["run_id = :rid"]
+    params: dict = {"rid": run_id, "lim": limit, "off": offset}
+    if outcome:
+        clauses.append("exit_result = :out")
+        params["out"] = outcome
+
+    rows = session.execute(
+        text(
+            "SELECT id, ticker, symbol, direction, contracts, "
+            "  entry_price, exit_price, pnl_pct, pnl_usd, peak_pnl_pct, "
+            "  entry_time, exit_time, hold_minutes, "
+            "  signal_type, exit_reason, exit_result, "
+            "  tp_trailed, rolled "
+            "FROM backtest_trades "
+            f"WHERE {' AND '.join(clauses)} "
+            "ORDER BY entry_time "
+            "LIMIT :lim OFFSET :off"
+        ),
+        params,
+    ).fetchall()
+
+    return [
+        {
+            "id": r[0], "ticker": r[1], "symbol": r[2], "direction": r[3],
+            "contracts": r[4],
+            "entry_price": float(r[5]) if r[5] is not None else None,
+            "exit_price": float(r[6]) if r[6] is not None else None,
+            "pnl_pct": float(r[7]) if r[7] is not None else 0.0,
+            "pnl_usd": float(r[8]) if r[8] is not None else 0.0,
+            "peak_pnl_pct": float(r[9]) if r[9] is not None else 0.0,
+            "entry_time": r[10].isoformat() if r[10] else None,
+            "exit_time": r[11].isoformat() if r[11] else None,
+            "hold_minutes": float(r[12]) if r[12] is not None else None,
+            "signal_type": r[13], "exit_reason": r[14], "exit_result": r[15],
+            "tp_trailed": bool(r[16]) if r[16] is not None else False,
+            "rolled": bool(r[17]) if r[17] is not None else False,
+        }
+        for r in rows
+    ]
+
+
+@router.get("/backtests/{run_id}/trades")
+def get_backtest_trades(
+    run_id: int,
+    limit: int = Query(100, ge=1, le=2000),
+    offset: int = Query(0, ge=0),
+    outcome: Optional[str] = Query(None, description="Filter by WIN / LOSS / SCRATCH"),
+):
+    """Paginated trades for a run. Slimmer response than the inline
+    detail — omits the big JSONB enrichment columns (entry_indicators,
+    entry_context, signal_details). Fetch a single trade's full
+    enrichment via /backtests/{id}/trades/{trade_id}."""
+    session = get_session()
+    if session is None:
+        raise HTTPException(503, "Database not available")
+    try:
+        exists = session.execute(
+            text("SELECT 1 FROM backtest_runs WHERE id = :id"), {"id": run_id}
+        ).fetchone()
+        if not exists:
+            raise HTTPException(404, f"backtest {run_id} not found")
+
+        total = session.execute(
+            text(
+                "SELECT COUNT(*) FROM backtest_trades WHERE run_id = :id"
+                + (" AND exit_result = :out" if outcome else "")
+            ),
+            {"id": run_id, **({"out": outcome} if outcome else {})},
+        ).scalar() or 0
+
+        trades = _fetch_trades_page(
+            session, run_id, limit=limit, offset=offset, outcome=outcome,
+        )
+        return {
+            "trades": trades,
+            "total": int(total),
+            "limit": limit,
+            "offset": offset,
+            "outcome": outcome,
+        }
+    finally:
+        session.close()
+
+
+@router.get("/backtests/{run_id}/trades/{trade_id}")
+def get_backtest_trade_detail(run_id: int, trade_id: int):
+    """Full detail for a single trade including the JSONB enrichment
+    (entry_indicators, exit_indicators, entry_context, signal_details).
+    This is what the UI fetches on "expand row"."""
+    session = get_session()
+    if session is None:
+        raise HTTPException(503, "Database not available")
+    try:
+        row = session.execute(
+            text(
+                "SELECT id, run_id, ticker, symbol, direction, contracts, "
+                "  entry_price, exit_price, pnl_pct, pnl_usd, peak_pnl_pct, "
+                "  slippage_paid, commission, "
+                "  entry_time, exit_time, hold_minutes, "
+                "  signal_type, exit_reason, exit_result, "
+                "  tp_level, sl_level, dynamic_sl_pct, tp_trailed, rolled, "
+                "  entry_indicators, exit_indicators, entry_context, signal_details, "
+                "  sec_type, multiplier, exchange, currency, underlying, strategy_config "
+                "FROM backtest_trades WHERE id = :tid AND run_id = :rid"
+            ),
+            {"tid": trade_id, "rid": run_id},
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404, f"trade {trade_id} not found in run {run_id}")
+        return {
+            "id": row[0], "run_id": row[1],
+            "ticker": row[2], "symbol": row[3], "direction": row[4],
+            "contracts": row[5],
+            "entry_price": float(row[6]) if row[6] is not None else None,
+            "exit_price": float(row[7]) if row[7] is not None else None,
+            "pnl_pct": float(row[8]) if row[8] is not None else 0.0,
+            "pnl_usd": float(row[9]) if row[9] is not None else 0.0,
+            "peak_pnl_pct": float(row[10]) if row[10] is not None else 0.0,
+            "slippage_paid": float(row[11]) if row[11] is not None else 0.0,
+            "commission": float(row[12]) if row[12] is not None else 0.0,
+            "entry_time": row[13].isoformat() if row[13] else None,
+            "exit_time": row[14].isoformat() if row[14] else None,
+            "hold_minutes": float(row[15]) if row[15] is not None else None,
+            "signal_type": row[16], "exit_reason": row[17], "exit_result": row[18],
+            "tp_level": float(row[19]) if row[19] is not None else None,
+            "sl_level": float(row[20]) if row[20] is not None else None,
+            "dynamic_sl_pct": float(row[21]) if row[21] is not None else None,
+            "tp_trailed": bool(row[22]) if row[22] is not None else False,
+            "rolled": bool(row[23]) if row[23] is not None else False,
+            "entry_indicators": row[24] or {},
+            "exit_indicators": row[25] or {},
+            "entry_context": row[26] or {},
+            "signal_details": row[27] or {},
+            "sec_type": row[28],
+            "multiplier": row[29],
+            "exchange": row[30],
+            "currency": row[31],
+            "underlying": row[32],
+            "strategy_config": row[33] or {},
+        }
     finally:
         session.close()
 

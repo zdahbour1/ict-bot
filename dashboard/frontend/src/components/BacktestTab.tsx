@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useApi } from '../hooks/useApi';
 
 // ─────────────────────────────────────────────────────────
@@ -436,24 +436,40 @@ export default function BacktestTab() {
 // ─────────────────────────────────────────────────────────
 
 function RunDetail({ runId }: { runId: number }) {
-  const { data: detail } = useApi<{ run: BacktestRun; trades: BacktestTrade[] }>(
-    `/backtests/${runId}`, 10000
+  // Detail: one-shot (no polling). Backtests are immutable once complete
+  // and runs can have 400+ trades — polling was downloading 600KB+ every
+  // 10s and freezing the browser on large runs.
+  const { data: detail } = useApi<{ run: BacktestRun; trade_count: number }>(
+    `/backtests/${runId}`
   );
   const { data: analytics } = useApi<Analytics>(
-    `/backtests/${runId}/analytics`, 30000
+    `/backtests/${runId}/analytics`
   );
   const { data: features } = useApi<FeatureAnalysis>(
-    `/backtests/${runId}/feature_analysis`, 30000
+    `/backtests/${runId}/feature_analysis`
   );
 
   const run = detail?.run;
-  const trades = detail?.trades || [];
 
+  // Trades fetched separately with pagination + filter
   const [tradeFilter, setTradeFilter] = useState<'all' | 'WIN' | 'LOSS'>('all');
-  const filteredTrades = useMemo(() => {
-    if (tradeFilter === 'all') return trades;
-    return trades.filter(t => t.exit_result === tradeFilter);
-  }, [trades, tradeFilter]);
+  const [page, setPage] = useState(0);
+  const pageSize = 100;
+  const outcomeParam = tradeFilter === 'all' ? '' : `&outcome=${tradeFilter}`;
+  const { data: tradesResp } = useApi<{
+    trades: BacktestTrade[]; total: number; limit: number; offset: number;
+  }>(`/backtests/${runId}/trades?limit=${pageSize}&offset=${page * pageSize}${outcomeParam}`);
+
+  const trades = tradesResp?.trades || [];
+  const totalTrades = tradesResp?.total ?? detail?.trade_count ?? 0;
+  const totalPages = Math.max(1, Math.ceil(totalTrades / pageSize));
+
+  // Reset to page 0 on filter change
+  const filteredTrades = trades;  // Already filtered by the API
+  const onFilterChange = (f: 'all' | 'WIN' | 'LOSS') => {
+    setTradeFilter(f);
+    setPage(0);
+  };
 
   if (!run) return <div className="text-gray-500 py-8 text-center">Loading run…</div>;
 
@@ -543,14 +559,31 @@ function RunDetail({ runId }: { runId: number }) {
       {/* Trades table */}
       <div className="bg-[#161b22] border border-[#30363d] rounded-lg">
         <div className="flex items-center justify-between px-4 py-3 border-b border-[#30363d]">
-          <h3 className="text-sm font-semibold text-gray-300">Trades ({filteredTrades.length})</h3>
+          <h3 className="text-sm font-semibold text-gray-300">
+            Trades {' '}
+            <span className="text-gray-500 font-normal">
+              ({page * pageSize + 1}–{Math.min((page + 1) * pageSize, totalTrades)} of {totalTrades})
+            </span>
+          </h3>
           <div className="flex items-center gap-2">
             {(['all', 'WIN', 'LOSS'] as const).map(f => (
-              <button key={f} onClick={() => setTradeFilter(f)}
+              <button key={f} onClick={() => onFilterChange(f)}
                       className={`px-2 py-0.5 text-xs rounded ${tradeFilter === f ? 'bg-blue-500/20 text-blue-400' : 'text-gray-500 hover:text-gray-300'}`}>
                 {f === 'all' ? 'All' : f}
               </button>
             ))}
+            <span className="w-2" />
+            <button onClick={() => setPage(p => Math.max(0, p - 1))}
+                    disabled={page === 0}
+                    className={`px-2 py-0.5 text-xs rounded border border-[#30363d] ${page === 0 ? 'text-gray-600 cursor-not-allowed' : 'text-gray-400 hover:text-white'}`}>
+              Prev
+            </button>
+            <span className="text-xs text-gray-500">{page + 1} / {totalPages}</span>
+            <button onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
+                    disabled={page >= totalPages - 1}
+                    className={`px-2 py-0.5 text-xs rounded border border-[#30363d] ${page >= totalPages - 1 ? 'text-gray-600 cursor-not-allowed' : 'text-gray-400 hover:text-white'}`}>
+              Next
+            </button>
           </div>
         </div>
         <div className="max-h-[60vh] overflow-y-auto">

@@ -132,17 +132,89 @@ class TestListBacktests:
 # ── GET /backtests/{id} ──────────────────────────────────
 
 class TestGetBacktest:
-    def test_returns_run_with_trades(self, client, seeded_run):
+    def test_returns_run_without_trades_by_default(self, client, seeded_run):
+        """As of the pagination fix, /backtests/{id} is slim by default
+        — returns run + trade_count but NOT the full trade list. This
+        prevents 600KB+ payloads on runs with hundreds of trades."""
         r = client.get(f"/api/backtests/{seeded_run}")
         assert r.status_code == 200
         data = r.json()
         assert data["run"]["id"] == seeded_run
         assert data["trade_count"] == 3
-        assert len(data["trades"]) == 3
+        assert data["trades"] == []   # trades excluded by default
         assert data["run"]["strategy_name"] == "ict"
+
+    def test_include_trades_inline_still_works(self, client, seeded_run):
+        """Backward-compat: ?include_trades=true embeds up to trade_limit."""
+        r = client.get(f"/api/backtests/{seeded_run}?include_trades=true&trade_limit=10")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["trade_count"] == 3
+        assert len(data["trades"]) == 3
 
     def test_404_on_missing_run(self, client):
         r = client.get("/api/backtests/999999")
+        assert r.status_code == 404
+
+
+# ── GET /backtests/{id}/trades (paginated) ───────────────
+
+class TestTradesPagination:
+    def test_default_page(self, client, seeded_run):
+        r = client.get(f"/api/backtests/{seeded_run}/trades")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["total"] == 3
+        assert len(data["trades"]) == 3
+        assert data["limit"] == 100
+        assert data["offset"] == 0
+
+    def test_limit_and_offset(self, client, seeded_run):
+        r = client.get(f"/api/backtests/{seeded_run}/trades?limit=2&offset=0")
+        data = r.json()
+        assert len(data["trades"]) == 2
+        assert data["total"] == 3   # total is unfiltered count
+
+        r2 = client.get(f"/api/backtests/{seeded_run}/trades?limit=2&offset=2")
+        data2 = r2.json()
+        assert len(data2["trades"]) == 1
+
+    def test_outcome_filter(self, client, seeded_run):
+        r = client.get(f"/api/backtests/{seeded_run}/trades?outcome=WIN")
+        data = r.json()
+        # Our seeded run has 2 WINs (QQQ LONG + SPY SHORT) and 1 LOSS
+        assert data["total"] == 2
+        assert all(t["exit_result"] == "WIN" for t in data["trades"])
+
+    def test_trades_endpoint_omits_big_jsonb(self, client, seeded_run):
+        """The paginated endpoint should NOT embed the JSONB enrichment —
+        that's what keeps payloads small. Fetch one trade's full detail
+        via /trades/{id} for expand-row."""
+        r = client.get(f"/api/backtests/{seeded_run}/trades")
+        t = r.json()["trades"][0]
+        assert "entry_indicators" not in t
+        assert "exit_indicators" not in t
+        assert "signal_details" not in t
+
+
+class TestTradeDetail:
+    def test_full_trade_detail_has_enrichment(self, client, seeded_run):
+        """Fetch a single trade → should include the JSONB enrichment."""
+        list_r = client.get(f"/api/backtests/{seeded_run}/trades?limit=1")
+        trade_id = list_r.json()["trades"][0]["id"]
+
+        r = client.get(f"/api/backtests/{seeded_run}/trades/{trade_id}")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["id"] == trade_id
+        # JSONB enrichment present
+        assert "entry_indicators" in data
+        assert "exit_indicators" in data
+        assert "entry_context" in data
+        assert "signal_details" in data
+
+    def test_404_on_missing_trade(self, client, seeded_run):
+        r = client.get(f"/api/backtests/{seeded_run}/trades/9999999")
         assert r.status_code == 404
 
 

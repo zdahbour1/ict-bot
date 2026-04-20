@@ -8,9 +8,11 @@ points here.
 
 ## Last updated
 
-**Apr 19 2026 — post-backtest-drilldown fix**
+**Apr 19 2026 — post-pagination fix**
 Latest commit on current branch: **`(pending this commit)`** on `feature/active-strategy-ui`
-("Fix: Dockerfile.api missing backtest_engine module — /api/backtests/{id} was 500ing")
+("Fix: backtest drill-down payload + polling — paginated /trades + /trades/{id}")
+
+Previous: `0d69e86` fixed the 500 from missing backtest_engine module.
 
 ---
 
@@ -46,7 +48,7 @@ Latest commit on current branch: **`(pending this commit)`** on `feature/active-
 
 ## Test suite
 
-- **271 passed + 3 expected skips** as of latest commit
+- **279 passed + 3 expected skips** as of latest commit
 - Run: `DATABASE_URL="postgresql://ict_bot:ict_bot_dev@localhost:5432/ict_bot" python -m pytest tests/ -q`
 - DB-persistent runs: `PYTEST_DB_REPORT=1 ...` then view at Tests tab
 
