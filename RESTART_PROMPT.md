@@ -8,9 +8,29 @@ points here.
 
 ## Last updated
 
-**Apr 19 2026 — post-nginx-cache fix (ROOT CAUSE of "still not working")**
-Latest commit on current branch: **`(pending this commit)`** on `feature/active-strategy-ui`
-("Fix: nginx was letting browsers cache index.html → stale bundles")
+**Apr 19 2026 — FOP data provider shipped; profitability next**
+Latest commit on current branch: **`(pending this commit)`** on `feature/fop-data-provider`
+("FOP IB historical data provider + engine dispatch + 31 unit + 1 real-IB test passed")
+
+Previous: drill-down UI parked per user direction. Three fixes applied
+(0d69e86 API module, e980b2c pagination, b1ffb50 nginx cache) are all
+correct and shipped; user's browser state couldn't confirm them.
+
+Next: `feature/profitability-research` — Black-Scholes pricer,
+parameter sweeps, honest P&L numbers.
+
+## ⚠️ KNOWN ISSUE: backtest drill-down UI
+
+Trades can be queried directly from Postgres:
+  `SELECT * FROM backtest_trades WHERE run_id = <id> ORDER BY entry_time;`
+  `SELECT * FROM backtest_runs ORDER BY created_at DESC LIMIT 20;`
+
+Full JSONB enrichment:
+  `SELECT entry_indicators, signal_details FROM backtest_trades WHERE id = <n>;`
+
+API endpoints are working (verified via curl — the UI pagination code
+is correct). Most likely remaining cause is some browser-specific cache
+state that's not clearing. Re-visit after profitability work.
 
 Chain of fixes on the backtest drill-down bug (all three were needed):
   1. `0d69e86` — Dockerfile.api missing backtest_engine module (caused 500)

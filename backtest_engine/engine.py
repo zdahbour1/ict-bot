@@ -225,12 +225,56 @@ def _simulate_ticker(
 ) -> list[dict]:
     """Simulate one ticker over the date range. Returns a list of trade dicts."""
     progress(f"{ticker}: loading bars…")
-    tf = fetch_multi_timeframe(
-        ticker,
-        base_interval=cfg.get("base_interval", "5m"),
-        start=start_date,
-        end=end_date,
-    )
+
+    # Dispatch data provider by sec_type. Equity options + stocks go via
+    # yfinance (free, sub-minute-fast). Futures + FOP go via IB historical
+    # data (requires TWS). The config can force a provider with
+    # `cfg['data_provider']` = 'yfinance' | 'ib'.
+    sec_type = (cfg.get("sec_type") or "OPT").upper()
+    forced = (cfg.get("data_provider") or "").lower()
+    use_ib = forced == "ib" or (forced != "yfinance" and sec_type in ("FOP", "FUT"))
+
+    if use_ib:
+        from backtest_engine.data_provider_ib import (
+            fetch_multi_timeframe_ib, IBContractSpec, spec_from_ticker_row,
+        )
+        # Caller must supply FOP contract details in cfg (expiry, strike,
+        # right). For STK/FUT, we build a minimal spec from config.
+        try:
+            if sec_type == "FOP":
+                spec = spec_from_ticker_row(
+                    ticker_symbol=ticker,
+                    last_trade_date=cfg["fop_expiry"],
+                    strike=float(cfg["fop_strike"]),
+                    right=cfg.get("fop_right", "C"),
+                )
+            else:
+                spec = IBContractSpec(
+                    sec_type=sec_type,
+                    symbol=ticker,
+                    exchange=cfg.get("exchange", "SMART"),
+                    currency=cfg.get("currency", "USD"),
+                    contract_month=cfg.get("contract_month"),
+                )
+        except Exception as e:
+            progress(f"{ticker}: IB spec build failed — {e}")
+            return []
+
+        duration_days = (end_date - start_date).days or 1
+        tf = fetch_multi_timeframe_ib(
+            spec,
+            base_interval=cfg.get("base_interval", "5m"),
+            end=end_date,
+            duration_days=duration_days,
+        )
+    else:
+        tf = fetch_multi_timeframe(
+            ticker,
+            base_interval=cfg.get("base_interval", "5m"),
+            start=start_date,
+            end=end_date,
+        )
+
     base = tf["base"]
     if base.empty:
         progress(f"{ticker}: no bars — skipped")
