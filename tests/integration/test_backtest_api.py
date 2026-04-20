@@ -344,6 +344,52 @@ class TestRunsListSort:
         assert r.status_code == 200
         assert r.json()["total"] == 0
 
+    def test_column_filter_numeric_greater(self, client, seeded_run):
+        r = client.get("/api/backtests?filter=total_pnl:>1000&limit=200")
+        assert r.status_code == 200
+        for run in r.json()["runs"]:
+            assert run["total_pnl"] > 1000
+
+    def test_column_filter_numeric_less(self, client, seeded_run):
+        r = client.get("/api/backtests?filter=total_pnl:<0&limit=200")
+        for run in r.json()["runs"]:
+            assert run["total_pnl"] < 0
+
+    def test_column_filter_text_substring(self, client, seeded_run):
+        # name ILIKE '%api-test%' should match seeded_run
+        r = client.get("/api/backtests?filter=name:api-test&limit=200")
+        ids = [run["id"] for run in r.json()["runs"]]
+        assert seeded_run in ids
+
+    def test_column_filter_unknown_key_ignored(self, client, seeded_run):
+        # Unknown column must be silently dropped (defense in depth)
+        r = client.get("/api/backtests?filter=dangerous_col:DROP&limit=5")
+        assert r.status_code == 200
+
+    def test_column_filter_multiple_anded(self, client, seeded_run):
+        r = client.get("/api/backtests?filter=total_pnl:>=0&filter=trades:>=1&limit=200")
+        for run in r.json()["runs"]:
+            assert run["total_pnl"] >= 0
+            assert run["total_trades"] >= 1
+
+
+class TestTradesColumnFilters:
+    def test_trades_filter_by_pnl(self, client, seeded_run):
+        r = client.get(f"/api/backtests/{seeded_run}/trades?filter=pnl_usd:>100")
+        for t in r.json()["trades"]:
+            assert t["pnl_usd"] > 100
+
+    def test_trades_filter_by_ticker_substring(self, client, seeded_run):
+        r = client.get(f"/api/backtests/{seeded_run}/trades?filter=ticker:QQ")
+        for t in r.json()["trades"]:
+            assert "QQ" in t["ticker"]
+
+    def test_trades_filter_count_respects_filter(self, client, seeded_run):
+        all_r = client.get(f"/api/backtests/{seeded_run}/trades").json()
+        pos_r = client.get(f"/api/backtests/{seeded_run}/trades?filter=pnl_usd:>0").json()
+        # total must reflect the filter, not the whole run
+        assert pos_r["total"] <= all_r["total"]
+
 
 # ── GET /backtests/{id}/trades with server-side sort ────
 

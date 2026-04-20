@@ -102,16 +102,24 @@ interface ServerSortCtrl {
   onChange: (key: string | null, dir: SortDir) => void;
 }
 
+interface ServerFilterCtrl {
+  filters: Record<string, string>;
+  onChange: (filters: Record<string, string>) => void;
+}
+
 function useSortableFilterable<T>(
-  rows: T[], cols: ColDef<T>[], serverSort?: ServerSortCtrl,
+  rows: T[], cols: ColDef<T>[],
+  serverSort?: ServerSortCtrl,
+  serverFilter?: ServerFilterCtrl,
 ) {
   const [localSortKey, setLocalSortKey] = useState<string | null>(null);
   const [localSortDir, setLocalSortDir] = useState<SortDir>(null);
-  const [filters, setFilters] = useState<Record<string, string>>({});
+  const [localFilters, setLocalFilters] = useState<Record<string, string>>({});
 
-  // If server-side sort is in use, bypass local sort state entirely.
+  // If server-side sort/filter is in use, bypass local state entirely.
   const sortKey = serverSort ? serverSort.sortKey : localSortKey;
   const sortDir = serverSort ? serverSort.sortDir : localSortDir;
+  const filters = serverFilter ? serverFilter.filters : localFilters;
 
   const toggleSort = (key: string) => {
     const advance = (curKey: string | null, curDir: SortDir): [string | null, SortDir] => {
@@ -130,12 +138,34 @@ function useSortableFilterable<T>(
   };
 
   const setFilter = (key: string, value: string) => {
-    setFilters(f => ({ ...f, [key]: value }));
+    if (serverFilter) {
+      serverFilter.onChange({ ...serverFilter.filters, [key]: value });
+    } else {
+      setLocalFilters(f => ({ ...f, [key]: value }));
+    }
   };
 
   const processed = useMemo(() => {
     let out = rows;
-    // Filter
+    // Filter — skip locally when backend is filtering
+    if (serverFilter) return (() => {
+      // still apply sort locally if serverSort absent
+      if (!serverSort && sortKey && sortDir) {
+        const col = cols.find(c => c.key === sortKey);
+        if (col) {
+          const mul = sortDir === 'asc' ? 1 : -1;
+          out = [...out].sort((a, b) => {
+            const av = col.get(a), bv = col.get(b);
+            if (av == null && bv == null) return 0;
+            if (av == null) return 1;
+            if (bv == null) return -1;
+            if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * mul;
+            return String(av).localeCompare(String(bv)) * mul;
+          });
+        }
+      }
+      return out;
+    })();
     for (const c of cols) {
       const raw = filters[c.key];
       if (!raw || !c.filterable) continue;
@@ -181,7 +211,7 @@ function useSortableFilterable<T>(
       }
     }
     return out;
-  }, [rows, cols, filters, sortKey, sortDir, !!serverSort]);
+  }, [rows, cols, filters, sortKey, sortDir, !!serverSort, !!serverFilter]);
 
   return { processed, sortKey, sortDir, toggleSort, filters, setFilter };
 }
@@ -210,7 +240,8 @@ function SortHeader<T>({ col, sortKey, sortDir, onClick }: {
 // ─────────────────────────────────────────────────────────
 
 function RunsTable({ runs, total, selectedRunId, onRunClick, onDelete,
-                     sortKey, sortDir, onSortChange }: {
+                     sortKey, sortDir, onSortChange,
+                     columnFilters, onColumnFiltersChange }: {
   runs: RunRow[];
   total?: number;
   selectedRunId: number | null;
@@ -219,6 +250,8 @@ function RunsTable({ runs, total, selectedRunId, onRunClick, onDelete,
   sortKey: string | null;
   sortDir: SortDir;
   onSortChange: (key: string | null, dir: SortDir) => void;
+  columnFilters: Record<string, string>;
+  onColumnFiltersChange: (f: Record<string, string>) => void;
 }) {
   const cols: ColDef<RunRow>[] = useMemo(() => [
     { key: 'id',          label: 'ID',      get: r => r.id,          render: r => <span className="text-gray-500">#{r.id}</span>, filterable: true, filterType: 'number' },
@@ -241,6 +274,9 @@ function RunsTable({ runs, total, selectedRunId, onRunClick, onDelete,
     toggleSort, filters, setFilter,
   } = useSortableFilterable(runs, cols, {
     sortKey, sortDir, onChange: onSortChange,
+  }, {
+    filters: columnFilters,
+    onChange: onColumnFiltersChange,
   });
   const hasFilters = Object.values(filters).some(v => v?.trim());
 
@@ -253,7 +289,7 @@ function RunsTable({ runs, total, selectedRunId, onRunClick, onDelete,
           {hasFilters && <button onClick={() => Object.keys(filters).forEach(k => setFilter(k, ''))}
             className="ml-2 text-blue-400 hover:text-blue-300">(clear filters)</button>}
         </span>
-        <span className="text-gray-600">Click a header to sort (server-side across ALL runs) · filters run client-side on the loaded page</span>
+        <span className="text-gray-600">Sort + filters are server-side across ALL runs (numeric: &gt;N, &lt;N, &gt;=N, &lt;=N, =N)</span>
       </div>
       <table className="w-full text-sm">
         <thead>
@@ -315,9 +351,10 @@ function RunsTable({ runs, total, selectedRunId, onRunClick, onDelete,
 // TradesTable — sortable + filterable trades list for the modal
 // ─────────────────────────────────────────────────────────
 
-function TradesTable({ trades, serverSort }: {
+function TradesTable({ trades, serverSort, serverFilter }: {
   trades: TradeRow[];
   serverSort?: ServerSortCtrl;
+  serverFilter?: ServerFilterCtrl;
 }) {
   const cols: ColDef<TradeRow>[] = useMemo(() => [
     { key: 'ticker',      label: 'Ticker',   get: t => t.ticker,       render: t => <span className="text-gray-200">{t.ticker}</span>, filterable: true, filterType: 'text' },
@@ -334,7 +371,7 @@ function TradesTable({ trades, serverSort }: {
   ], []);
 
   const { processed, sortKey, sortDir, toggleSort, filters, setFilter } =
-    useSortableFilterable(trades, cols, serverSort);
+    useSortableFilterable(trades, cols, serverSort, serverFilter);
   const hasFilters = Object.values(filters).some(v => v?.trim());
 
   return (
@@ -856,23 +893,36 @@ function TradesModal(props: TradesModalProps) {
   // Server-side sort state (re-queries on change)
   const [sortKey, setSortKey] = useState<string | null>(null);
   const [sortDir, setSortDir] = useState<SortDir>(null);
+  // Server-side column filters (debounced)
+  const [columnFilters, setColumnFilters] = useState<Record<string, string>>({});
+  const [debouncedCF, setDebouncedCF] = useState<Record<string, string>>({});
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedCF(columnFilters), 300);
+    return () => clearTimeout(t);
+  }, [columnFilters]);
 
   useEffect(() => {
     setLoading(true); setErr(null);
-    const sortParams = (sortKey && sortDir)
-      ? `&sort=${sortKey}&direction=${sortDir}` : '';
-    const url = isRun
-      ? `/api/backtests/${runId}/trades?limit=${pageSize}&offset=${page * pageSize}${filter === 'all' ? '' : `&outcome=${filter}`}${sortParams}`
-      : (() => {
-          const qs = new URLSearchParams();
-          qs.set('limit', '500');
-          if (analyticsFilters?.strategy) qs.set('strategy', analyticsFilters.strategy);
-          if (analyticsFilters?.ticker) qs.set('ticker', analyticsFilters.ticker);
-          if (analyticsFilters?.run_id != null) qs.set('run_id', String(analyticsFilters.run_id));
-          if (filter !== 'all') qs.set('outcome', filter);
-          if (sortKey && sortDir) { qs.set('sort', sortKey); qs.set('direction', sortDir); }
-          return `/api/backtests/analytics/trades?${qs.toString()}`;
-        })();
+    const cfSpecs = Object.entries(debouncedCF)
+      .filter(([, v]) => v?.trim())
+      .map(([k, v]) => `${k}:${v.trim()}`);
+    const qs = new URLSearchParams();
+    if (sortKey && sortDir) { qs.set('sort', sortKey); qs.set('direction', sortDir); }
+    if (filter !== 'all') qs.set('outcome', filter);
+    for (const s of cfSpecs) qs.append('filter', s);
+
+    let url: string;
+    if (isRun) {
+      qs.set('limit', String(pageSize));
+      qs.set('offset', String(page * pageSize));
+      url = `/api/backtests/${runId}/trades?${qs.toString()}`;
+    } else {
+      qs.set('limit', '500');
+      if (analyticsFilters?.strategy) qs.set('strategy', analyticsFilters.strategy);
+      if (analyticsFilters?.ticker) qs.set('ticker', analyticsFilters.ticker);
+      if (analyticsFilters?.run_id != null) qs.set('run_id', String(analyticsFilters.run_id));
+      url = `/api/backtests/analytics/trades?${qs.toString()}`;
+    }
     fetch(url)
       .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
       .then(d => {
@@ -881,7 +931,11 @@ function TradesModal(props: TradesModalProps) {
         setLoading(false);
       })
       .catch(e => { setErr(e.message); setLoading(false); });
-  }, [isRun, runId, page, filter, sortKey, sortDir, JSON.stringify(analyticsFilters || {})]);
+  }, [isRun, runId, page, filter, sortKey, sortDir,
+      JSON.stringify(debouncedCF), JSON.stringify(analyticsFilters || {})]);
+
+  // Reset pagination when filter changes
+  useEffect(() => { setPage(0); }, [JSON.stringify(debouncedCF), filter]);
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
@@ -951,6 +1005,9 @@ function TradesModal(props: TradesModalProps) {
           {!loading && !err && <TradesTable trades={trades} serverSort={{
             sortKey, sortDir,
             onChange: (k, d) => { setSortKey(k); setSortDir(d); setPage(0); },
+          }} serverFilter={{
+            filters: columnFilters,
+            onChange: setColumnFilters,
           }} />}
         </div>
 
@@ -1127,6 +1184,13 @@ export default function BacktestTab() {
   const [runsSortKey, setRunsSortKey] = useState<string | null>(null);
   const [runsSortDir, setRunsSortDir] = useState<SortDir>(null);
   const [runsFilter, setRunsFilter] = useState<RunsFilter>({});
+  // Server-side per-column filters on the runs table (debounced).
+  const [runsColFilters, setRunsColFilters] = useState<Record<string, string>>({});
+  const [debouncedRCF, setDebouncedRCF] = useState<Record<string, string>>({});
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedRCF(runsColFilters), 300);
+    return () => clearTimeout(t);
+  }, [runsColFilters]);
   const runsLimit = 100;
 
   const fetchRuns = () => {
@@ -1139,6 +1203,9 @@ export default function BacktestTab() {
     }
     if (runsFilter.strategy) qs.set('strategy', runsFilter.strategy);
     if (runsFilter.ticker) qs.set('ticker', runsFilter.ticker);
+    for (const [k, v] of Object.entries(debouncedRCF)) {
+      if (v?.trim()) qs.append('filter', `${k}:${v.trim()}`);
+    }
     fetch(`/api/backtests?${qs.toString()}`)
       .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
       .then(d => { setRuns(d.runs || []); setRunsTotal(d.total || (d.runs?.length ?? 0)); })
@@ -1152,7 +1219,9 @@ export default function BacktestTab() {
       .catch(() => {});
   };
 
-  useEffect(() => { fetchRuns(); }, [runsSortKey, runsSortDir, runsFilter.strategy, runsFilter.ticker]);
+  useEffect(() => { fetchRuns(); },
+            [runsSortKey, runsSortDir, runsFilter.strategy, runsFilter.ticker,
+             JSON.stringify(debouncedRCF)]);
   useEffect(() => { fetchStrategies(); }, []);
 
   const applyFilter = (patch: RunsFilter) => {
@@ -1242,6 +1311,8 @@ export default function BacktestTab() {
           sortKey={runsSortKey}
           sortDir={runsSortDir}
           onSortChange={(k, d) => { setRunsSortKey(k); setRunsSortDir(d); }}
+          columnFilters={runsColFilters}
+          onColumnFiltersChange={setRunsColFilters}
         />
       </div>
 

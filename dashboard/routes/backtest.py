@@ -136,6 +136,34 @@ _TRADES_SORT_COLS = {
     "exit_reason": "exit_reason", "exit_result": "exit_result",
 }
 
+# Per-column filter whitelists. Same column keys used on the FE.
+_RUNS_FILTER_COLS = {
+    "id": "r.id", "name": "r.name", "status": "r.status",
+    "strategy": "s.name",
+    "trades": "r.total_trades", "win_rate": "r.win_rate",
+    "total_pnl": "r.total_pnl", "profit_factor": "r.profit_factor",
+    "max_drawdown": "r.max_drawdown",
+    "avg_hold_min": "r.avg_hold_min",
+    "tickers": "array_to_string(r.tickers, ',')",  # substring across list
+}
+_RUNS_NUMBER_COLS = {
+    "id", "trades", "win_rate", "total_pnl",
+    "profit_factor", "max_drawdown", "avg_hold_min",
+}
+
+_TRADES_FILTER_COLS = {
+    "id": "id", "ticker": "ticker", "symbol": "symbol",
+    "direction": "direction", "entry_price": "entry_price",
+    "exit_price": "exit_price", "pnl_usd": "pnl_usd",
+    "pnl_pct": "pnl_pct", "hold_minutes": "hold_minutes",
+    "signal_type": "signal_type", "exit_reason": "exit_reason",
+    "exit_result": "exit_result", "entry_time": "entry_time",
+}
+_TRADES_NUMBER_COLS = {
+    "id", "entry_price", "exit_price", "pnl_usd", "pnl_pct",
+    "hold_minutes",
+}
+
 
 def _sort_clause(sort: Optional[str], direction: Optional[str],
                  whitelist: dict, default: str) -> str:
@@ -157,6 +185,9 @@ def list_backtests(
     status: Optional[str] = None,
     sort: Optional[str] = None,
     direction: Optional[str] = Query(None, pattern="^(asc|desc)$"),
+    filter: list[str] = Query(default_factory=list,
+                               description="Per-column filter specs of the form col:value. "
+                                           "Numeric cols accept >N, <N, >=N, <=N, =N."),
 ):
     """Paginated backtest runs. Server-side sort via ?sort=&direction=
     on any column in _RUNS_SORT_COLS. Default order: newest first.
@@ -182,6 +213,12 @@ def list_backtests(
         if status is not None:
             clauses.append("r.status = :status")
             params["status"] = status
+        # Per-column filter specs (col:value)
+        col_clauses, col_params = _build_column_filters(
+            filter, _RUNS_FILTER_COLS, _RUNS_NUMBER_COLS, param_prefix="rf",
+        )
+        clauses.extend(col_clauses)
+        params.update(col_params)
         if clauses:
             q += "WHERE " + " AND ".join(clauses) + " "
         count_q = "SELECT COUNT(*) " + count_q_from + (
@@ -231,6 +268,7 @@ def backtest_analytics_trades(
     status: Optional[str] = "completed",
     sort: Optional[str] = None,
     direction: Optional[str] = Query(None, pattern="^(asc|desc)$"),
+    filter: list[str] = Query(default_factory=list),
 ):
     """Cross-run trade drill-down with server-side sort/filter.
 
@@ -257,6 +295,16 @@ def backtest_analytics_trades(
         if outcome:
             where.append("t.exit_result = :outcome")
             params["outcome"] = outcome
+        # Per-column filter specs prefixed for the analytics query
+        analytics_filter_cols = {k: f"t.{v}" for k, v in _TRADES_FILTER_COLS.items()}
+        analytics_filter_cols["strategy"] = "s.name"
+        analytics_number_cols = _TRADES_NUMBER_COLS
+        col_clauses, col_params = _build_column_filters(
+            filter, analytics_filter_cols, analytics_number_cols,
+            param_prefix="atf",
+        )
+        where.extend(col_clauses)
+        params.update(col_params)
         wh = " AND ".join(where)
 
         analytics_sort_cols = {k: f"t.{v}" for k, v in _TRADES_SORT_COLS.items()}
@@ -368,6 +416,7 @@ def _fetch_trades_page(
     outcome: Optional[str],
     sort: Optional[str] = None,
     direction: Optional[str] = None,
+    column_filters: Optional[list[str]] = None,
 ) -> list[dict]:
     """Shared pagination helper used by both the inline-include path
     and the dedicated /trades endpoint."""
@@ -376,6 +425,13 @@ def _fetch_trades_page(
     if outcome:
         clauses.append("exit_result = :out")
         params["out"] = outcome
+    # Per-column filter specs
+    col_clauses, col_params = _build_column_filters(
+        column_filters or [], _TRADES_FILTER_COLS, _TRADES_NUMBER_COLS,
+        param_prefix="tf",
+    )
+    clauses.extend(col_clauses)
+    params.update(col_params)
 
     order_by = _sort_clause(sort, direction, _TRADES_SORT_COLS,
                             "entry_time ASC")
@@ -422,6 +478,7 @@ def get_backtest_trades(
     outcome: Optional[str] = Query(None, description="Filter by WIN / LOSS / SCRATCH"),
     sort: Optional[str] = None,
     direction: Optional[str] = Query(None, pattern="^(asc|desc)$"),
+    filter: list[str] = Query(default_factory=list),
 ):
     """Paginated trades for a run. Slimmer response than the inline
     detail — omits the big JSONB enrichment columns (entry_indicators,
@@ -437,17 +494,29 @@ def get_backtest_trades(
         if not exists:
             raise HTTPException(404, f"backtest {run_id} not found")
 
+        # Count respects per-column filters so pagination reflects the
+        # filtered dataset, not the whole run.
+        col_clauses, col_params = _build_column_filters(
+            filter, _TRADES_FILTER_COLS, _TRADES_NUMBER_COLS,
+            param_prefix="tfc",
+        )
+        count_clauses = ["run_id = :id"]
+        count_params = {"id": run_id}
+        if outcome:
+            count_clauses.append("exit_result = :out")
+            count_params["out"] = outcome
+        count_clauses.extend(col_clauses)
+        count_params.update(col_params)
         total = session.execute(
             text(
-                "SELECT COUNT(*) FROM backtest_trades WHERE run_id = :id"
-                + (" AND exit_result = :out" if outcome else "")
-            ),
-            {"id": run_id, **({"out": outcome} if outcome else {})},
+                "SELECT COUNT(*) FROM backtest_trades WHERE "
+                + " AND ".join(count_clauses)
+            ), count_params,
         ).scalar() or 0
 
         trades = _fetch_trades_page(
             session, run_id, limit=limit, offset=offset, outcome=outcome,
-            sort=sort, direction=direction,
+            sort=sort, direction=direction, column_filters=filter,
         )
         return {
             "trades": trades,
