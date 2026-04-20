@@ -888,7 +888,15 @@ function FeatureImportanceView({ filter }: { filter: RunsFilter }) {
         <div className="space-y-2">
           <div className="text-xs text-gray-500 px-2">
             Sorted by <b>quartile spread</b> (biggest gap between best and worst quartile's win rate).
-            A spread &gt;10% means the feature is actionable.
+            Spread ≥10% means the feature is actionable.
+            {source === 'exit' && (
+              <span className="block text-yellow-500/80 mt-1">
+                ⚠ Exit indicators are measured AT trade close. Many are
+                tautological (e.g. RSI high at exit ↔ trade went up ↔ WIN).
+                Use Entry indicators for predictive signal; Exit indicators
+                are best for studying exit-timing rules.
+              </span>
+            )}
           </div>
           {data.features.map(f => <FeatureRowCard key={f.feature} f={f} />)}
         </div>
@@ -903,6 +911,10 @@ function FeatureRowCard({ f }: { f: FeatureRow }) {
   const spreadColor = spread >= 15 ? 'text-green-400'
                      : spread >= 8  ? 'text-yellow-400'
                      : 'text-gray-500';
+  // Baseline = overall win rate for this feature's decided trades
+  const baseline = f.n_wins + f.n_losses > 0
+    ? (100 * f.n_wins) / (f.n_wins + f.n_losses)
+    : 0;
 
   return (
     <div className="bg-[#0d1117] border border-[#30363d] rounded p-3">
@@ -913,6 +925,7 @@ function FeatureRowCard({ f }: { f: FeatureRow }) {
         </div>
         <div className="text-xs text-gray-500">
           n={f.n_total.toLocaleString()} · wins={f.n_wins} · losses={f.n_losses}
+          {' · baseline '}<span className="text-gray-300">{baseline.toFixed(1)}%</span>
         </div>
         <div className="text-xs text-gray-500 ml-auto">
           WIN mean: <span className="text-gray-300 font-mono">{f.win_mean ?? '—'}</span>
@@ -925,15 +938,29 @@ function FeatureRowCard({ f }: { f: FeatureRow }) {
         <div className="grid grid-cols-4 gap-2">
           {f.quartile_win_rates.map((b, i) => {
             const wr = b.win_rate;
-            const barColor = wr >= 60 ? 'bg-green-500/40' : wr >= 50 ? 'bg-yellow-500/40' : 'bg-red-500/40';
-            const textColor = wr >= 60 ? 'text-green-300' : wr >= 50 ? 'text-yellow-300' : 'text-red-300';
+            const diff = wr - baseline;
+            // Color vs. baseline, not absolute — makes a 55% look
+            // great when baseline is 45% and bad when baseline is 60%.
+            const tileColor = diff >= 5 ? 'bg-green-500/20 border-green-500/50'
+                             : diff >= -5 ? 'bg-[#161b22] border-[#30363d]'
+                             : 'bg-red-500/10 border-red-500/40';
+            const textColor = diff >= 5 ? 'text-green-300'
+                             : diff >= -5 ? 'text-gray-300'
+                             : 'text-red-300';
+            const sign = diff >= 0 ? '+' : '';
             return (
-              <div key={i} className="bg-[#161b22] border border-[#30363d] rounded p-2">
+              <div key={i} className={`border rounded p-2 ${tileColor}`}>
                 <div className="text-[10px] text-gray-500 font-mono truncate" title={b.label}>{b.label}</div>
                 <div className={`text-lg font-bold ${textColor}`}>{wr.toFixed(1)}%</div>
-                <div className="text-[10px] text-gray-600">n={b.count}</div>
-                <div className={`h-1 mt-1 ${barColor} rounded`}
-                     style={{ width: `${Math.min(100, wr)}%` }} />
+                <div className="text-[10px] text-gray-600">
+                  n={b.count} <span className={diff >= 0 ? 'text-green-400' : 'text-red-400'}>
+                    ({sign}{diff.toFixed(1)})
+                  </span>
+                </div>
+                <div className="h-1 mt-1 bg-gray-700 rounded overflow-hidden">
+                  <div className={diff >= 5 ? 'bg-green-500' : diff >= -5 ? 'bg-gray-500' : 'bg-red-500'}
+                       style={{ width: `${Math.min(100, wr)}%`, height: '100%' }} />
+                </div>
               </div>
             );
           })}
