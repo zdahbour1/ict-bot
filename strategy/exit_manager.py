@@ -183,12 +183,35 @@ class ExitManager:
             time.sleep(config.MONITOR_INTERVAL)
 
     def _check_exits(self):
-        now_pt = datetime.now(PT)
+        from strategy.market_hours import get_market_clock
+        clock = get_market_clock()
+        now_pt = clock.now_pt
 
         # Read open trades from DB (cached, refreshes every 5s)
         trades = list(self.open_trades)  # Copy to avoid mutation during iteration
 
         if not trades:
+            return
+
+        # ── Hard cutoff gate ───────────────────────────────
+        # After market close no order will fill. Sending new MKT SELLs
+        # just piles up parked orders. Skip the entire exit pipeline.
+        # See docs/market_hours_guards.md and the 2026-04-20 afternoon
+        # retry-storm that motivated this guard.
+        if clock.is_past_close():
+            return
+
+        # ── EOD sweep window ───────────────────────────────
+        # In the last N minutes before close we force-close every
+        # open trade with reason='EOD' so MKT SELLs can fill while
+        # the market is still open. Each trade is closed at most
+        # once per session via a per-trade session flag.
+        if clock.in_eod_sweep_window():
+            self._run_eod_sweep(trades)
+            # After the sweep, exit early — do NOT run normal
+            # exit_conditions in the last 5 min. Avoids a race where
+            # TP/SL/ROLL triggers fire at 12:58 on the same trade
+            # the sweep just touched.
             return
 
         # ── Remove expired contracts (using locked close) ─
@@ -291,6 +314,52 @@ class ExitManager:
 
         # ── Process UI commands ───────────────────────
         self._process_ui_commands()
+
+    def _run_eod_sweep(self, trades: list) -> None:
+        """Force-close every open trade with reason='EOD'.
+
+        Called from ``_check_exits`` when ``MarketClock.in_eod_sweep_window()``
+        is true. The lead minutes buffer (default 5 min before close)
+        gives MKT SELLs time to fill on IB.
+
+        Uses the normal ``_atomic_close`` machinery so the close follows
+        the same atomic-lock + bracket-cancel + verify flow as TP/SL
+        exits. Audit row ``close:EOD`` is emitted per trade.
+
+        De-duplication: we stamp a per-trade per-session flag so repeat
+        calls to _check_exits within the same EOD window don't re-
+        enter _atomic_close on the same trade. The flag lives in the
+        in-memory trade dict, not the DB — it's intentionally session-
+        scoped so a bot restart at 12:58 PT starts fresh.
+        """
+        swept = 0
+        for trade in trades:
+            if trade.get("_eod_closed_this_session"):
+                continue  # already handed to _atomic_close this session
+            ticker = trade.get("ticker", "UNK")
+            db_id = trade.get("db_id")
+            current_price = trade.get("current_price") or trade.get("entry_price", 0)
+            entry = trade.get("entry_price", 0) or 0
+            pnl_pct = ((current_price - entry) / entry) if entry else 0.0
+            result = ("WIN" if pnl_pct > 0.001
+                      else "LOSS" if pnl_pct < -0.001
+                      else "SCRATCH")
+            log.warning(
+                f"[{ticker}] EOD SWEEP: db_id={db_id} closing at "
+                f"${current_price:.2f} (P&L {pnl_pct:+.1%}) — market closes soon"
+            )
+            trade["_eod_closed_this_session"] = True
+            try:
+                self._atomic_close(
+                    trade, current_price, result, "EOD", pnl_pct,
+                    should_roll=False,
+                    reason_detail="force-close in EOD sweep window",
+                )
+                swept += 1
+            except Exception as e:
+                log.error(f"[{ticker}] EOD SWEEP: _atomic_close failed: {e}")
+        if swept:
+            log.warning(f"[EOD SWEEP] force-closed {swept} open trade(s)")
 
     def _verify_close_on_ib(self, trade: dict) -> bool:
         """Post-close verification (Fix C — docs/roll_close_bug_fixes.md).

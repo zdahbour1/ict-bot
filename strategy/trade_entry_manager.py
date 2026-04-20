@@ -119,6 +119,27 @@ class TradeEntryManager:
         Check all trade entry gates.
         Returns (allowed, reason).
         """
+        # EOD gate (before everything else — cheap, and blocks entries
+        # in the last N minutes before market close so a fresh bracket
+        # doesn't get torn down 30 seconds later by the EOD sweep).
+        # See strategy/market_hours.py and docs/market_hours_guards.md.
+        try:
+            from strategy.market_hours import get_market_clock
+            clock = get_market_clock()
+            if not clock.entries_allowed():
+                if clock.is_past_close():
+                    return False, "market closed (past EOD cutoff)"
+                if clock.in_eod_sweep_window():
+                    return (False,
+                            f"EOD sweep window ({clock.minutes_until_close():.0f}m "
+                            f"to close) — no new entries")
+                # Before TRADE_WINDOW_START
+                return False, "before trading window"
+        except Exception:
+            # Clock failure must not gate trades open — fall through
+            # to the other checks. Monitoring will catch any bad state.
+            pass
+
         # Already in a trade for this ticker?
         ticker_has_open = any(
             t.get("ticker") == self.ticker for t in self.exit_manager.open_trades
