@@ -166,6 +166,63 @@ class TestResolvedOrphanPruned:
         assert 9999 not in det.suspect_orders
 
 
+class TestIbError201FastPath:
+    """When IB rejects a new bracket with 'Cannot have open orders on
+    both sides of the same US Option contract' (code 201), orphaned
+    brackets are demonstrated to exist. Skip the normal 60s grace —
+    cancel immediately."""
+
+    def test_fast_path_cancels_existing_sell_orders(self):
+        from strategy.option_selector import _trigger_orphan_scan_fast_path
+
+        client = MagicMock()
+        client.refresh_all_open_orders.return_value = 3
+        client.find_open_orders_for_contract.return_value = [
+            {"orderId": 3913, "action": "SELL", "status": "Submitted",
+             "orderType": "LMT", "lmtPrice": 7.50, "auxPrice": 0.0,
+             "permId": 12345},
+            {"orderId": 3914, "action": "SELL", "status": "PreSubmitted",
+             "orderType": "STP", "lmtPrice": 0.0, "auxPrice": 1.50,
+             "permId": 12346},
+        ]
+        order_result = {"con_id": 872076986, "ib_error": {"code": 201}}
+
+        _trigger_orphan_scan_fast_path(
+            client, "INTC", "INTC260424C00066000", order_result
+        )
+
+        # Both SELL orders cancelled
+        cancelled_ids = {c.args[0] for c in client.cancel_order_by_id.call_args_list}
+        assert 3913 in cancelled_ids
+        assert 3914 in cancelled_ids
+
+    def test_fast_path_noop_when_no_sell_orders(self):
+        from strategy.option_selector import _trigger_orphan_scan_fast_path
+
+        client = MagicMock()
+        client.refresh_all_open_orders.return_value = 0
+        client.find_open_orders_for_contract.return_value = []
+        order_result = {"con_id": 999, "ib_error": {"code": 201}}
+
+        # Should not raise, should not call cancel
+        _trigger_orphan_scan_fast_path(
+            client, "INTC", "INTC260424C00066000", order_result
+        )
+        assert not client.cancel_order_by_id.called
+
+    def test_fast_path_noop_without_con_id(self):
+        from strategy.option_selector import _trigger_orphan_scan_fast_path
+
+        client = MagicMock()
+        order_result = {"ib_error": {"code": 201}}  # no con_id
+
+        _trigger_orphan_scan_fast_path(
+            client, "INTC", "INTC260424C00066000", order_result
+        )
+        # Should bail out without querying
+        assert not client.find_open_orders_for_contract.called
+
+
 class TestDetectOnlyMode:
     """auto_cancel=False: log + audit but don't cancel."""
 

@@ -15,6 +15,76 @@ FAILED_STATUSES = {"Cancelled", "Inactive", "ApiCancelled", "ApiPending", "Pendi
 WORKING_STATUSES = {"Filled", "Submitted", "PreSubmitted"}
 
 
+def _trigger_orphan_scan_fast_path(client, ticker: str, option_symbol: str,
+                                    order_result: dict) -> None:
+    """Immediate orphan scan when IB error 201 indicates stale brackets.
+
+    Bypasses the 60s grace period that the periodic detector uses, because
+    IB's error 201 ("Cannot have open orders on both sides of the same
+    US Option contract") is direct, unambiguous evidence that orphaned
+    SELL brackets exist on this contract. We can cancel them now and
+    unblock the next entry attempt.
+
+    Skips the suspect-queue dance entirely: refresh, find SELL orders on
+    this contract, cancel them, audit. The periodic detector's
+    multi-phase logic is still the right default for the general case;
+    this is a directed fast-path for the one error pattern where
+    single-phase action is demonstrably safe.
+    """
+    con_id = order_result.get("con_id")
+    if not con_id:
+        log.warning(f"[{ticker}] Orphan fast-path: no conId on order_result — skip")
+        return
+
+    try:
+        client.refresh_all_open_orders()
+        orders = client.find_open_orders_for_contract(con_id, option_symbol)
+    except Exception as e:
+        log.warning(f"[{ticker}] Orphan fast-path: query failed: {e}")
+        return
+
+    # Candidate orphans: SELL bracket children still working
+    candidates = [
+        o for o in orders
+        if o.get("action") == "SELL"
+        and o.get("status") in ("Submitted", "PreSubmitted", "PendingSubmit")
+    ]
+    if not candidates:
+        log.info(f"[{ticker}] Orphan fast-path: no SELL orders found on "
+                 f"{option_symbol} — 201 may be stale; no action")
+        return
+
+    log.warning(f"[{ticker}] Orphan fast-path: IB error 201 on {option_symbol} "
+                f"— cancelling {len(candidates)} stale SELL order(s): "
+                f"{[o.get('orderId') for o in candidates]}")
+
+    from strategy.audit import log_trade_action
+    for o in candidates:
+        order_id = o.get("orderId")
+        try:
+            client.cancel_order_by_id(order_id)
+        except Exception as e:
+            log.warning(f"[{ticker}] Orphan fast-path: cancel of "
+                        f"orderId={order_id} failed: {e}")
+        log_trade_action(
+            None, "cancel_orphan_bracket", "option_selector",
+            f"IB error 201 fast-path: cancelled orderId={order_id} "
+            f"on {option_symbol} ({o.get('orderType')} @ "
+            f"${o.get('lmtPrice') or o.get('auxPrice')})",
+            level="warn",
+            extra={
+                "ticker":    ticker,
+                "orderId":   order_id,
+                "permId":    o.get("permId"),
+                "conId":     con_id,
+                "symbol":    option_symbol,
+                "orderType": o.get("orderType"),
+                "trigger":   "ib_error_201_fast_path",
+                "price_level": o.get("lmtPrice") or o.get("auxPrice"),
+            },
+        )
+
+
 def select_and_enter(client, ticker: str = "QQQ") -> dict | None:
     """
     Called when a bullish ICT signal is detected.
@@ -77,6 +147,20 @@ def select_and_enter(client, ticker: str = "QQQ") -> dict | None:
         error_detail = f"code={ib_error.get('code')} {ib_error.get('message')}" if ib_error else "no IB error details"
         log.error(f"[{ticker}] Order REJECTED — status='{order_status}' ({error_detail}). "
                   f"Trade NOT opened.")
+
+        # FAST-PATH: IB error 201 ("Cannot have open orders on both sides
+        # of the same US Option contract") is strong evidence of orphaned
+        # SELL brackets from a prior trade. Trigger the orphan detector
+        # immediately without the usual 60s grace period — we have direct
+        # evidence something's wrong. See docs/orphan_bracket_detector.md.
+        if ib_error.get("code") == 201:
+            try:
+                _trigger_orphan_scan_fast_path(
+                    client, ticker, option_symbol, order_result
+                )
+            except Exception as e:
+                log.warning(f"[{ticker}] Fast-path orphan scan failed: {e}")
+
         try:
             from strategy.error_handler import handle_error
             handle_error(f"option_selector-{ticker}", "order_rejected",
@@ -200,6 +284,18 @@ def select_and_enter_put(client, ticker: str = "QQQ") -> dict | None:
         error_detail = f"code={ib_error.get('code')} {ib_error.get('message')}" if ib_error else "no IB error details"
         log.error(f"[{ticker}] PUT order REJECTED — status='{order_status}' ({error_detail}). "
                   f"Trade NOT opened.")
+
+        # FAST-PATH: same as the CALL branch — IB error 201 means
+        # orphaned brackets on this contract. Trigger immediate
+        # orphan scan rather than waiting for periodic reconcile.
+        if ib_error.get("code") == 201:
+            try:
+                _trigger_orphan_scan_fast_path(
+                    client, ticker, option_symbol, order_result
+                )
+            except Exception as e:
+                log.warning(f"[{ticker}] Fast-path orphan scan failed: {e}")
+
         try:
             from strategy.error_handler import handle_error
             handle_error(f"option_selector-{ticker}", "put_order_rejected",
