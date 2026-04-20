@@ -451,14 +451,29 @@ class ExitManager:
             # call finalize_close. Release the lock and let the next
             # exit cycle retry. Violates ARCH-005 otherwise.
             close_ok = self._verify_close_on_ib(live_trade)
+            from strategy.audit import log_trade_action
             if not close_ok:
                 log.error(
                     f"[{ticker}] CLOSE VERIFICATION FAILED — not finalizing DB close. "
                     f"db_id={trade_id} will stay open, next exit cycle will retry."
                 )
+                log_trade_action(
+                    trade_id, "verify_close_fail", "exit_manager",
+                    f"position did not flatten after 3s — releasing lock, will retry",
+                    level="error",
+                    extra={"ticker": ticker, "symbol": live_trade.get("symbol"),
+                           "reason": reason, "ib_con_id": live_trade.get("ib_con_id")},
+                )
                 release_trade_lock(session)
                 self.invalidate_cache()
                 return
+            # Verification passed
+            log_trade_action(
+                trade_id, "verify_close_ok", "exit_manager",
+                "IB position flattened + stragglers swept",
+                extra={"ticker": ticker, "symbol": live_trade.get("symbol"),
+                       "reason": reason},
+            )
 
             # Step 4: Collect enrichment
             exit_enrichment = safe_call(
@@ -479,6 +494,21 @@ class ExitManager:
             # Step 6: Finalize in DB and release lock
             finalize_close(session, trade_id, current_price, result, reason, exit_enrichment)
             log.info(f"[{ticker}] ATOMIC CLOSE COMPLETE: db_id={trade_id} → {result} ({reason})")
+            log_trade_action(
+                trade_id, f"close:{reason}", "exit_manager",
+                f"closed {live_trade.get('symbol')} @ ${current_price:.2f} → {result} ({reason})",
+                extra={
+                    "ticker": ticker, "symbol": live_trade.get("symbol"),
+                    "direction": live_trade.get("direction"),
+                    "contracts": live_trade.get("contracts"),
+                    "exit_price": current_price,
+                    "result": result,
+                    "reason": reason,
+                    "reason_detail": reason_detail,
+                    "pnl_pct": round(pnl_pct * 100, 2) if pnl_pct else None,
+                    "rolled": bool(should_roll),
+                },
+            )
 
             # Post-close actions (after lock released)
             if not should_roll:
@@ -490,6 +520,18 @@ class ExitManager:
                 self.add_trade(rolled)
                 log.info(f"[{ticker}] Roll complete: "
                          f"closed {live_trade.get('symbol')} → opened {rolled.get('symbol')}")
+                log_trade_action(
+                    rolled.get("db_id"), "roll_open", "exit_manager",
+                    f"rolled from {live_trade.get('symbol')} → "
+                    f"{rolled.get('symbol')} @ ${rolled.get('entry_price', 0):.2f}",
+                    extra={
+                        "ticker": ticker,
+                        "from_symbol": live_trade.get("symbol"),
+                        "from_trade_id": trade_id,
+                        "to_symbol": rolled.get("symbol"),
+                        "entry_price": rolled.get("entry_price"),
+                    },
+                )
 
             self.invalidate_cache()
 

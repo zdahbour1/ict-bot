@@ -125,6 +125,14 @@ def _reconcile(client, exit_manager, ib_positions):
             closed_count += 1
             closed_items.append(f"{ticker} {symbol} db_id={db_id} {result}({pnl_pct:+.1%})")
             log.info(f"[RECONCILE] Closed db_id={db_id} {ticker}: {result} P&L={pnl_pct:+.1%}")
+            from strategy.audit import log_trade_action
+            log_trade_action(
+                db_id, "reconcile_close", "reconciliation",
+                f"DB trade not on IB → closed with {result} (P&L {pnl_pct:+.1%})",
+                extra={"ticker": ticker, "symbol": symbol,
+                       "exit_price": exit_price, "result": result,
+                       "entry_price": entry_price, "pnl_pct": round(pnl_pct * 100, 2)},
+            )
         except Exception as e:
             log.error(f"[RECONCILE] Failed to close db_id={db_id}: {e}")
 
@@ -193,6 +201,15 @@ def _reconcile(client, exit_manager, ib_positions):
         )
         log.info(f"[RECONCILE] Adopted {ticker} {sym} (conId={con_id}): "
                  f"{qty}x @ ${avg_cost:.2f} {direction} db_id={trade.get('db_id', 'MISSING')}")
+        from strategy.audit import log_trade_action
+        log_trade_action(
+            trade.get("db_id"), "reconcile_adopt", "reconciliation",
+            f"IB orphan → adopted {sym} {qty}x @ ${avg_cost:.2f} {direction}",
+            level="warn",  # adoption means we had a DB/IB mismatch — always worth a warn
+            extra={"ticker": ticker, "symbol": sym,
+                   "direction": direction, "contracts": qty,
+                   "entry_price": avg_cost, "ib_con_id": con_id},
+        )
 
     # ── Summary ──
     total_ib = len(ib_by_con_id)

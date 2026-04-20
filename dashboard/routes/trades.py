@@ -89,6 +89,53 @@ def get_trade(trade_id: int):
         session.close()
 
 
+@router.get("/trades/{trade_id}/audit")
+def get_trade_audit(trade_id: int):
+    """Return every system_log row that touched this trade, oldest first.
+
+    Queries ``system_log.details->>'trade_id'`` which is populated by
+    ``strategy.audit.log_trade_action``. Also includes any log line
+    whose details contain ``from_trade_id`` or ``to_trade_id`` equal
+    to the given id, so roll chains are visible from both sides.
+
+    Use this to answer: "who opened this trade? who closed it? what
+    reconciled it? no mystery actions."
+    """
+    session = get_session()
+    if session is None:
+        raise HTTPException(503, "Database not available")
+    try:
+        from sqlalchemy import text
+        rows = session.execute(text(
+            """
+            SELECT id, component, level, message, details, created_at
+            FROM system_log
+            WHERE (details->>'trade_id')::int     = :tid
+               OR (details->>'from_trade_id')::int = :tid
+               OR (details->>'to_trade_id')::int   = :tid
+            ORDER BY created_at ASC
+            LIMIT 500
+            """
+        ), {"tid": trade_id}).fetchall()
+        return {
+            "trade_id": trade_id,
+            "entries": [
+                {
+                    "id": r[0],
+                    "component": r[1],
+                    "level": r[2],
+                    "message": r[3],
+                    "details": r[4] or {},
+                    "created_at": r[5].isoformat() if r[5] else None,
+                }
+                for r in rows
+            ],
+            "count": len(rows),
+        }
+    finally:
+        session.close()
+
+
 class NotesUpdate(BaseModel):
     notes: str = ""
 

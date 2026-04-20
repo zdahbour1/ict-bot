@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import {
   useReactTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel,
   flexRender, createColumnHelper, type SortingState, type ColumnFiltersState,
@@ -25,6 +25,146 @@ function PnlCell({ value }: { value: number }) {
   return <span className={color}>{value > 0 ? '+' : ''}{value.toFixed(2)}</span>;
 }
 
+
+// ── Audit trail modal — shows every system_log row touching this trade.
+//    Uses the append-only trail written by strategy.audit.log_trade_action.
+interface AuditEntry {
+  id: number;
+  component: string;
+  level: string;
+  message: string;
+  details: Record<string, any>;
+  created_at: string | null;
+}
+
+function fmtPT(iso: string | null): string {
+  if (!iso) return '-';
+  const d = new Date(iso);
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Los_Angeles',
+    month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: false,
+  }).formatToParts(d);
+  const get = (t: string) => parts.find(p => p.type === t)?.value ?? '';
+  return `${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')} PT`;
+}
+
+function AuditModal({ tradeId, ticker, onClose }: {
+  tradeId: number; ticker: string; onClose: () => void;
+}) {
+  const [entries, setEntries] = useState<AuditEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    setLoading(true); setErr(null);
+    fetch(`/api/trades/${tradeId}/audit`)
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .then(d => { setEntries(d.entries || []); setLoading(false); })
+      .catch(e => { setErr(e.message); setLoading(false); });
+  }, [tradeId]);
+
+  // ESC to close
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, [onClose]);
+
+  const levelColors: Record<string, string> = {
+    error: 'bg-red-500/20 text-red-300',
+    warn:  'bg-yellow-500/20 text-yellow-300',
+    info:  'bg-blue-500/20 text-blue-300',
+    debug: 'bg-gray-500/20 text-gray-400',
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4"
+         onClick={onClose}>
+      <div className="bg-[#161b22] border border-[#30363d] rounded-lg w-[95vw] max-w-5xl max-h-[85vh] flex flex-col shadow-2xl"
+           onClick={e => e.stopPropagation()}>
+        <div className="px-4 py-3 border-b border-[#30363d] flex items-center justify-between">
+          <div>
+            <h3 className="text-base font-semibold text-gray-200">
+              Audit Trail — {ticker} <span className="text-gray-500 font-normal">(db_id={tradeId})</span>
+            </h3>
+            <div className="text-xs text-gray-500 mt-0.5">
+              Every thread action on this trade, oldest first · times in Pacific Time
+            </div>
+          </div>
+          <button onClick={onClose}
+                  className="text-gray-500 hover:text-white text-2xl leading-none px-2"
+                  aria-label="Close">&times;</button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto">
+          {err && <div className="px-4 py-3 text-sm text-red-400">Error: {err}</div>}
+          {loading && <div className="px-4 py-6 text-sm text-gray-500 text-center">Loading…</div>}
+          {!loading && !err && entries.length === 0 && (
+            <div className="px-4 py-6 text-sm text-gray-500 text-center">
+              No audit entries found for this trade.
+            </div>
+          )}
+          {!loading && !err && entries.length > 0 && (
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="bg-[#21262d] sticky top-0">
+                  <th className="px-3 py-2 text-left text-gray-500 border-b border-[#30363d]">Time (PT)</th>
+                  <th className="px-3 py-2 text-left text-gray-500 border-b border-[#30363d]">Thread / actor</th>
+                  <th className="px-3 py-2 text-left text-gray-500 border-b border-[#30363d]">Action</th>
+                  <th className="px-3 py-2 text-left text-gray-500 border-b border-[#30363d]">Message</th>
+                </tr>
+              </thead>
+              <tbody>
+                {entries.map(e => {
+                  const action = e.details?.action ?? '—';
+                  const pyt = e.details?.py_thread;
+                  return (
+                    <tr key={e.id} className="border-b border-[#21262d] hover:bg-[#1c2128] align-top">
+                      <td className="px-3 py-1.5 whitespace-nowrap text-gray-400 font-mono">
+                        {fmtPT(e.created_at)}
+                      </td>
+                      <td className="px-3 py-1.5">
+                        <div className="text-gray-300 font-mono">{e.component}</div>
+                        {pyt && <div className="text-[10px] text-gray-600">py:{pyt}</div>}
+                      </td>
+                      <td className="px-3 py-1.5">
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${levelColors[e.level] || 'text-gray-400'}`}>
+                          {action}
+                        </span>
+                      </td>
+                      <td className="px-3 py-1.5 text-gray-300">
+                        <div>{e.message}</div>
+                        {Object.keys(e.details || {}).filter(k => !['trade_id','action','actor','py_thread'].includes(k)).length > 0 && (
+                          <details className="mt-1">
+                            <summary className="cursor-pointer text-[10px] text-gray-500 hover:text-gray-300">details</summary>
+                            <pre className="text-[10px] text-gray-500 mt-1 bg-[#0d1117] p-2 rounded overflow-x-auto">
+                              {JSON.stringify(
+                                Object.fromEntries(
+                                  Object.entries(e.details || {})
+                                    .filter(([k]) => !['trade_id','action','actor','py_thread'].includes(k))
+                                ), null, 2)}
+                            </pre>
+                          </details>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        <div className="px-4 py-2 border-t border-[#30363d] text-xs text-gray-600 text-center">
+          {entries.length} entr{entries.length === 1 ? 'y' : 'ies'} · ESC or click outside to close
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades: Trade[]; onRefresh: () => void; lastUpdated?: Date | null }) {
   const [sorting, setSorting] = useState<SortingState>([{ id: 'entry_time', desc: true }]);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
@@ -32,6 +172,7 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
   const [tickerFilter, setTickerFilter] = useState<string>('');
   const [periodFilter, setPeriodFilter] = useState<string>('today');
   const [refreshing, setRefreshing] = useState(false);
+  const [auditTrade, setAuditTrade] = useState<{ id: number; ticker: string } | null>(null);
 
   const handleRefresh = () => {
     setRefreshing(true);
@@ -169,26 +310,34 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
     col.display({
       id: 'actions',
       header: 'Actions',
-      cell: ({ row }) => {
-        if (row.original.status !== 'open') return null;
-        return (
+      cell: ({ row }) => (
+        <div className="flex items-center gap-1">
           <button
-            onClick={async () => {
-              if (confirm(`Close ${row.original.ticker} (${row.original.contracts_open} contracts)?`)) {
-                try {
-                  await apiPost(`/trades/${row.original.id}/close`);
-                  onRefresh();
-                } catch (e: any) {
-                  alert(`Close failed: ${e.message}`);
-                }
-              }
-            }}
-            className="px-2 py-1 text-xs bg-[#21262d] border border-[#30363d] text-gray-400 rounded hover:text-red-400 hover:border-red-400"
+            onClick={() => setAuditTrade({ id: row.original.id, ticker: row.original.ticker })}
+            title="Audit trail: every thread action on this trade"
+            className="px-2 py-1 text-xs bg-[#21262d] border border-[#30363d] text-gray-400 rounded hover:text-blue-400 hover:border-blue-400"
           >
-            Close
+            Audit
           </button>
-        );
-      },
+          {row.original.status === 'open' && (
+            <button
+              onClick={async () => {
+                if (confirm(`Close ${row.original.ticker} (${row.original.contracts_open} contracts)?`)) {
+                  try {
+                    await apiPost(`/trades/${row.original.id}/close`);
+                    onRefresh();
+                  } catch (e: any) {
+                    alert(`Close failed: ${e.message}`);
+                  }
+                }
+              }}
+              className="px-2 py-1 text-xs bg-[#21262d] border border-[#30363d] text-gray-400 rounded hover:text-red-400 hover:border-red-400"
+            >
+              Close
+            </button>
+          )}
+        </div>
+      ),
     }),
   ], [onRefresh]);
 
@@ -205,6 +354,11 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
 
   return (
     <div>
+      {auditTrade && (
+        <AuditModal tradeId={auditTrade.id} ticker={auditTrade.ticker}
+                    onClose={() => setAuditTrade(null)} />
+      )}
+
       {/* Controls */}
       <div className="flex items-center gap-3 mb-4">
         <button onClick={async () => { if (confirm('Close ALL open trades?')) { try { await apiPost('/trades/close-all'); onRefresh(); } catch(e:any) { alert(`Failed: ${e.message}`); } } }}

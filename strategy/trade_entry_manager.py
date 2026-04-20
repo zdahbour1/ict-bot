@@ -266,6 +266,31 @@ class TradeEntryManager:
                 self._last_trade_time = datetime.now(PT)
                 log.info(f"[{self.ticker}] Trade #{self._trades_today}/{MAX_TRADES_PER_DAY} opened: {trade.get('symbol')}")
 
+                # Audit trail — which thread opened this trade, with
+                # bracket IDs so the full story is reconstructable
+                from strategy.audit import log_trade_action
+                log_trade_action(
+                    trade.get("db_id"), "open", f"scanner-{self.ticker}",
+                    f"opened {trade.get('symbol')} @ "
+                    f"${trade.get('entry_price', 0):.2f} "
+                    f"signal={signal.signal_type}",
+                    extra={
+                        "ticker": self.ticker,
+                        "symbol": trade.get("symbol"),
+                        "direction": trade.get("direction"),
+                        "contracts": trade.get("contracts"),
+                        "entry_price": trade.get("entry_price"),
+                        "ib_order_id": trade.get("ib_order_id"),
+                        "ib_perm_id": trade.get("ib_perm_id"),
+                        "ib_tp_order_id": trade.get("ib_tp_order_id"),
+                        "ib_sl_order_id": trade.get("ib_sl_order_id"),
+                        "signal_type": signal.signal_type,
+                        "signal_entry": signal.entry_price,
+                        "signal_sl": signal.sl,
+                        "signal_tp": signal.tp,
+                    },
+                )
+
                 # Update thread status (both the scanner row and the
                 # shared entry-manager row)
                 self._update_thread_status(f"Trade #{self._trades_today} opened")
