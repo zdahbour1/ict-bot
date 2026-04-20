@@ -8,19 +8,36 @@ points here.
 
 ## Last updated
 
-**Apr 20 2026 — Simplified Backtest page + parameter sweep**
-Latest commit: `(pending)` on `feature/profitability-research`
-("Simplify Backtest page + parameter sweep framework + 10 unit tests")
+**Apr 20 2026 — All-ticker sweeps + sortable/filterable UI + modal drill-down**
+Latest commit: `8e256cc` on `feature/profitability-research`
 
-Prior: `c14dd1c` BS pricer made ICT + ORB profitable over 60 days on
-QQQ+SPY+IWM:
-  717 ICT-BS-60d   +$1,616   47%  PF 1.09
-  718 ORB-BS-60d   +$1,302   52%  PF 1.13
-  719 VWAP-BS-60d  -$1,728   62%  PF 0.30  (too few trades; theta eats small wins)
+All-ticker per-strategy sweep results (5m bars, 60 days, BS pricer, SL=0.8 for ORB):
+  ICT  top 5: INTC +$6,013 · SLV +$5,775 · MU +$4,631 · PLTR +$4,425 · AMD +$4,097
+  ORB  top 5: INTC +$3,776 · AMD +$3,661 · NFLX +$3,616 · NVDA +$1,870 · MU +$994
+  VWAP top 5: NFLX +$2,846 · TSLA +$689 · SLV +$575 · INTC +$527 · META +$462
+              (VWAP fires rarely — ~10 trades/ticker vs ICT ~200)
 
-ORB parameter sweep found improvement: SL=0.8 any PT → +$1,493 (+15% over default).
-Stop loss dominates outcomes; profit target doesn't — trades exit on SL or TIME_EXIT,
-rarely TP.
+Common winners across all 3 strategies: INTC, AMD, NFLX, SLV.
+IWM is a loser across ICT + ORB. SPX/DJI/NDX/RUT produce 0 trades
+(yfinance doesn't resolve those symbols to option chains).
+
+Fixes this session:
+  - Drill-down root cause: runs table uncapped → trades panel rendered
+    below the fold. Converted to centered modal with sortable+filterable columns.
+  - Sweep bug: was passing strategy_id but not a strategy instance,
+    so non-ICT sweeps silently ran ICT. Caught when VWAP numbers
+    matched ICT exactly. Fixed in backtest_engine/sweep.py.
+  - Exit enrichment CONFIRMED captured (15,591/15,591 trades have
+    non-empty exit_indicators — UI just wasn't surfacing it).
+
+Still to do (user's open asks):
+  - Analytics page for cross-run slice/dice
+  - Feature-importance: correlate entry/exit indicators vs WIN/LOSS
+  - Sweep launch UI form
+  - FOP backtest with user-supplied contract (data provider works)
+
+Prior: `c14dd1c` BS pricer made ICT + ORB profitable on 3-ticker sets.
+ORB parameter sweep found SL=0.8 any PT → +$1,493 (+15% over default).
 
 Backtest page rewritten simple per user request: refresh button + runs
 table + trades on row-click. No polling, no auto-select, no charts.
