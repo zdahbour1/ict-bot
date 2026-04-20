@@ -8,14 +8,25 @@ points here.
 
 ## Last updated
 
-**Apr 19-20 2026 — Profitability research: ICT + ORB now profitable**
-Latest commit: `c14dd1c` on `feature/profitability-research`
-("Engine: wire Black-Scholes pricer — ICT + ORB now profitable")
+**Apr 20 2026 — Simplified Backtest page + parameter sweep**
+Latest commit: `(pending)` on `feature/profitability-research`
+("Simplify Backtest page + parameter sweep framework + 10 unit tests")
 
-Headline: with realistic BS option pricing (replacing the 5x leverage
-proxy), ICT and ORB both show profit over 60 days on QQQ+SPY+IWM.
-Runs visible in dashboard: 717 (ICT +$1,616), 718 (ORB +$1,302),
-719 (VWAP -$1,728).
+Prior: `c14dd1c` BS pricer made ICT + ORB profitable over 60 days on
+QQQ+SPY+IWM:
+  717 ICT-BS-60d   +$1,616   47%  PF 1.09
+  718 ORB-BS-60d   +$1,302   52%  PF 1.13
+  719 VWAP-BS-60d  -$1,728   62%  PF 0.30  (too few trades; theta eats small wins)
+
+ORB parameter sweep found improvement: SL=0.8 any PT → +$1,493 (+15% over default).
+Stop loss dominates outcomes; profit target doesn't — trades exit on SL or TIME_EXIT,
+rarely TP.
+
+Backtest page rewritten simple per user request: refresh button + runs
+table + trades on row-click. No polling, no auto-select, no charts.
+
+Use `python run_sweep.py <json>` to run more sweeps. Example payload in
+run_sweep.py docstring.
 
 Still to ship on this branch:
   - Parameter sweep framework (find optimal PT/SL combos, especially
@@ -91,7 +102,7 @@ revalidated or users pin to stale code.
 
 ## Test suite
 
-- **347 passed + 4 expected skips** as of c14dd1c
+- **357 passed + 4 expected skips** as of latest commit
 - Run: `DATABASE_URL="postgresql://ict_bot:ict_bot_dev@localhost:5432/ict_bot" python -m pytest tests/ -q`
 - DB-persistent runs: `PYTEST_DB_REPORT=1 ...` then view at Tests tab
 
