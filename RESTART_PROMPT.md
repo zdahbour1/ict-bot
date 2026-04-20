@@ -9,7 +9,7 @@ points here.
 ## Last updated
 
 **Apr 20 2026 — Analytics charts + unified modal + server-side sort**
-Latest commit: `(this)` on `feature/profitability-research`
+Latest commit: `d7087b1` on `feature/profitability-research`
 
 This iteration:
   - Replaced Analytics tables with click-to-drill bar charts (recharts).
@@ -120,7 +120,7 @@ state that's not clearing. Re-visit after profitability work.
 Chain of fixes on the backtest drill-down bug (all three were needed):
   1. `0d69e86` — Dockerfile.api missing backtest_engine module (caused 500)
   2. `e980b2c` — 663KB payload + 10s polling (added pagination + /trades endpoint)
-  3. `(this)` — nginx cached index.html indefinitely (browsers loaded OLD bundle
+  3. `d7087b1` — nginx cached index.html indefinitely (browsers loaded OLD bundle
                  even after rebuilds; "still not working" for the user)
 
 Lesson for future: for SPA deployments, index.html MUST have
