@@ -8,8 +8,39 @@ points here.
 
 ## Last updated
 
-**Apr 20 2026 — Analytics click → filter runs table**
-Latest commit: `dcd5ef7` on `feature/profitability-research`
+**Apr 20 2026 — Filter-everything + feature importance + sweep UI + 1m validation**
+Latest commit: `74bbfe4` on `feature/profitability-research`
+
+Shipped this iteration (in order):
+  1. Chart-filter-everything (`01b69ba`): clicking a bar now re-slices
+     EVERY chart, stat box, aggregate table AND the runs table.
+     cross_run endpoint accepts strategy+ticker; top_runs recomputes
+     per-run P&L from filtered trades.
+  2. #7 Server-side column filters (`3819f46`): every per-column filter
+     input on RunsTable + TradesTable lifts to the backend as
+     ?filter=col:value. Numeric: >N, <N, >=N, <=N, =N. Text: ILIKE.
+     Debounced 300ms. Whitelisted via _RUNS_FILTER_COLS /
+     _TRADES_FILTER_COLS.
+  3. 1m validation (`18020da`): re-ran top config per strategy at 1m
+     resolution over last 5 days. ICT/INTC and ORB/INTC edges HOLD
+     UP (86% / 73% win, per-trade P&L actually higher at 1m). VWAP
+     sample too small (3 trades).
+  4. #1 Cross-run feature importance (`c20ce7b`): new tab on Analytics
+     panel. Scans entry_indicators across all 15,647 trades and ranks
+     features by quartile win-rate spread. Real finding: rsi_14 spread
+     14.7% (RSI>67 wins 62.6%, RSI 51-67 only 47.9%).
+  5. #2 Exit-indicator UX (`d042044`): source=entry|exit toggle;
+     yellow caveat that exit indicators are tautological; baseline
+     delta colored tiles (+N/-N vs overall win%).
+  6. #3 Sweep launch UI (`74bbfe4`): new "Parameter Sweep" button
+     opens a form with preset grid fields (PT, SL, interval, DTE).
+     Live total-runs readout. POSTs to bot_manager /run-sweep.
+     **NOTE**: user's host bot_manager must be restarted to pick
+     up the new /run-sweep handler.
+
+Test count: **401 passed + 4 skipped**.
+
+Prior: `dcd5ef7` — Chart/table click filters runs table below
 
 User feedback: "when I click or filter I would like it to filter the
 table below so I can see the details".
@@ -95,11 +126,14 @@ Fixes this session:
     non-empty exit_indicators — UI just wasn't surfacing it).
 
 Still to do (user's open asks):
-  - Feature-importance: correlate entry/exit indicators vs WIN/LOSS
-    (per-run endpoint exists; need cross-run version + UI)
-  - Sweep launch UI form
   - FOP backtest with user-supplied contract (data provider works)
   - Agents for optimization (user suggestion)
+  - Analytics panel scaling (caps at 500 runs currently)
+
+Recently shipped (see commit history):
+  - Cross-run feature importance ✅ (c20ce7b / d042044)
+  - Sweep launch UI ✅ (74bbfe4)
+  - 1m validation of top runs ✅ (18020da)
 
 Prior: `c14dd1c` BS pricer made ICT + ORB profitable on 3-ticker sets.
 ORB parameter sweep found SL=0.8 any PT → +$1,493 (+15% over default).
@@ -184,7 +218,7 @@ revalidated or users pin to stale code.
 
 ## Test suite
 
-- **380 passed + 4 expected skips** as of latest commit
+- **401 passed + 4 expected skips** as of latest commit
 - Run: `DATABASE_URL="postgresql://ict_bot:ict_bot_dev@localhost:5432/ict_bot" python -m pytest tests/ -q`
 - DB-persistent runs: `PYTEST_DB_REPORT=1 ...` then view at Tests tab
 

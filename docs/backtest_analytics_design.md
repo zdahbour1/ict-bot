@@ -402,8 +402,84 @@ All routes have integration tests in
 |----------|-------------------------------------------------------------|
 | `7fbbd00`| Cross-run analytics endpoint + Analytics tables-only panel |
 | `d7087b1`| Charts (recharts) + unified TradesModal + server-side sort |
-| `dcd5ef7`| Chart/table click → filter runs table (this iteration)     |
+| `dcd5ef7`| Chart/table click → filter runs table                      |
 | `b34e448`| Chore: untrack `.bot_stop`, bump RESTART doc hash          |
+| `01b69ba`| Filter re-slices ALL charts + KPIs (not just runs table)   |
+| `3819f46`| #7 Server-side per-column filters on paginated tables      |
+| `18020da`| 1m-resolution validation of top run per strategy           |
+| `c20ce7b`| #1 Cross-run feature importance (quartile spread ranking)  |
+| `d042044`| #2 Exit-indicator UX polish (baseline-relative tile colors)|
+| `74bbfe4`| #3 Parameter Sweep launch UI form + sidecar wiring         |
+
+## 9a. Follow-up Features Added (#7, #1, #2, #3)
+
+### #7: Server-side per-column filters
+
+Problem: column filter inputs operated only on the loaded page. Fixed
+with a mirror of the sort-whitelist pattern:
+
+```python
+# dashboard/routes/backtest.py
+_RUNS_FILTER_COLS = { "name": "r.name", "total_pnl": "r.total_pnl", ... }
+_RUNS_NUMBER_COLS = { "trades", "win_rate", "total_pnl", ... }
+
+def _build_column_filters(specs, column_map, number_cols, param_prefix):
+    # Parse 'col:value' strings, build safe WHERE fragments.
+    # Numeric accepts >N, <N, >=N, <=N, =N. Text uses ILIKE.
+```
+
+Frontend: `useSortableFilterable(rows, cols, serverSort?, serverFilter?)`
+now accepts both controllers. When `serverFilter` is present, local
+filtering is skipped and filter-state updates delegate to the caller.
+The caller (`TradesModal`, `BacktestTab`) debounces 300ms via
+`useEffect + setTimeout` before refetching.
+
+### #1: Cross-run feature importance
+
+`GET /api/backtests/analytics/feature_importance?source=entry|exit`
+scans the requested JSONB column across every trade in every
+run matching the active strategy/ticker filter. Per feature:
+
+- WIN mean vs LOSS mean (raw edge metric)
+- Quartile win rates (4-bucket breakdown of feature value vs outcome)
+- **Quartile spread** = `max(win%) - min(win%)` across quartiles —
+  the primary ranking signal. Unlike raw |edge|, quartile spread is
+  normalized against feature magnitude, so RSI (0-100) can be
+  compared against volume (millions) on equal footing.
+
+Refactored the per-run endpoint math into `_compute_feature_analysis`
+to share the implementation.
+
+UI: new "Feature Importance" view in the Analytics panel. Each
+feature rendered as a card with a 4-tile quartile strip, colored
+**relative to the per-feature baseline** (not absolute) so a 55% tile
+is green when baseline is 45% and red when baseline is 60%.
+
+### #2: Exit-indicator correlation
+
+Same endpoint with `source=exit`. Yellow caveat on the UI explains
+that exit indicators are mostly tautological (RSI at exit high ↔
+trade closed up ↔ WIN). The value is in studying exit-timing rules
+rather than finding predictive setups.
+
+### #3: Parameter Sweep launch UI
+
+`POST /api/backtests/sweep/launch` proxies to
+`POST http://localhost:9000/run-sweep` on the bot_manager sidecar.
+Sidecar spawns `run_sweep.py` as a subprocess with `PYTHONIOENCODING=
+utf-8` to avoid Windows codec issues on log output.
+
+UI: a `SweepDialog` modal with preset grid fields for the four most-
+swept params (profit_target, stop_loss, base_interval, option_dte_
+days). Each is a comma-separated list; blank means "don't sweep
+that param, use base_config default." Live cell-count readout plus
+a `per_ticker` checkbox. Warning banner over 30 total runs.
+
+### Route-ordering re-gotcha
+
+Had to add the new `/backtests/analytics/feature_importance` route
+above `/backtests/{run_id}/feature_analysis` in the file, same
+registration-order trap documented in §4.
 
 ## 10. Known Limitations & Follow-ups
 
