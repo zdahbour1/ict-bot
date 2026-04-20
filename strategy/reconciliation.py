@@ -156,7 +156,11 @@ def _reconcile(client, exit_manager, ib_positions):
             continue
 
         ticker = pos.get("ticker", "UNK")
-        sym = pos.get("symbol", "").strip()
+        # Defensive: IB's localSymbol is OCC-padded (e.g. 'QQQ   260420C00645000');
+        # downstream regex in ib_occ_to_contract requires the canonical
+        # unpadded form or price lookup silently fails and the trade
+        # becomes un-monitorable. Strip ALL whitespace, not just ends.
+        sym = "".join((pos.get("symbol") or "").split())
         qty = int(pos["qty"])  # Preserve sign — negative means naked short on IB
         avg_cost = pos.get("avg_cost", 0)
         right = pos.get("right", "C")

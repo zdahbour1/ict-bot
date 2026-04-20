@@ -21,6 +21,19 @@ from ib_async import IB, Stock, Option, MarketOrder, LimitOrder, StopOrder
 
 import config
 
+
+def _normalize_occ(local_symbol: str | None) -> str:
+    """Return the OCC symbol with ALL whitespace removed.
+
+    IB's ``Contract.localSymbol`` returns OCC strings padded to a fixed
+    width (e.g. ``'QQQ   260420C00645000'``).  Downstream code
+    (ib_occ_to_contract, price lookup) expects the canonical unpadded
+    form ``'QQQ260420C00645000'``.  A bare ``.strip()`` only trims
+    leading/trailing whitespace — insufficient for tickers shorter than
+    the width. Use this helper at every localSymbol read site.
+    """
+    return "".join((local_symbol or "").split())
+
 log = logging.getLogger(__name__)
 
 
@@ -716,7 +729,7 @@ class IBClient:
             # Orphan — cancel it
             symbol = ""
             if trade.contract and trade.contract.localSymbol:
-                symbol = trade.contract.localSymbol.strip()
+                symbol = _normalize_occ(trade.contract.localSymbol)
             log.warning(f"[CLEANUP] Cancelling orphaned order: orderId={order_id} "
                         f"permId={perm_id} status={status} symbol={symbol}")
             try:
@@ -744,7 +757,7 @@ class IBClient:
         for p in positions:
             if p.contract.secType == "OPT" and p.position != 0:
                 result.append({
-                    "symbol": p.contract.localSymbol.strip() if p.contract.localSymbol else "",
+                    "symbol": _normalize_occ(p.contract.localSymbol),
                     "conId": p.contract.conId,
                     "ticker": p.contract.symbol,
                     "expiry": p.contract.lastTradeDateOrContractMonth,
@@ -788,7 +801,7 @@ class IBClient:
         """Check recent executions for a symbol."""
         fills = self.ib.fills()
         for fill in reversed(fills):
-            local_sym = fill.contract.localSymbol.strip() if fill.contract.localSymbol else ""
+            local_sym = _normalize_occ(fill.contract.localSymbol)
             if symbol in local_sym or (fill.contract.symbol and fill.contract.symbol in symbol):
                 return {
                     "symbol": local_sym,
@@ -816,7 +829,7 @@ class IBClient:
             if fill.contract and fill.contract.conId == con_id:
                 if fill.execution.side == "SLD":  # Sell fill
                     return {
-                        "symbol": (fill.contract.localSymbol or "").strip(),
+                        "symbol": _normalize_occ(fill.contract.localSymbol),
                         "qty": float(fill.execution.shares),
                         "price": float(fill.execution.price),
                         "side": fill.execution.side,
@@ -838,7 +851,7 @@ class IBClient:
         positions = self.ib.positions()
         return [
             {
-                "symbol": p.contract.localSymbol or str(p.contract),
+                "symbol": _normalize_occ(p.contract.localSymbol) or str(p.contract),
                 "qty": float(p.position),
                 "avg_cost": float(p.avgCost),
             }
