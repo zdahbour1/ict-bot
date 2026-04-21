@@ -90,6 +90,7 @@ def _roadmap_fields(trade: dict) -> dict:
     return out
 
 
+
 def insert_trade(trade: dict, account: str) -> int | None:
     """Insert a new trade row. Returns the DB id."""
     from db.models import Trade
