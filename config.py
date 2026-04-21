@@ -125,6 +125,17 @@ CONTRACTS_PER_TICKER = _load_contracts_per_ticker()
 PROFIT_TARGET         = _get("PROFIT_TARGET", 1.00, float)
 STOP_LOSS             = _get("STOP_LOSS", 0.60, float)
 
+# ── Close flow mode ──────────────────────────────────────
+# True (new default): "sell-first" — skip blocking bracket-cancel-verify,
+#   fire MKT SELL immediately, then verify brackets auto-cancelled by IB
+#   on position flat. Works around IB's cross-client cancel asymmetry.
+#   Design: docs/ib_db_correlation.md (Cross-client section).
+# False: "cancel-first" (legacy) — strict terminal-state cancel BEFORE sell.
+#   Keep as escape hatch if sell-first shows issues in the wild.
+CLOSE_MODE_SELL_FIRST = _get("CLOSE_MODE_SELL_FIRST", True, bool)
+# Seconds to wait for IB to auto-cancel brackets after position flattens.
+POST_SELL_BRACKET_TIMEOUT = _get("POST_SELL_BRACKET_TIMEOUT", 5.0, float)
+
 # ── Trade Window ──────────────────────────────────────────
 TRADE_WINDOW_START_PT  = _get("TRADE_WINDOW_START_PT", 6, int)
 TRADE_WINDOW_START_MIN = _get("TRADE_WINDOW_START_MIN", 30, int)

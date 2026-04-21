@@ -298,10 +298,6 @@ is for going-forward linkage.
 
 ## 7. What this does NOT solve
 
-- **Cross-client cancel asymmetry** (`docs/bracket_cancel_strict_verification.md`).
-  Even with perfect IB↔DB linkage, `cancelOrder` still only
-  works on the placing client. The thread-owned-close proposal
-  (`docs/thread_owned_close.md`) fixes that separately.
 - **Order modification.** IB doesn't let you change `orderRef` on
   an existing order via `placeOrder`-with-same-ID modification
   (or at least not reliably across versions). So all 3 bracket
@@ -352,7 +348,106 @@ Tuesday's live validation of the EOD guards + bracket rollback.
 One afternoon of work; every downstream thread-owned-close and FOP
 design benefits from the correlation being in place.
 
-## 11. Related docs
+## 11. Cross-client cancel asymmetry — sell-first close mode
+
+### The constraint
+IB server-side rule: `cancelOrder(orderId)` only works from the
+client that originally placed the order. Any other client gets
+**Error 10147** ("OrderId only valid from owner"). This is not
+a bug — it's the IB API design. There's no "as-admin" flag.
+
+What *does* work from any client on the same account:
+- `placeOrder()` — submitting new orders (including SELL)
+- `reqPositions()` — reading positions (global)
+- `reqAllOpenOrders()` — reading orders (not cancelling)
+- `reqGlobalCancel()` — cancels EVERY order on the session
+  (rejected: we plan to run multiple strategies / accounts
+   and this is indiscriminate)
+
+### Why pool-slot strict-cancel-first fails on restart
+Our pool gives each slot whatever `clientId` IB hands out at
+connect time. After a bot restart, the new pool slots don't
+own the brackets left by yesterday's process — so
+`cancel_order_by_id` → 10147 → strict-cancel-verify times out
+→ `_atomic_close` refuses to send the SELL. Position stays
+open with stale brackets until reconcile PASS 3/4 repairs it.
+
+### Sell-first flow (default as of this PR)
+
+Implemented in `strategy/exit_executor.py::_execute_exit_sell_first`,
+gated by `config.CLOSE_MODE_SELL_FIRST` (default **True**):
+
+```
+1. Check IB position qty (from any client — global read).
+   - qty == 0 → DB-only update, mark _bracket_fired if we
+                expected brackets. No SELL.
+   - qty <  0 → CRITICAL alert, abort. (Bot only does long
+                options; negative qty is a naked short.)
+2. Fire best-effort cancel on any live brackets — NON-BLOCKING.
+   Failures (10147) are logged and ignored.
+3. Send MKT SELL. (Placement works from any client.)
+4. verify_brackets_cleared_post_sell(timeout=5s):
+     - Poll find_open_orders_for_contract every 0.5s
+     - Expect: IB auto-cancels resting TP/SL when position
+       flattens (OCA + options-bracket behavior).
+     - If any bracket still alive at deadline → issue
+       explicit cancel and re-poll.
+     - If STILL alive after explicit cancel → non-critical
+       handle_error alert. Reconcile PASS 3 will clean up.
+5. Re-check IB position qty (simultaneous-fill guard):
+     - qty <  0 → CRITICAL alert ("naked_short_after_close").
+                  Indicates bracket TP filled the same tick
+                  as our MKT SELL — very rare, needs manual
+                  review.
+```
+
+### Why this is safe for our tickers
+- Universe is high-liquidity options (QQQ, SPY, IWM, AAPL,
+  MSFT, NVDA, INTC, MU, PLTR, TSLA). MKT SELL fills instantly;
+  the race window between SELL-sent and brackets-auto-cancelled
+  is milliseconds, not seconds.
+- Step 5 catches the simultaneous-fill corner case that the
+  old strict-cancel-first prevented by fiat. Fires a CRITICAL
+  alert rather than silently ignoring.
+- `reqGlobalCancel` is explicitly NOT used — it would cancel
+  orders belonging to other strategies running on the same
+  IB account.
+
+### Rollback
+Set `CLOSE_MODE_SELL_FIRST=false` (either in settings table or
+env) → legacy `cancel_all_orders_and_verify` path runs
+unchanged. No code deletion — the legacy path is still fully
+live.
+
+### Tests
+`tests/unit/test_close_sell_first.py` (11 tests):
+- qty==0 skips SELL + flags _bracket_fired
+- qty<0 aborts with critical handler
+- happy path LONG → sell_call; SHORT → sell_put
+- SELL fires even when pre-cancel raises 10147
+- verify_brackets_cleared_post_sell: terminal quick, explicit
+  cancel, handle_error on survival after explicit cancel
+- best_effort_cancel_brackets: swallows errors, noop when empty
+- legacy mode still reachable with CLOSE_MODE_SELL_FIRST=false
+
+### Config
+```
+CLOSE_MODE_SELL_FIRST     = True   (new default)
+POST_SELL_BRACKET_TIMEOUT = 5.0s   (how long to wait for IB
+                                     auto-cancel before issuing
+                                     explicit cancel)
+```
+
+### Future: stable clientId routing (ARCH-007, deferred)
+The cleaner long-term fix is to pin pool slots to deterministic
+clientIds (10, 11, 12, 13) and persist `trades.ib_client_id` at
+entry. Reconcile then knows exactly which slot owns each order
+and can route cancels without fan-out or sell-first fallback.
+Lower priority now that sell-first unblocks Thursday testing.
+
+---
+
+## 12. Related docs
 
 - `docs/logging_and_audit.md` — the existing audit trail keyed by
   `details.trade_id`; this doc's correlation extends the linkage

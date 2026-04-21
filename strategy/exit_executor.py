@@ -219,6 +219,105 @@ def get_ib_position_qty(client, trade: dict) -> int:
         return 0
 
 
+def best_effort_cancel_brackets(client, trade: dict) -> None:
+    """Fire cancel requests for any open bracket orders on this contract,
+    WITHOUT blocking on terminal-state verification.
+
+    Used in the "sell-first" close mode — we don't block the SELL on cancel
+    completion because:
+      1. IB auto-cancels resting TP/SL when position flattens anyway.
+      2. Cross-client ownership (IB Error 10147) can make cancel-by-orderId
+         fail when another pool client owns the bracket. Fire-and-forget
+         lets the SELL proceed; ``verify_brackets_cleared_post_sell`` then
+         handles any stragglers.
+    """
+    ticker = trade.get("ticker", "UNK")
+    con_id = trade.get("ib_con_id")
+    symbol = (trade.get("symbol") or "").replace(" ", "")
+    try:
+        client.refresh_all_open_orders()
+        open_orders = client.find_open_orders_for_contract(con_id, symbol)
+    except Exception as e:
+        _trace(ticker, f"PRE-SELL cancel: query failed: {e}", "warn")
+        return
+    if not open_orders:
+        return
+    _trace(ticker, f"PRE-SELL cancel: firing best-effort cancel for "
+                    f"{len(open_orders)} order(s) (non-blocking)")
+    for o in open_orders:
+        try:
+            client.cancel_order_by_id(o["orderId"])
+        except Exception as e:
+            _trace(ticker, f"PRE-SELL cancel: orderId={o['orderId']} raised {e} "
+                            "(ignoring, will verify post-SELL)", "warn")
+
+
+def verify_brackets_cleared_post_sell(client, trade: dict, timeout: float) -> bool:
+    """After MKT SELL, verify all bracket orders for this contract reach a
+    terminal state. IB auto-cancels resting TP/SL when the position flattens,
+    so usually this is a quick confirmation. If any remain alive past
+    ``timeout``, issue an explicit cancel. Any still-alive after that raises
+    a non-critical handle_error alert for the dashboard.
+
+    Returns True if all clear, False if something stayed alive.
+    """
+    ticker = trade.get("ticker", "UNK")
+    con_id = trade.get("ib_con_id")
+    symbol = (trade.get("symbol") or "").replace(" ", "")
+    TERMINAL_OK = {"Cancelled", "ApiCancelled", "Inactive", "Filled"}
+
+    deadline = time.time() + timeout
+    alive: list = []
+    while time.time() < deadline:
+        time.sleep(0.5)
+        try:
+            client.refresh_all_open_orders()
+            remaining = client.find_open_orders_for_contract(con_id, symbol)
+        except Exception:
+            continue
+        alive = [o for o in remaining if o.get("status") not in TERMINAL_OK]
+        if not alive:
+            _trace(ticker, "POST-SELL verify: all brackets terminal "
+                            "(IB auto-cancelled on position flat)")
+            return True
+
+    # Still alive — try explicit cancel, then one more poll.
+    _trace(ticker, f"POST-SELL verify: {len(alive)} bracket(s) still alive after "
+                    f"{timeout}s — issuing explicit cancel: "
+                    f"{[o['orderId'] for o in alive]}", "warn")
+    for o in alive:
+        try:
+            client.cancel_order_by_id(o["orderId"])
+        except Exception as e:
+            _trace(ticker, f"POST-SELL verify: explicit cancel orderId={o['orderId']} "
+                            f"raised {e}", "warn")
+
+    time.sleep(2.0)
+    try:
+        client.refresh_all_open_orders()
+        remaining = client.find_open_orders_for_contract(con_id, symbol)
+        alive = [o for o in remaining if o.get("status") not in TERMINAL_OK]
+    except Exception:
+        alive = []
+
+    if alive:
+        _trace(ticker, f"POST-SELL verify: {len(alive)} bracket(s) STILL ALIVE "
+                        f"after explicit cancel — reconcile PASS 3/4 will clean up",
+                        "error")
+        try:
+            from strategy.error_handler import handle_error
+            handle_error(f"exit_executor-{ticker}", "brackets_alive_after_close",
+                         RuntimeError(f"{len(alive)} brackets alive after SELL"),
+                         context={"ticker": ticker, "symbol": symbol,
+                                  "remaining": [o["orderId"] for o in alive]},
+                         critical=False)
+        except Exception:
+            pass
+        return False
+    _trace(ticker, "POST-SELL verify: brackets terminal after explicit cancel")
+    return True
+
+
 def close_position_on_ib(client, trade: dict, max_qty: int) -> bool:
     """
     Send sell order to IB. Only sells up to max_qty contracts.
@@ -253,6 +352,83 @@ def close_position_on_ib(client, trade: dict, max_qty: int) -> bool:
         return False
 
 
+def _execute_exit_sell_first(client, trade: dict, reason: str,
+                              post_sell_timeout: float) -> float | None:
+    """Sell-first close flow — works around IB's cross-client cancel asymmetry.
+
+    Flow:
+      1. Check IB position qty. If 0 → already closed (bracket fired / prior
+         close), update DB only. If negative → critical alert, abort.
+      2. Best-effort cancel brackets (fire-and-forget, non-blocking).
+      3. Send MKT SELL.
+      4. Post-SELL: verify brackets reach terminal (IB auto-cancels on flat).
+      5. Post-SELL: verify IB position qty dropped to ≤ 0 (no naked short).
+    """
+    ticker = trade.get("ticker", "UNK")
+    symbol = trade.get("symbol", "?")
+    con_id = trade.get("ib_con_id")
+
+    # Step 1: Position qty
+    ib_qty = get_ib_position_qty(client, trade)
+    if ib_qty == 0:
+        # Position already closed. Still clean up any stale brackets.
+        _trace(ticker, "SELL-FIRST: position already closed on IB (qty=0) — "
+                       "will update DB only")
+        expected_brackets = bool(trade.get("ib_tp_order_id") or
+                                  trade.get("ib_sl_order_id"))
+        if expected_brackets:
+            trade["_bracket_fired"] = True
+        trade["ib_tp_order_id"] = None
+        trade["ib_sl_order_id"] = None
+        return None
+
+    if ib_qty < 0:
+        # Same guard as legacy path — bot only supports long-options.
+        log.error(f"[{ticker}] SELL-FIRST ABORTED — NEGATIVE position on IB "
+                  f"(qty={ib_qty}). Manual intervention required.")
+        from strategy.error_handler import handle_error
+        handle_error(f"exit_executor-{ticker}", "negative_position_on_close",
+                     RuntimeError(f"Direction={trade.get('direction')}, IB qty={ib_qty}"),
+                     context={"ticker": ticker, "symbol": symbol,
+                              "ib_qty": ib_qty, "con_id": con_id},
+                     critical=True)
+        return None
+
+    # Step 2: Best-effort cancel (non-blocking).
+    best_effort_cancel_brackets(client, trade)
+
+    # Step 3: MKT SELL.
+    sent = close_position_on_ib(client, trade, ib_qty)
+    if not sent:
+        _trace(ticker, "SELL-FIRST: SELL not sent — aborting", "error")
+        return None
+
+    # Step 4: Verify brackets terminal (IB should auto-cancel on position flat).
+    verify_brackets_cleared_post_sell(client, trade, timeout=post_sell_timeout)
+
+    # Step 5: Verify position didn't end up negative (simultaneous-fill guard).
+    try:
+        time.sleep(0.5)
+        final_qty = client.get_position_quantity(con_id) if con_id else 0
+    except Exception:
+        final_qty = 0
+    if final_qty < 0:
+        log.error(f"[{ticker}] SELL-FIRST: position went NEGATIVE after SELL "
+                  f"(qty={final_qty}) — likely simultaneous bracket+SELL fill. "
+                  f"CRITICAL — manual review.")
+        from strategy.error_handler import handle_error
+        handle_error(f"exit_executor-{ticker}", "naked_short_after_close",
+                     RuntimeError(f"Final IB qty={final_qty} after close SELL"),
+                     context={"ticker": ticker, "symbol": symbol,
+                              "final_qty": final_qty},
+                     critical=True)
+
+    trade["ib_tp_order_id"] = None
+    trade["ib_sl_order_id"] = None
+    _trace(ticker, f"SELL-FIRST EXIT COMPLETE — {reason}")
+    return None
+
+
 def execute_exit(client, trade: dict, reason: str) -> float | None:
     """
     Full exit flow with detailed tracing:
@@ -275,7 +451,20 @@ def execute_exit(client, trade: dict, reason: str) -> float | None:
            f"contracts={trade.get('contracts')} "
            f"bracket TP={trade.get('ib_tp_order_id')} SL={trade.get('ib_sl_order_id')}")
 
-    # Step 1-3: Cancel ALL orders for this contract and verify
+    # Mode switch — sell-first (new default) vs cancel-first (legacy).
+    # See config.CLOSE_MODE_SELL_FIRST and docs/ib_db_correlation.md.
+    try:
+        import config
+        sell_first = getattr(config, "CLOSE_MODE_SELL_FIRST", True)
+        post_sell_timeout = float(getattr(config, "POST_SELL_BRACKET_TIMEOUT", 5.0))
+    except Exception:
+        sell_first = True
+        post_sell_timeout = 5.0
+
+    if sell_first:
+        return _execute_exit_sell_first(client, trade, reason, post_sell_timeout)
+
+    # Legacy: Step 1-3: Cancel ALL orders for this contract and verify
     brackets_clear = cancel_all_orders_and_verify(client, trade)
     if not brackets_clear:
         log.error(f"[{ticker}] EXECUTE EXIT ABORTED — brackets not cleared")
