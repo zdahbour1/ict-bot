@@ -1,0 +1,13 @@
+-- 006_client_trade_id_widen.sql
+-- Widen trades.client_trade_id from VARCHAR(20) to VARCHAR(40) so the
+-- correlation ID can include the active strategy's short name as a
+-- prefix, e.g. 'ict-SPY-260421-01' or 'vwap_revert-NVDA-260421-999'.
+--
+-- Pre-change observed lengths:
+--   ict            (3)  + '-SPY-260421-01'  (14) =  17 chars  ✓ (fits in 20)
+--   vwap_revert   (11)  + '-NVDA-260421-999' (16) = 27 chars  ✗ (overflows 20)
+--   delta_neutral (13)  + '-NVDA-260421-999' (16) = 29 chars  ✗ (overflows 20)
+--
+-- 40 chars gives headroom for 4-digit ordinals, 5-char tickers, and
+-- strategy names up to ~20 chars.
+ALTER TABLE trades ALTER COLUMN client_trade_id TYPE VARCHAR(40);

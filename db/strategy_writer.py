@@ -37,6 +37,38 @@ def get_active_strategy_id() -> Optional[int]:
         session.close()
 
 
+def get_active_strategy_name() -> Optional[str]:
+    """Return the short ``name`` (e.g. 'ict', 'orb', 'vwap_revert') of
+    the currently-active strategy, or None if not resolvable. Used by
+    ``db.trade_ref.generate_trade_ref`` to prefix correlation IDs so
+    refs from multiple concurrent strategies are distinguishable at a
+    glance (e.g. 'ict-SPY-260421-01' vs 'orb-SPY-260421-01')."""
+    session = get_session()
+    if session is None:
+        return None
+    try:
+        row = session.execute(text(
+            "SELECT s.name "
+            "FROM settings cfg "
+            "JOIN strategies s ON s.name = cfg.value "
+            "WHERE cfg.key = 'ACTIVE_STRATEGY' AND cfg.strategy_id IS NULL "
+            "  AND s.enabled = TRUE "
+            "LIMIT 1"
+        )).fetchone()
+        if row:
+            return str(row[0])
+        # Fall back to is_default strategy
+        row = session.execute(text(
+            "SELECT name FROM strategies "
+            "WHERE is_default = TRUE AND enabled = TRUE LIMIT 1"
+        )).fetchone()
+        return str(row[0]) if row else None
+    except Exception:
+        return None
+    finally:
+        session.close()
+
+
 def get_default_strategy_id() -> Optional[int]:
     """Return the strategy_id of the strategy flagged is_default=TRUE,
     or None if no strategy has that flag set."""

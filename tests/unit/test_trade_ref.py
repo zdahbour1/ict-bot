@@ -95,11 +95,107 @@ class TestGenerateTradeRef:
         assert len(ref) < 20, f"ref {ref!r} too long"
 
 
+class TestStrategyPrefix:
+    """New format: '<strategy>-TICKER-YYMMDD-NN' (e.g. 'ict-SPY-260421-01').
+
+    Prefix is optional — when strategy isn't resolvable we fall back to
+    the legacy shape so entry flow never blocks.
+    """
+    def test_explicit_strategy_name_prefixes_ref(self):
+        from db.trade_ref import generate_trade_ref
+        session = MagicMock()
+        session.execute.return_value.fetchone.return_value = (0,)
+        with patch("db.connection.get_session", return_value=session):
+            ref = generate_trade_ref(
+                "SPY",
+                now=PT.localize(datetime(2026, 4, 21, 9, 30)),
+                strategy_name="ict",
+            )
+        assert ref == "ict-SPY-260421-01"
+
+    def test_long_strategy_name_fits_and_parses(self):
+        from db.trade_ref import generate_trade_ref, parse_trade_ref
+        session = MagicMock()
+        session.execute.return_value.fetchone.return_value = (4,)
+        with patch("db.connection.get_session", return_value=session):
+            ref = generate_trade_ref(
+                "NVDA",
+                now=PT.localize(datetime(2026, 4, 21, 10, 0)),
+                strategy_name="vwap_revert",
+            )
+        assert ref == "vwap_revert-NVDA-260421-05"
+        # Must fit in the widened VARCHAR(40) column
+        assert len(ref) <= 40
+        info = parse_trade_ref(ref)
+        assert info == {
+            "strategy": "vwap_revert",
+            "ticker": "NVDA",
+            "date": "260421",
+            "ordinal": 5,
+        }
+
+    def test_explicit_none_strategy_uses_legacy_format(self):
+        """strategy_name=None explicitly + DB returns no active strategy
+        → legacy ref without prefix (backwards compatible)."""
+        from db.trade_ref import generate_trade_ref
+        session = MagicMock()
+        session.execute.return_value.fetchone.return_value = (0,)
+        with patch("db.connection.get_session", return_value=session), \
+             patch("db.strategy_writer.get_active_strategy_name",
+                   return_value=None):
+            ref = generate_trade_ref(
+                "SPY",
+                now=PT.localize(datetime(2026, 4, 21, 9, 30)),
+            )
+        # Legacy shape when strategy can't be resolved
+        assert ref == "SPY-260421-01"
+
+    def test_active_strategy_resolved_from_db_when_not_passed(self):
+        from db.trade_ref import generate_trade_ref
+        session = MagicMock()
+        session.execute.return_value.fetchone.return_value = (0,)
+        with patch("db.connection.get_session", return_value=session), \
+             patch("db.strategy_writer.get_active_strategy_name",
+                   return_value="orb"):
+            ref = generate_trade_ref(
+                "AAPL",
+                now=PT.localize(datetime(2026, 4, 21, 9, 30)),
+            )
+        assert ref == "orb-AAPL-260421-01"
+
+    def test_different_strategies_get_own_daily_counters(self):
+        """ict and orb each start at 01 — MAX() is scoped to the
+        full prefix, so 'ict-SPY-..' and 'orb-SPY-..' don't collide."""
+        from db.trade_ref import generate_trade_ref
+        # Both lookups return 0 because they query their own LIKE prefix
+        session = MagicMock()
+        session.execute.return_value.fetchone.return_value = (0,)
+        with patch("db.connection.get_session", return_value=session):
+            ict = generate_trade_ref("SPY",
+                                      now=PT.localize(datetime(2026, 4, 21, 9, 30)),
+                                      strategy_name="ict")
+            orb = generate_trade_ref("SPY",
+                                      now=PT.localize(datetime(2026, 4, 21, 9, 31)),
+                                      strategy_name="orb")
+        assert ict == "ict-SPY-260421-01"
+        assert orb == "orb-SPY-260421-01"
+
+
 class TestParseTradeRef:
     def test_valid_ref(self):
         from db.trade_ref import parse_trade_ref
+        # Legacy no-strategy format still parses (strategy=None)
         info = parse_trade_ref("INTC-260421-07")
-        assert info == {"ticker": "INTC", "date": "260421", "ordinal": 7}
+        assert info == {
+            "strategy": None, "ticker": "INTC", "date": "260421", "ordinal": 7,
+        }
+
+    def test_strategy_prefixed_ref(self):
+        from db.trade_ref import parse_trade_ref
+        info = parse_trade_ref("ict-SPY-260421-07")
+        assert info == {
+            "strategy": "ict", "ticker": "SPY", "date": "260421", "ordinal": 7,
+        }
 
     def test_three_digit_ordinal(self):
         from db.trade_ref import parse_trade_ref
