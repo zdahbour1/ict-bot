@@ -726,12 +726,95 @@ class IBClient:
 
     def find_open_orders_for_contract(self, con_id: int, symbol: str) -> list:
         """Find ALL open orders on IB for a specific contract.
-        Searches by conId (primary) and symbol (fallback). Thread-safe."""
+        Searches by conId (primary) and symbol (fallback). Thread-safe.
+
+        Pool-aware: queries EVERY connection in the pool and dedupes by
+        permId, preferring the most-terminal status. This fixes the
+        stale-cache bug (SPY 2026-04-21) where an order cancelled via
+        one client's connection leaves the old "Submitted" status in a
+        different client's openTrades cache, because reqAllOpenOrders
+        only returns currently-OPEN orders — it doesn't evict terminal
+        ones. The owning connection always has the freshest status;
+        fan-out lets us read it even from non-owners.
+        """
+        # own-connection pass: include terminal statuses so the merge
+        # below can see "Cancelled" from this connection and treat the
+        # order as terminal even if another connection still has it
+        # Submitted in a stale cache.
         try:
-            return self._submit_to_ib(self._ib_find_orders_for_contract, con_id, symbol, timeout=10)
+            own = self._submit_to_ib(
+                self._ib_find_orders_for_contract_on_conn,
+                self.ib, con_id, symbol, True,  # include_terminal=True
+                timeout=10,
+            )
         except Exception as e:
             log.warning(f"Failed to query open orders: {e}")
-            return []
+            own = []
+
+        if self._pool is None:
+            # Single-connection fallback: filter terminal at the edge.
+            TERMINAL_SET = {"Cancelled", "ApiCancelled", "Inactive", "Filled"}
+            return [e for e in own if e.get("status") not in TERMINAL_SET]
+
+        # Rank statuses: higher number = more terminal. When we see the
+        # same permId from multiple connections, keep the entry with the
+        # most-terminal status (that's the connection that actually saw
+        # IB's latest update).
+        TERMINAL_RANK = {
+            "Cancelled":   4,
+            "ApiCancelled": 4,
+            "Inactive":    4,
+            "Filled":      4,
+            "PendingCancel": 3,
+            "Submitted":   2,
+            "PreSubmitted": 1,
+            "PendingSubmit": 0,
+        }
+        merged: dict = {}
+
+        def _key(entry):
+            # permId is globally unique once assigned; fall back to
+            # (clientId, orderId) before permId is assigned.
+            pid = entry.get("permId") or 0
+            if pid:
+                return ("p", pid)
+            return ("o", entry.get("clientId") or 0, entry.get("orderId"))
+
+        def _merge(entry):
+            k = _key(entry)
+            cur = merged.get(k)
+            if cur is None:
+                merged[k] = entry
+                return
+            # Keep the one with a more-terminal status
+            cur_rank = TERMINAL_RANK.get(cur.get("status"), 2)
+            new_rank = TERMINAL_RANK.get(entry.get("status"), 2)
+            if new_rank > cur_rank:
+                merged[k] = entry
+
+        for e in own:
+            _merge(e)
+
+        for conn in self._pool.all_connections:
+            if conn is self._conn:
+                continue
+            try:
+                rows = conn.submit(
+                    self._ib_find_orders_for_contract_on_conn,
+                    conn.ib, con_id, symbol, True,  # include_terminal=True
+                    timeout=5,
+                )
+            except Exception as e:
+                log.debug(f"find_open_orders fan-out on {conn.label}: {e}")
+                continue
+            for row in rows or []:
+                _merge(row)
+
+        # Filter out anything that's actually terminal — caller wants
+        # only still-live orders.
+        TERMINAL_SET = {"Cancelled", "ApiCancelled", "Inactive", "Filled"}
+        return [e for e in merged.values()
+                if e.get("status") not in TERMINAL_SET]
 
     def get_all_working_orders(self) -> list:
         """Return every working order across all clientIds in the account.
@@ -777,37 +860,52 @@ class IBClient:
         return results
 
     def _ib_find_orders_for_contract(self, con_id: int, symbol: str) -> list:
-        """Runs on IB thread. Returns all open orders matching this contract."""
+        """Runs on IB thread. Returns OPEN orders matching this contract
+        from THIS connection's view only. Callers that need a pool-merged
+        view should use ``find_open_orders_for_contract`` (the public
+        method) which fans out across all pool connections."""
+        return self._ib_find_orders_for_contract_on_conn(
+            self.ib, con_id, symbol, include_terminal=False
+        )
+
+    @staticmethod
+    def _ib_find_orders_for_contract_on_conn(ib, con_id: int, symbol: str,
+                                              include_terminal: bool = True) -> list:
+        """Same as _ib_find_orders_for_contract but runs on an explicit
+        ib_async IB instance. Used by the pool fan-out in
+        find_open_orders_for_contract. When ``include_terminal`` is True
+        we also return Cancelled/Filled/etc entries — the pool merger
+        needs to see them to pick the most-terminal status per permId."""
         symbol_clean = (symbol or "").replace(" ", "")
         results = []
-        for trade in self.ib.openTrades():
+        TERMINAL_EXCLUDE = {"Cancelled", "Inactive", "ApiCancelled"}
+        for trade in ib.openTrades():
             matched = False
-            # Match by conId (exact)
             if con_id and trade.contract and trade.contract.conId == con_id:
                 matched = True
-            # Fallback: match by symbol
             elif symbol_clean and trade.contract:
                 local = (trade.contract.localSymbol or "").replace(" ", "")
                 if local == symbol_clean:
                     matched = True
-
-            if matched:
-                status = trade.orderStatus.status
-                if status not in ("Cancelled", "Inactive", "ApiCancelled"):
-                    results.append({
-                        "orderId": trade.order.orderId,
-                        "permId": trade.order.permId,
-                        "action": trade.order.action,
-                        "orderType": trade.order.orderType,
-                        "totalQty": float(trade.order.totalQuantity),
-                        "status": status,
-                        "conId": trade.contract.conId if trade.contract else None,
-                        "parentId": getattr(trade.order, "parentId", 0) or 0,
-                        "lmtPrice": float(getattr(trade.order, "lmtPrice", 0) or 0),
-                        "auxPrice": float(getattr(trade.order, "auxPrice", 0) or 0),
-                        "orderRef": getattr(trade.order, "orderRef", "") or "",
-                        "clientId": getattr(trade.order, "clientId", 0) or 0,
-                    })
+            if not matched:
+                continue
+            status = trade.orderStatus.status
+            if not include_terminal and status in TERMINAL_EXCLUDE:
+                continue
+            results.append({
+                "orderId": trade.order.orderId,
+                "permId": trade.order.permId,
+                "action": trade.order.action,
+                "orderType": trade.order.orderType,
+                "totalQty": float(trade.order.totalQuantity),
+                "status": status,
+                "conId": trade.contract.conId if trade.contract else None,
+                "parentId": getattr(trade.order, "parentId", 0) or 0,
+                "lmtPrice": float(getattr(trade.order, "lmtPrice", 0) or 0),
+                "auxPrice": float(getattr(trade.order, "auxPrice", 0) or 0),
+                "orderRef": getattr(trade.order, "orderRef", "") or "",
+                "clientId": getattr(trade.order, "clientId", 0) or 0,
+            })
         return results
 
     def cancel_order_by_perm_id(self, perm_id: int):
