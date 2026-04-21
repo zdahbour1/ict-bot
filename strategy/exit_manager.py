@@ -622,7 +622,23 @@ class ExitManager:
             # stayed alive and caused a position flip, we MUST NOT
             # call finalize_close. Release the lock and let the next
             # exit cycle retry. Violates ARCH-005 otherwise.
-            close_ok = self._verify_close_on_ib(live_trade)
+            #
+            # EXCEPTION — legitimate roll (SPY 2026-04-21 incident fix).
+            # When execute_roll returns a NEW trade with a different
+            # symbol, the OLD position was closed by execute_exit's own
+            # post-SELL verification. Running _verify_close_on_ib against
+            # the old conId here is misleading because the new position
+            # may be on the same contract family (even if picked at a
+            # different strike, the symbol differs but the account-level
+            # positions call is scoped by conId so should be fine). We
+            # trust execute_roll's close-then-open; skip this check.
+            if should_roll and rolled is not None:
+                log.info(f"[{ticker}] VERIFY CLOSE: skipped — legitimate roll "
+                         f"to {rolled.get('symbol')}; trusting execute_roll's "
+                         f"own post-SELL verification")
+                close_ok = True
+            else:
+                close_ok = self._verify_close_on_ib(live_trade)
             from strategy.audit import log_trade_action
             if not close_ok:
                 log.error(

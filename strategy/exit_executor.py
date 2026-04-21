@@ -539,6 +539,25 @@ def execute_roll(client, trade: dict, pnl_pct: float):
             rolled_trade = select_and_enter(client, ticker)
 
         if rolled_trade:
+            # Guard: same-strike roll is degenerate churn. Observed on SPY
+            # 2026-04-21: the selector re-picked the very same 710P we were
+            # rolling out of, producing a close→open→close loop because
+            # exit_manager's _verify_close_on_ib polled the old conId and
+            # saw the new position sitting on it. Close the duplicate new
+            # entry immediately and return None so the caller treats this
+            # as a plain exit. No churn, no loop.
+            if rolled_trade.get("symbol") == trade.get("symbol"):
+                log.warning(
+                    f"[{ticker}] ROLL ABORTED — new entry at SAME symbol "
+                    f"{rolled_trade['symbol']} as the trade being rolled. "
+                    f"Treating as plain exit; closing duplicate position."
+                )
+                try:
+                    execute_exit(client, rolled_trade,
+                                  reason="SAME_STRIKE_ROLL_REVERT")
+                except Exception as e:
+                    log.error(f"[{ticker}] failed to revert same-strike roll: {e}")
+                return None
             rolled_trade["signal"] = f"ROLL from {trade['symbol']}"
             rolled_trade["_rolled_from"] = trade["symbol"]
             log.info(f"[{ticker}] ROLL COMPLETE: → {rolled_trade['symbol']} @ ${rolled_trade['entry_price']:.2f}")
