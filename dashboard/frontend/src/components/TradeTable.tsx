@@ -97,6 +97,134 @@ function BracketStatusCell({ trade }: { trade: Trade }) {
 }
 
 
+// ── Trade details modal — opens on ID-cell click.
+// Shows every unique reference (DB / IB / TWS / contract) plus the
+// full TP/SL bracket detail that was previously only accessible via
+// hover tooltip. Single-glance debug page: if a trade misbehaves,
+// this is the first thing to open.
+function TradeDetailsModal({ trade, onClose }: {
+  trade: Trade; onClose: () => void;
+}) {
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, [onClose]);
+
+  const Row = ({ label, value, mono = true }: {
+    label: string; value: React.ReactNode; mono?: boolean;
+  }) => (
+    <div className="flex items-baseline gap-3 py-1 border-b border-[#21262d] last:border-0">
+      <div className="text-xs text-gray-500 w-44 shrink-0">{label}</div>
+      <div className={`text-xs text-gray-200 ${mono ? 'font-mono' : ''} break-all`}>
+        {value ?? <span className="text-gray-600">—</span>}
+      </div>
+    </div>
+  );
+
+  const legStatusColor = (s: string | null) => _legStatusColor(s);
+  const fmt$ = (v: number | null | undefined) =>
+    v == null ? <span className="text-gray-600">—</span> : `$${v.toFixed(2)}`;
+
+  return (
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4"
+         onClick={onClose}>
+      <div className="bg-[#161b22] border border-[#30363d] rounded-lg w-[95vw] max-w-2xl max-h-[85vh] flex flex-col shadow-2xl"
+           onClick={e => e.stopPropagation()}>
+        <div className="px-4 py-3 border-b border-[#30363d] flex items-center justify-between">
+          <div>
+            <h3 className="text-base font-semibold text-gray-200">
+              Trade {trade.id} — {trade.ticker}{' '}
+              <span className="text-gray-500 font-normal text-sm">
+                ({trade.symbol})
+              </span>
+            </h3>
+            <div className="text-xs text-gray-500 mt-0.5">
+              Unique references for cross-system troubleshooting
+            </div>
+          </div>
+          <button onClick={onClose}
+                  className="text-gray-500 hover:text-white text-2xl leading-none px-2"
+                  aria-label="Close">&times;</button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-5 py-4">
+          {/* Identifiers */}
+          <div className="mb-5">
+            <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-2">
+              Identifiers
+            </div>
+            <Row label="DB id" value={trade.id} />
+            <Row label="Ref (IB orderRef)" value={trade.client_trade_id} />
+            <Row label="Entry orderId" value={trade.ib_order_id} />
+            <Row label="Entry permId" value={
+              <>
+                {trade.ib_perm_id ?? '—'}
+                <span className="text-gray-600 ml-2">(globally unique)</span>
+              </>
+            } />
+            <Row label="Contract conId" value={trade.ib_con_id} />
+            <Row label="Account" value={trade.account} />
+          </div>
+
+          {/* Take-profit leg */}
+          <div className="mb-5">
+            <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-2">
+              Take-profit leg
+            </div>
+            <Row label="Status" value={
+              <span className={legStatusColor(trade.ib_tp_status)}>
+                {trade.ib_tp_status ?? 'unknown'}
+              </span>
+            } />
+            <Row label="orderId" value={trade.ib_tp_order_id} />
+            <Row label="permId" value={trade.ib_tp_perm_id} />
+            <Row label="Price" value={fmt$(trade.ib_tp_price)} />
+          </div>
+
+          {/* Stop-loss leg */}
+          <div className="mb-5">
+            <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-2">
+              Stop-loss leg
+            </div>
+            <Row label="Status" value={
+              <span className={legStatusColor(trade.ib_sl_status)}>
+                {trade.ib_sl_status ?? 'unknown'}
+              </span>
+            } />
+            <Row label="orderId" value={trade.ib_sl_order_id} />
+            <Row label="permId" value={trade.ib_sl_perm_id} />
+            <Row label="Price" value={fmt$(trade.ib_sl_price)} />
+            <Row label="Last bracket check"
+                 value={trade.ib_brackets_checked_at
+                   ? new Date(trade.ib_brackets_checked_at).toLocaleString()
+                   : null}
+                 mono={false} />
+          </div>
+
+          {/* Trade state */}
+          <div>
+            <div className="text-[11px] uppercase tracking-wide text-gray-500 mb-2">
+              State
+            </div>
+            <Row label="Status" value={trade.status.toUpperCase()} mono={false} />
+            <Row label="Direction" value={trade.direction} mono={false} />
+            <Row label="Contracts (open/entered)"
+                 value={`${trade.contracts_open} / ${trade.contracts_entered}`} />
+            <Row label="Signal" value={trade.signal_type} mono={false} />
+            {trade.error_message && (
+              <Row label="Error"
+                   value={<span className="text-red-400">{trade.error_message}</span>}
+                   mono={false} />
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 // ── Audit trail modal — shows every system_log row touching this trade.
 //    Uses the append-only trail written by strategy.audit.log_trade_action.
 interface AuditEntry {
@@ -244,6 +372,7 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
   const [periodFilter, setPeriodFilter] = useState<string>('today');
   const [refreshing, setRefreshing] = useState(false);
   const [auditTrade, setAuditTrade] = useState<{ id: number; ticker: string } | null>(null);
+  const [detailsTrade, setDetailsTrade] = useState<Trade | null>(null);
 
   const handleRefresh = () => {
     setRefreshing(true);
@@ -281,24 +410,18 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
     }),
     col.accessor('id', {
       header: 'ID',
+      // Click opens TradeDetailsModal with every unique reference
+      // (DB / IB / TWS / contract) + full TP/SL bracket detail.
       cell: info => {
         const t = info.row.original;
-        // Mouseover tooltip consolidates every unique reference for
-        // cross-system troubleshooting (DB / IB / TWS / logs).
-        const tooltip = [
-          `DB id:             ${t.id}`,
-          `Ref:               ${t.client_trade_id ?? '—'}  (IB orderRef / TWS "Order Ref")`,
-          `Entry orderId:     ${t.ib_order_id ?? '—'}`,
-          `Entry permId:      ${t.ib_perm_id ?? '—'}  (globally unique)`,
-          `Contract conId:    ${t.ib_con_id ?? '—'}`,
-        ].join('\n');
         return (
-          <span
-            className="text-[11px] font-mono text-gray-400"
-            title={tooltip}
+          <button
+            onClick={() => setDetailsTrade(t)}
+            className="text-[11px] font-mono text-blue-400 hover:text-blue-300 hover:underline"
+            title="Click for unique references + bracket detail"
           >
-            #{t.id}
-          </span>
+            {t.id}
+          </button>
         );
       },
     }),
@@ -456,6 +579,10 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
       {auditTrade && (
         <AuditModal tradeId={auditTrade.id} ticker={auditTrade.ticker}
                     onClose={() => setAuditTrade(null)} />
+      )}
+      {detailsTrade && (
+        <TradeDetailsModal trade={detailsTrade}
+                           onClose={() => setDetailsTrade(null)} />
       )}
 
       {/* Controls */}
