@@ -183,13 +183,38 @@ def update_trade_notes(trade_id: int, body: NotesUpdate):
         session.close()
 
 
+def _bot_is_running() -> bool:
+    """Return True if the bot process is running (DB bot_state.status).
+    We queue close commands through the bot when it's up so they go via
+    the proper sell-first + pool-aware _atomic_close flow. Only fall
+    back to the sidecar's direct-IB close when the bot is actually down
+    (emergency path only)."""
+    try:
+        from db.models import BotState
+        session = get_session()
+        if not session:
+            return False
+        state = session.query(BotState).filter(BotState.id == 1).first()
+        running = bool(state and state.status == "running")
+        session.close()
+        return running
+    except Exception:
+        return False
+
+
 @router.post("/trades/{trade_id}/close")
 async def close_trade(trade_id: int, req: CloseRequest = CloseRequest()):
     """
-    Smart close: checks IB position, decides what to do.
-    1. If position closed on IB → mark closed in DB with IB exit price
-    2. If position open on IB → cancel brackets, close on IB, update DB
-    3. If can't reach IB (bot down) → queue command for when bot restarts
+    Smart close — route depends on bot state:
+    1. Bot running → queue a TradeCommand. ExitManager picks it up on
+       its next cycle (~1s) and runs it through _atomic_close which
+       uses the sell-first + pool-aware bracket cleanup. This is the
+       SAFE path — previously we called the sidecar directly and left
+       cross-client brackets alive on IB (SPY/GOOGL 2026-04-21).
+    2. Bot stopped → fall back to sidecar's emergency close (works,
+       but may leave brackets alive because the fresh clientId=99
+       connection can't cancel orders owned by the pool's clientIds).
+    3. Already-closed row → refuse.
     """
     session = get_session()
     if not session:
@@ -201,7 +226,22 @@ async def close_trade(trade_id: int, req: CloseRequest = CloseRequest()):
         if trade.status != "open":
             raise HTTPException(400, f"Trade is already {trade.status}")
 
-        # Try to close via sidecar (which talks to IB)
+        # Preferred path: queue for the bot's exit_manager (proper
+        # atomic close with pool-aware bracket cleanup).
+        if _bot_is_running():
+            cmd = TradeCommand(
+                trade_id=trade_id,
+                command="close_partial" if req.contracts else "close",
+                contracts=req.contracts,
+            )
+            session.add(cmd)
+            session.commit()
+            session.close()
+            return {"status": "command_queued", "command_id": cmd.id,
+                    "note": "Bot exit_manager will process on next cycle "
+                            "(atomic close + pool-aware bracket cleanup)"}
+
+        # Bot down — use sidecar's direct-IB close (emergency path).
         try:
             import httpx
             import os
@@ -268,7 +308,14 @@ async def close_trade(trade_id: int, req: CloseRequest = CloseRequest()):
 
 @router.post("/trades/close-all")
 async def close_all_trades():
-    """Close all open trades. Tries sidecar first, falls back to command queue."""
+    """Close all open trades.
+
+    Same routing logic as the single-trade close: queue through the
+    bot's exit_manager when the bot is up (sell-first + pool-aware
+    bracket cleanup), only fall back to the sidecar when the bot is
+    actually down. Previously this always used the sidecar directly,
+    which left cross-client brackets alive on IB.
+    """
     session = get_session()
     if not session:
         raise HTTPException(503, "Database not available")
@@ -277,8 +324,19 @@ async def close_all_trades():
         if not open_trades:
             return {"status": "no_open_trades"}
 
+        bot_up = _bot_is_running()
         results = []
+
         for t in open_trades:
+            # Preferred path: queue one TradeCommand per trade; the bot
+            # processes them serially through _atomic_close.
+            if bot_up:
+                cmd = TradeCommand(trade_id=t.id, command="close")
+                session.add(cmd)
+                results.append({"id": t.id, "status": "queued"})
+                continue
+
+            # Bot down — emergency sidecar path (may leave brackets alive).
             try:
                 import httpx
                 import os
@@ -305,7 +363,7 @@ async def close_all_trades():
                         t.exit_time = exit_time
                         t.exit_price = exit_p
                         t.current_price = exit_p
-                        t.exit_reason = "CLOSED (UI CLOSE ALL)"
+                        t.exit_reason = "CLOSED (UI CLOSE ALL — sidecar)"
                         entry = float(t.entry_price) if t.entry_price else 0
                         t.pnl_pct = (exit_p - entry) / entry if entry > 0 else 0
                         t.pnl_usd = (exit_p - entry) * 100 * t.contracts_entered
@@ -316,14 +374,15 @@ async def close_all_trades():
                         continue
             except Exception:
                 pass
-            # Fallback: queue
+            # Last-resort: queue even though we couldn't reach sidecar
             cmd = TradeCommand(trade_id=t.id, command="close")
             session.add(cmd)
             results.append({"id": t.id, "status": "queued"})
 
         session.commit()
         session.close()
-        return {"status": "processed", "trades": results, "count": len(results)}
+        return {"status": "processed", "trades": results, "count": len(results),
+                "routed_via": "bot_queue" if bot_up else "sidecar_emergency"}
     finally:
         session.close()
 
