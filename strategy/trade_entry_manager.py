@@ -346,18 +346,34 @@ class TradeEntryManager:
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         try:
             leg = "PUT" if signal.direction == "SHORT" else "CALL"
+
+            # Human-readable correlation ID — tagged on every bracket
+            # leg's orderRef + stored in trades.client_trade_id.
+            # Format: TICKER-YYMMDD-NN (e.g. INTC-260421-01).
+            # See docs/ib_db_correlation.md.
+            try:
+                from db.trade_ref import generate_trade_ref
+                order_ref = generate_trade_ref(self.ticker)
+            except Exception as e:
+                # Never block an entry on correlation-ID generation;
+                # fall back to untagged orders.
+                log.warning(f"[{self.ticker}] trade_ref generation failed: {e} — proceeding untagged")
+                order_ref = None
+
             log.info(
                 f"[{self.ticker}] PLACING ORDER: signal={signal.signal_type} "
-                f"leg={leg} (entry=${signal.entry_price:.2f} "
+                f"leg={leg} ref={order_ref or '—'} "
+                f"(entry=${signal.entry_price:.2f} "
                 f"sl=${signal.sl:.2f} tp=${signal.tp:.2f})"
             )
             _update_entry_thread("placing", self.ticker,
                                  f"{signal.signal_type} {leg} "
-                                 f"@ ${signal.entry_price:.2f}")
+                                 f"@ ${signal.entry_price:.2f} "
+                                 f"ref={order_ref or '—'}")
             if signal.direction == "SHORT":
-                future = pool.submit(select_and_enter_put, self.client, self.ticker)
+                future = pool.submit(select_and_enter_put, self.client, self.ticker, order_ref)
             else:
-                future = pool.submit(select_and_enter, self.client, self.ticker)
+                future = pool.submit(select_and_enter, self.client, self.ticker, order_ref)
 
             try:
                 return future.result(timeout=60)

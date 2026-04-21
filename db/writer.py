@@ -118,6 +118,7 @@ def insert_trade(trade: dict, account: str) -> int | None:
             ib_con_id=trade.get("ib_con_id"),
             ib_tp_perm_id=trade.get("ib_tp_perm_id"),
             ib_sl_perm_id=trade.get("ib_sl_perm_id"),
+            client_trade_id=trade.get("client_trade_id"),
             profit_target=float(trade.get("profit_target", 0)),
             stop_loss_level=float(trade.get("stop_loss", 0)),
             signal_type=trade.get("signal"),

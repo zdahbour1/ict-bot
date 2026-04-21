@@ -494,13 +494,14 @@ def _restore_brackets_for(session, client, trade_id: int, ticker: str, symbol: s
     from sqlalchemy import text
     # Read current state from DB so we use committed values.
     row = session.execute(text(
-        "SELECT contracts_open, entry_price, profit_target, stop_loss_level "
+        "SELECT contracts_open, entry_price, profit_target, stop_loss_level, "
+        "       client_trade_id "
         "FROM trades WHERE id=:id"
     ), {"id": trade_id}).fetchone()
     if row is None:
         log.warning(f"[RECONCILE] restore: trade {trade_id} not found")
         return
-    contracts, entry, tp_level, sl_level = row
+    contracts, entry, tp_level, sl_level, existing_ref = row
     contracts = int(contracts or 0)
     if contracts <= 0:
         log.info(f"[RECONCILE] restore: trade {trade_id} has contracts_open={contracts}, skipping")
@@ -522,8 +523,11 @@ def _restore_brackets_for(session, client, trade_id: int, ticker: str, symbol: s
         f"{symbol} {contracts}x  TP=${tp_price:.2f}  SL=${sl_price:.2f}"
     )
 
+    # Reuse the trade's original correlation ID so the restored
+    # brackets carry the same tag. Easier to trace in audit logs.
     result = client.place_protection_brackets(
         symbol, contracts, tp_price, sl_price,
+        order_ref=existing_ref,
     )
     if not isinstance(result, dict):
         raise RuntimeError(f"place_protection_brackets returned {result!r}")

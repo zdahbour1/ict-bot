@@ -35,6 +35,8 @@ export interface Trade {
   ib_tp_order_id: number | null;
   ib_sl_order_id: number | null;
   ib_brackets_checked_at: string | null;
+  // Human-readable IB↔DB correlation (format: TICKER-YYMMDD-NN)
+  client_trade_id: string | null;
 }
 
 export interface ThreadStatus {

@@ -280,6 +280,21 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
       cell: info => <Badge text={info.getValue().toUpperCase()} variant={info.getValue()} />,
     }),
     col.accessor('ticker', { header: 'Ticker', cell: info => <strong>{info.getValue()}</strong> }),
+    col.accessor('client_trade_id' as any, {
+      id: 'ref',
+      header: 'Ref',
+      cell: info => {
+        const ref = info.getValue() as string | null;
+        if (!ref) return <span className="text-gray-600">—</span>;
+        // Human-readable correlation ID; matches IB Order.orderRef +
+        // TWS "Order Ref" column. See docs/ib_db_correlation.md.
+        return (
+          <span className="text-[11px] font-mono text-gray-400" title={`IB orderRef: ${ref}`}>
+            {ref}
+          </span>
+        );
+      },
+    }),
     col.accessor('direction', {
       header: 'Type',
       cell: info => {

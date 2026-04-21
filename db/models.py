@@ -50,6 +50,11 @@ class Trade(Base):
     ib_sl_price = Column(Numeric(10, 4))   # working SL stop price from IB
     ib_brackets_checked_at = Column(TIMESTAMP(timezone=True))
 
+    # IB↔DB correlation ID — human-readable, tagged on every bracket
+    # leg via IB Order.orderRef. Format: TICKER-YYMMDD-NN.
+    # See docs/ib_db_correlation.md and db/trade_ref.py.
+    client_trade_id = Column(String(20))
+
     pnl_pct = Column(Numeric(8, 4), default=0)
     pnl_usd = Column(Numeric(12, 4), default=0)
     peak_pnl_pct = Column(Numeric(8, 4), default=0)

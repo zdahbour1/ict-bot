@@ -438,17 +438,25 @@ class IBClient:
 
     # ── Bracket Orders (OCO TP + SL on IB) ────────────────────
     def place_bracket_order(self, option_symbol: str, contracts: int,
-                            action: str, tp_price: float, sl_price: float) -> dict:
-        """Place a bracket order: parent (market) + TP (limit) + SL (stop)."""
+                            action: str, tp_price: float, sl_price: float,
+                            order_ref: str | None = None) -> dict:
+        """Place a bracket order: parent (market) + TP (limit) + SL (stop).
+
+        ``order_ref`` is stamped on all three orders' ``orderRef``
+        field so the parent + TP + SL share one correlation tag
+        visible in IB / TWS and in our DB (``trades.client_trade_id``).
+        See docs/ib_db_correlation.md.
+        """
         if config.DRY_RUN:
-            log.info(f"[DRY RUN] Bracket {action}: {contracts}x {option_symbol} TP=${tp_price:.2f} SL=${sl_price:.2f}")
-            return {"dry_run": True, "symbol": option_symbol}
+            log.info(f"[DRY RUN] Bracket {action}: {contracts}x {option_symbol} TP=${tp_price:.2f} SL=${sl_price:.2f} ref={order_ref}")
+            return {"dry_run": True, "symbol": option_symbol, "order_ref": order_ref}
         return self._submit_to_ib(
-            self._ib_place_bracket, option_symbol, contracts, action, tp_price, sl_price
+            self._ib_place_bracket, option_symbol, contracts, action, tp_price, sl_price, order_ref
         )
 
     def place_protection_brackets(self, option_symbol: str, contracts: int,
-                                   tp_price: float, sl_price: float) -> dict:
+                                   tp_price: float, sl_price: float,
+                                   order_ref: str | None = None) -> dict:
         """Attach TP + SL protection to an EXISTING long position.
 
         Unlike ``place_bracket_order`` (which opens a new trade with a
@@ -467,15 +475,16 @@ class IBClient:
         """
         if config.DRY_RUN:
             log.info(f"[DRY RUN] Restore brackets: {contracts}x {option_symbol} "
-                     f"TP=${tp_price:.2f} SL=${sl_price:.2f}")
-            return {"dry_run": True, "symbol": option_symbol}
+                     f"TP=${tp_price:.2f} SL=${sl_price:.2f} ref={order_ref}")
+            return {"dry_run": True, "symbol": option_symbol, "order_ref": order_ref}
         return self._submit_to_ib(
             self._ib_place_protection_brackets, option_symbol, contracts,
-            tp_price, sl_price
+            tp_price, sl_price, order_ref
         )
 
     def _ib_place_protection_brackets(self, option_symbol, contracts,
-                                       tp_price, sl_price):
+                                       tp_price, sl_price,
+                                       order_ref: str | None = None):
         """Runs on IB thread. Places SELL LMT + SELL STP in an OCA group."""
         contract = self._occ_to_contract(option_symbol)
         if not contract or not contract.conId:
@@ -494,6 +503,8 @@ class IBClient:
         tp_order.transmit = False
         if config.IB_ACCOUNT:
             tp_order.account = config.IB_ACCOUNT
+        if order_ref:
+            tp_order.orderRef = order_ref
 
         sl_order = StopOrder("SELL", contracts, sl_price)
         sl_order.orderId = self.ib.client.getReqId()
@@ -503,6 +514,8 @@ class IBClient:
         sl_order.transmit = True   # last submitted transmits both
         if config.IB_ACCOUNT:
             sl_order.account = config.IB_ACCOUNT
+        if order_ref:
+            sl_order.orderRef = order_ref
 
         tp_trade = self.ib.placeOrder(contract, tp_order)
         sl_trade = self.ib.placeOrder(contract, sl_order)
@@ -537,7 +550,8 @@ class IBClient:
             "sl_status":   sl_trade.orderStatus.status,
         }
 
-    def _ib_place_bracket(self, option_symbol, contracts, action, tp_price, sl_price):
+    def _ib_place_bracket(self, option_symbol, contracts, action, tp_price, sl_price,
+                           order_ref: str | None = None):
         """Runs on IB thread. Places bracket order."""
         contract = self._occ_to_contract(option_symbol)
         if not contract or not contract.conId:
@@ -555,6 +569,8 @@ class IBClient:
         parent.transmit = False
         if config.IB_ACCOUNT:
             parent.account = config.IB_ACCOUNT
+        if order_ref:
+            parent.orderRef = order_ref
 
         # Take profit: limit order
         tp_order = LimitOrder(exit_action, contracts, tp_price)
@@ -563,6 +579,8 @@ class IBClient:
         tp_order.transmit = False
         if config.IB_ACCOUNT:
             tp_order.account = config.IB_ACCOUNT
+        if order_ref:
+            tp_order.orderRef = order_ref
 
         # Stop loss: stop order
         sl_order = StopOrder(exit_action, contracts, sl_price)
@@ -571,6 +589,8 @@ class IBClient:
         sl_order.transmit = True  # last child triggers all
         if config.IB_ACCOUNT:
             sl_order.account = config.IB_ACCOUNT
+        if order_ref:
+            sl_order.orderRef = order_ref
 
         # Place all three
         parent_trade = self.ib.placeOrder(contract, parent)
@@ -602,7 +622,8 @@ class IBClient:
                  f"parent={parent.orderId} permId={perm_id} conId={con_id} "
                  f"status={status} fill=${fill_price:.2f} "
                  f"TP={tp_order.orderId}(perm={tp_perm_id}) @ ${tp_price:.2f} "
-                 f"SL={sl_order.orderId}(perm={sl_perm_id}) @ ${sl_price:.2f}")
+                 f"SL={sl_order.orderId}(perm={sl_perm_id}) @ ${sl_price:.2f} "
+                 f"ref={order_ref or '—'}")
 
         result = {
             "symbol": option_symbol,
@@ -616,6 +637,7 @@ class IBClient:
             "sl_perm_id": sl_perm_id,
             "status": status,
             "fill_price": fill_price,
+            "order_ref": order_ref,
         }
 
         # Attach IB error info if the parent order was rejected/errored
@@ -750,6 +772,7 @@ class IBClient:
                 "auxPrice":   float(getattr(order, "auxPrice", 0) or 0),
                 "symbol":     _normalize_occ(getattr(contract, "localSymbol", "") if contract else ""),
                 "clientId":   getattr(order, "clientId", 0) or 0,
+                "orderRef":   getattr(order, "orderRef", "") or "",
             })
         return results
 
@@ -779,6 +802,11 @@ class IBClient:
                         "totalQty": float(trade.order.totalQuantity),
                         "status": status,
                         "conId": trade.contract.conId if trade.contract else None,
+                        "parentId": getattr(trade.order, "parentId", 0) or 0,
+                        "lmtPrice": float(getattr(trade.order, "lmtPrice", 0) or 0),
+                        "auxPrice": float(getattr(trade.order, "auxPrice", 0) or 0),
+                        "orderRef": getattr(trade.order, "orderRef", "") or "",
+                        "clientId": getattr(trade.order, "clientId", 0) or 0,
                     })
         return results
 

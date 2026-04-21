@@ -12,11 +12,13 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 
-def _session_row(contracts=2, entry_price=1.50, profit_target=3.00, stop_loss_level=0.60):
+def _session_row(contracts=2, entry_price=1.50, profit_target=3.00, stop_loss_level=0.60,
+                  client_trade_id=None):
     """Build a mock session whose execute().fetchone() returns a row."""
     session = MagicMock()
     first = MagicMock()
-    first.fetchone.return_value = (contracts, entry_price, profit_target, stop_loss_level)
+    first.fetchone.return_value = (contracts, entry_price, profit_target, stop_loss_level,
+                                    client_trade_id)
     session.execute.side_effect = [first, MagicMock()]  # first = SELECT, second = UPDATE
     return session
 
@@ -43,7 +45,7 @@ class TestRestoreBracketsFor:
 
         # Called with trade's recorded TP / SL prices
         client.place_protection_brackets.assert_called_once_with(
-            "AAPL260420C00272500", 2, 3.00, 0.60
+            "AAPL260420C00272500", 2, 3.00, 0.60, order_ref=None
         )
 
     def test_skips_when_contracts_zero(self):
