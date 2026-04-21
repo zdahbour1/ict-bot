@@ -210,14 +210,17 @@ def ib_occ_to_contract(ib, occ_symbol: str, contract_cache: dict):
 # Per-instrument contract specs. Expiry intervals + multipliers are
 # fixed by the exchange; strike intervals are the minimum strike step.
 FOP_SPECS = {
-    "MNQ": {"exchange": "GLOBEX", "multiplier": 2,    "strike_interval": 25,   "currency": "USD"},
-    "NQ":  {"exchange": "GLOBEX", "multiplier": 20,   "strike_interval": 25,   "currency": "USD"},
-    "MES": {"exchange": "GLOBEX", "multiplier": 5,    "strike_interval": 5,    "currency": "USD"},
-    "ES":  {"exchange": "GLOBEX", "multiplier": 50,   "strike_interval": 5,    "currency": "USD"},
-    "GC":  {"exchange": "NYMEX",  "multiplier": 100,  "strike_interval": 5,    "currency": "USD"},
-    "MGC": {"exchange": "NYMEX",  "multiplier": 10,   "strike_interval": 5,    "currency": "USD"},
-    "CL":  {"exchange": "NYMEX",  "multiplier": 1000, "strike_interval": 0.5,  "currency": "USD"},
-    "MCL": {"exchange": "NYMEX",  "multiplier": 100,  "strike_interval": 0.5,  "currency": "USD"},
+    # CME exchange name migrated from "GLOBEX" → "CME" in IB API; verified
+    # 2026-04-21 by contract-lookup on paper account (MESM6 resolved on CME
+    # but failed on GLOBEX with error 200).
+    "MNQ": {"exchange": "CME",   "multiplier": 2,    "strike_interval": 25,   "currency": "USD"},
+    "NQ":  {"exchange": "CME",   "multiplier": 20,   "strike_interval": 25,   "currency": "USD"},
+    "MES": {"exchange": "CME",   "multiplier": 5,    "strike_interval": 5,    "currency": "USD"},
+    "ES":  {"exchange": "CME",   "multiplier": 50,   "strike_interval": 5,    "currency": "USD"},
+    "GC":  {"exchange": "NYMEX", "multiplier": 100,  "strike_interval": 5,    "currency": "USD"},
+    "MGC": {"exchange": "NYMEX", "multiplier": 10,   "strike_interval": 5,    "currency": "USD"},
+    "CL":  {"exchange": "NYMEX", "multiplier": 1000, "strike_interval": 0.5,  "currency": "USD"},
+    "MCL": {"exchange": "NYMEX", "multiplier": 100,  "strike_interval": 0.5,  "currency": "USD"},
 }
 
 

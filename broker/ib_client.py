@@ -99,6 +99,13 @@ class IBClientCore:
         if config.IB_ACCOUNT:
             if config.IB_ACCOUNT not in accounts:
                 log.warning(f"Configured account {config.IB_ACCOUNT} not found in {accounts}")
+        # Force real-time data (type 1). IB will auto-fallback to delayed
+        # if not entitled and log a warning. See docs/ib_db_correlation.md.
+        try:
+            self.ib.reqMarketDataType(1)
+            log.info("Requested market data type = 1 (REAL-TIME)")
+        except Exception as e:
+            log.warning(f"reqMarketDataType failed: {e}")
         log.info(f"Connected to IB — accounts: {accounts}")
         self._register_error_handler()
         self._connected = True

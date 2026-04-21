@@ -254,6 +254,12 @@ def fetch_bars_ib(
     ib = IB()
     try:
         ib.connect(host=host, port=port, clientId=client_id, readonly=True)
+        # Force real-time data type (1). If not entitled IB auto-falls
+        # back to delayed; logging makes that visible.
+        try:
+            ib.reqMarketDataType(1)
+        except Exception as e:
+            log.warning(f"reqMarketDataType(1) failed: {e}")
         contract = _build_ib_contract(spec)
         qualified = ib.qualifyContracts(contract)
         if not qualified or not qualified[0] or not getattr(qualified[0], "conId", 0):
@@ -263,8 +269,19 @@ def fetch_bars_ib(
             )
         qualified_contract = qualified[0]
 
-        # IB's endDateTime format: YYYYMMDD HH:MM:SS US/Eastern (empty = now)
-        end_str = end.strftime("%Y%m%d") + " 23:59:59 US/Eastern"
+        # IB's endDateTime format: preferred "YYYYMMDD-HH:MM:SS" (UTC)
+        # per IB 2025 deprecation notice. The old "US/Eastern" space
+        # format now trips error 10314 on many feeds. Empty string means
+        # "now" — use that when end is today or in the future.
+        from datetime import datetime as _dt, time as _time, timezone as _tz
+        end_date_obj = end if isinstance(end, _dt) else _dt.combine(end, _time(23, 59, 59))
+        if end_date_obj.tzinfo is None:
+            end_date_obj = end_date_obj.replace(tzinfo=_tz.utc)
+        now_utc = _dt.now(_tz.utc)
+        if end_date_obj >= now_utc:
+            end_str = ""                          # IB treats empty as "now"
+        else:
+            end_str = end_date_obj.astimezone(_tz.utc).strftime("%Y%m%d-%H:%M:%S")
         bars = ib.reqHistoricalData(
             qualified_contract,
             endDateTime=end_str,

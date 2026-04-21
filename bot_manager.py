@@ -300,6 +300,10 @@ class BotManagerHandler(BaseHTTPRequestHandler):
             ib.connect(host=os.getenv("IB_HOST", "127.0.0.1"),
                        port=int(os.getenv("IB_PORT", "7497")),
                        clientId=99)  # Use clientId 99 to avoid conflict with bot
+            try:
+                ib.reqMarketDataType(1)  # force real-time quotes
+            except Exception:
+                pass
 
             # Check if position exists
             positions = ib.positions()

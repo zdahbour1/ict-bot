@@ -178,7 +178,7 @@ class TestSpecFromTickerRow:
         spec = spec_from_ticker_row("MNQ", "20260619", 22500, "C")
         assert spec.sec_type == "FOP"
         assert spec.symbol == "MNQ"
-        assert spec.exchange == "GLOBEX"
+        assert spec.exchange == "CME"
         assert spec.multiplier == 2
         assert spec.strike == 22500
         assert spec.right == "C"
@@ -186,7 +186,7 @@ class TestSpecFromTickerRow:
     def test_es_resolves(self):
         spec = spec_from_ticker_row("ES", "20260619", 5500, "P")
         assert spec.multiplier == 50
-        assert spec.exchange == "GLOBEX"
+        assert spec.exchange == "CME"
 
     def test_gc_resolves(self):
         spec = spec_from_ticker_row("GC", "20260619", 2500, "C")

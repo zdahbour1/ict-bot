@@ -100,6 +100,16 @@ class IBConnection:
             self.ib.errorEvent += self._on_ib_error
             self._connected = True
             accounts = self.ib.managedAccounts()
+            # Request REAL-TIME data (type 1). Without this, IB defaults
+            # to whatever TWS is configured for — on paper accounts that
+            # often silently falls back to 15-min-delayed data. If the
+            # account isn't entitled, IB will auto-fall-back to delayed
+            # (type 3) and log it; signals stay accurate during sub.
+            try:
+                self.ib.reqMarketDataType(1)
+                log.info(f"[{self.label}] Requested market data type = 1 (REAL-TIME)")
+            except Exception as e:
+                log.warning(f"[{self.label}] reqMarketDataType failed: {e}")
             log.info(f"[{self.label}] Connected — clientId={self.client_id}, accounts={accounts}")
         except Exception as e:
             log.error(f"[{self.label}] Connection failed: {e}")
