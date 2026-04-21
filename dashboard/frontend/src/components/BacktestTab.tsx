@@ -1211,6 +1211,7 @@ function SweepDialog({ onClose, onLaunched, strategies }: {
   const [namePrefix, setNamePrefix] = useState(
     `${defStrategy?.name || 'ict'} sweep ${isoDate(today)}`);
   const [strategyName, setStrategyName] = useState(defStrategy?.name || 'ict');
+  const [secType, setSecType] = useState<'OPT' | 'FOP'>('OPT');
   const [tickers, setTickers] = useState('QQQ,SPY,IWM');
   const [startDate, setStartDate] = useState(isoDate(sixty));
   const [endDate, setEndDate] = useState(isoDate(today));
@@ -1219,11 +1220,32 @@ function SweepDialog({ onClose, onLaunched, strategies }: {
   const [optionVol, setOptionVol] = useState('0.20');
   const [perTicker, setPerTicker] = useState(true);
 
+  // FOP-only base-config. Used when secType === 'FOP'. Quarterly 3rd-
+  // Friday expiries are most liquid; 20260619 is Jun-26 quarterly.
+  // MES/ES/NQ/GC/CL quarterly OPTIONS expire the THURSDAY (T-1) before
+  // the underlying quarterly future — e.g. Jun 2026 underlying expires
+  // 20260619 but options expire 20260618. Don't default to Friday.
+  const [fopExpiry, setFopExpiry] = useState('20260618');
+  const [fopStrike, setFopStrike] = useState('5500');
+  const [fopRight, setFopRight] = useState<'C' | 'P'>('C');
+
+  // Switching to FOP defaults the tickers to CME micros — narrowest
+  // liquid FOP universe. User can override.
+  useEffect(() => {
+    if (secType === 'FOP' && (tickers === 'QQQ,SPY,IWM' || !tickers.trim())) {
+      setTickers('MES,MNQ');
+    } else if (secType === 'OPT' && tickers === 'MES,MNQ') {
+      setTickers('QQQ,SPY,IWM');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [secType]);
+
   // Grid: each param as comma-separated. Empty = don't sweep.
   const [gridPT, setGridPT] = useState('0.5, 1.0, 1.5');
   const [gridSL, setGridSL] = useState('0.4, 0.6, 0.8');
   const [gridInterval, setGridInterval] = useState('');      // e.g. "5m, 15m"
   const [gridDTE, setGridDTE] = useState('');                 // e.g. "1, 3, 7"
+  const [gridFopStrike, setGridFopStrike] = useState('');     // FOP only, e.g. "5400, 5500, 5600"
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1241,12 +1263,14 @@ function SweepDialog({ onClose, onLaunched, strategies }: {
     const sl = parseList(gridSL, true);
     const iv = parseList(gridInterval, false);
     const dte = parseList(gridDTE, true);
+    const fstr = parseList(gridFopStrike, true);
     if (pt.length)  g.profit_target = pt;
     if (sl.length)  g.stop_loss = sl;
     if (iv.length)  g.base_interval = iv;
-    if (dte.length) g.option_dte_days = dte;
+    if (secType === 'OPT' && dte.length) g.option_dte_days = dte;
+    if (secType === 'FOP' && fstr.length) g.fop_strike = fstr;
     return g;
-  }, [gridPT, gridSL, gridInterval, gridDTE]);
+  }, [gridPT, gridSL, gridInterval, gridDTE, gridFopStrike, secType]);
 
   const cellCount = Math.max(1,
     Object.values(grid).reduce((a, v) => a * v.length, 1));
@@ -1266,8 +1290,16 @@ function SweepDialog({ onClose, onLaunched, strategies }: {
           tickers: tickerList,
           start_date: startDate,
           end_date: endDate,
-          base_config: {
+          base_config: secType === 'FOP' ? {
             base_interval: baseInterval,
+            sec_type: 'FOP',
+            fop_expiry: fopExpiry,
+            fop_strike: parseFloat(fopStrike),
+            fop_right: fopRight,
+            data_provider: 'ib',         // FOP historical must come from IB
+          } : {
+            base_interval: baseInterval,
+            sec_type: 'OPT',
             option_dte_days: parseFloat(optionDTE),
             option_vol: parseFloat(optionVol),
           },
@@ -1298,7 +1330,7 @@ function SweepDialog({ onClose, onLaunched, strategies }: {
           <button onClick={onClose} className="text-gray-500 hover:text-white text-xl">&times;</button>
         </div>
         <div className="space-y-3 text-sm">
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-3 gap-3">
             <div>
               <label className="block text-xs text-gray-400 mb-1">Name prefix</label>
               <input value={namePrefix} onChange={e => setNamePrefix(e.target.value)}
@@ -1311,6 +1343,14 @@ function SweepDialog({ onClose, onLaunched, strategies }: {
                 {strategies.map(s =>
                   <option key={s.strategy_id} value={s.name}>{s.display_name} ({s.name})</option>
                 )}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs text-gray-400 mb-1">Instrument</label>
+              <select value={secType} onChange={e => setSecType(e.target.value as 'OPT' | 'FOP')}
+                      className="w-full px-2 py-1 bg-[#0d1117] border border-[#30363d] rounded">
+                <option value="OPT">OPT — equity options</option>
+                <option value="FOP">FOP — futures options (MES/MNQ/ES/NQ)</option>
               </select>
             </div>
           </div>
@@ -1336,28 +1376,63 @@ function SweepDialog({ onClose, onLaunched, strategies }: {
 
           <div className="border border-[#30363d] rounded p-3 space-y-2 bg-[#0d1117]">
             <div className="text-xs text-gray-400 font-semibold">Base config (used for any param NOT swept)</div>
-            <div className="grid grid-cols-3 gap-3">
-              <div>
-                <label className="block text-[11px] text-gray-500 mb-1">Base interval</label>
-                <select value={baseInterval} onChange={e => setBaseInterval(e.target.value)}
-                        className="w-full px-2 py-1 bg-[#161b22] border border-[#30363d] rounded">
-                  <option value="1m">1m</option>
-                  <option value="5m">5m</option>
-                  <option value="15m">15m</option>
-                  <option value="1h">1h</option>
-                </select>
+            {secType === 'OPT' ? (
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-[11px] text-gray-500 mb-1">Base interval</label>
+                  <select value={baseInterval} onChange={e => setBaseInterval(e.target.value)}
+                          className="w-full px-2 py-1 bg-[#161b22] border border-[#30363d] rounded">
+                    <option value="1m">1m</option>
+                    <option value="5m">5m</option>
+                    <option value="15m">15m</option>
+                    <option value="1h">1h</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] text-gray-500 mb-1">Option DTE (days)</label>
+                  <input value={optionDTE} onChange={e => setOptionDTE(e.target.value)}
+                         className="w-full px-2 py-1 bg-[#161b22] border border-[#30363d] rounded" />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-gray-500 mb-1">Option vol</label>
+                  <input value={optionVol} onChange={e => setOptionVol(e.target.value)}
+                         className="w-full px-2 py-1 bg-[#161b22] border border-[#30363d] rounded" />
+                </div>
               </div>
-              <div>
-                <label className="block text-[11px] text-gray-500 mb-1">Option DTE (days)</label>
-                <input value={optionDTE} onChange={e => setOptionDTE(e.target.value)}
-                       className="w-full px-2 py-1 bg-[#161b22] border border-[#30363d] rounded" />
+            ) : (
+              <div className="grid grid-cols-4 gap-3">
+                <div>
+                  <label className="block text-[11px] text-gray-500 mb-1">Base interval</label>
+                  <select value={baseInterval} onChange={e => setBaseInterval(e.target.value)}
+                          className="w-full px-2 py-1 bg-[#161b22] border border-[#30363d] rounded">
+                    <option value="1m">1m</option>
+                    <option value="5m">5m</option>
+                    <option value="15m">15m</option>
+                    <option value="1h">1h</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] text-gray-500 mb-1">FOP expiry (YYYYMMDD)</label>
+                  <input value={fopExpiry} onChange={e => setFopExpiry(e.target.value)}
+                         placeholder="20260619"
+                         className="w-full px-2 py-1 bg-[#161b22] border border-[#30363d] rounded font-mono text-xs" />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-gray-500 mb-1">FOP strike</label>
+                  <input value={fopStrike} onChange={e => setFopStrike(e.target.value)}
+                         placeholder="5500"
+                         className="w-full px-2 py-1 bg-[#161b22] border border-[#30363d] rounded font-mono text-xs" />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-gray-500 mb-1">Right</label>
+                  <select value={fopRight} onChange={e => setFopRight(e.target.value as 'C' | 'P')}
+                          className="w-full px-2 py-1 bg-[#161b22] border border-[#30363d] rounded">
+                    <option value="C">Call</option>
+                    <option value="P">Put</option>
+                  </select>
+                </div>
               </div>
-              <div>
-                <label className="block text-[11px] text-gray-500 mb-1">Option vol</label>
-                <input value={optionVol} onChange={e => setOptionVol(e.target.value)}
-                       className="w-full px-2 py-1 bg-[#161b22] border border-[#30363d] rounded" />
-              </div>
-            </div>
+            )}
           </div>
 
           <div className="border border-[#30363d] rounded p-3 space-y-2 bg-[#0d1117]">
@@ -1383,12 +1458,21 @@ function SweepDialog({ onClose, onLaunched, strategies }: {
                        placeholder="5m, 15m, 1h"
                        className="w-full px-2 py-1 bg-[#161b22] border border-[#30363d] rounded font-mono text-xs" />
               </div>
-              <div>
-                <label className="block text-[11px] text-gray-500 mb-1">option_dte_days</label>
-                <input value={gridDTE} onChange={e => setGridDTE(e.target.value)}
-                       placeholder="1, 3, 7"
-                       className="w-full px-2 py-1 bg-[#161b22] border border-[#30363d] rounded font-mono text-xs" />
-              </div>
+              {secType === 'OPT' ? (
+                <div>
+                  <label className="block text-[11px] text-gray-500 mb-1">option_dte_days</label>
+                  <input value={gridDTE} onChange={e => setGridDTE(e.target.value)}
+                         placeholder="1, 3, 7"
+                         className="w-full px-2 py-1 bg-[#161b22] border border-[#30363d] rounded font-mono text-xs" />
+                </div>
+              ) : (
+                <div>
+                  <label className="block text-[11px] text-gray-500 mb-1">fop_strike</label>
+                  <input value={gridFopStrike} onChange={e => setGridFopStrike(e.target.value)}
+                         placeholder="5400, 5500, 5600"
+                         className="w-full px-2 py-1 bg-[#161b22] border border-[#30363d] rounded font-mono text-xs" />
+                </div>
+              )}
             </div>
           </div>
 

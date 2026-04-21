@@ -38,7 +38,7 @@ for symbol, exchange in [("MES", "CME"), ("ES", "CME"), ("NQ", "CME"),
     strikes = sorted({float(d.contract.strike) for d in details if d.contract.strike})
     print(f"  {len(details)} contracts, {len(expiries)} expiries, "
           f"{len(strikes)} strikes")
-    print(f"  expiries (first 8): {expiries[:8]}")
+    print(f"  ALL expiries: {expiries}")
     if strikes:
         print(f"  strike range: {min(strikes):.1f} .. {max(strikes):.1f}")
 
