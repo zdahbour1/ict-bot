@@ -279,22 +279,30 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
       header: 'Status',
       cell: info => <Badge text={info.getValue().toUpperCase()} variant={info.getValue()} />,
     }),
-    col.accessor('ticker', { header: 'Ticker', cell: info => <strong>{info.getValue()}</strong> }),
-    col.accessor('client_trade_id' as any, {
-      id: 'ref',
-      header: 'Ref',
+    col.accessor('id', {
+      header: 'ID',
       cell: info => {
-        const ref = info.getValue() as string | null;
-        if (!ref) return <span className="text-gray-600">—</span>;
-        // Human-readable correlation ID; matches IB Order.orderRef +
-        // TWS "Order Ref" column. See docs/ib_db_correlation.md.
+        const t = info.row.original;
+        // Mouseover tooltip consolidates every unique reference for
+        // cross-system troubleshooting (DB / IB / TWS / logs).
+        const tooltip = [
+          `DB id:             ${t.id}`,
+          `Ref:               ${t.client_trade_id ?? '—'}  (IB orderRef / TWS "Order Ref")`,
+          `Entry orderId:     ${t.ib_order_id ?? '—'}`,
+          `Entry permId:      ${t.ib_perm_id ?? '—'}  (globally unique)`,
+          `Contract conId:    ${t.ib_con_id ?? '—'}`,
+        ].join('\n');
         return (
-          <span className="text-[11px] font-mono text-gray-400" title={`IB orderRef: ${ref}`}>
-            {ref}
+          <span
+            className="text-[11px] font-mono text-gray-400"
+            title={tooltip}
+          >
+            #{t.id}
           </span>
         );
       },
     }),
+    col.accessor('ticker', { header: 'Ticker', cell: info => <strong>{info.getValue()}</strong> }),
     col.accessor('direction', {
       header: 'Type',
       cell: info => {

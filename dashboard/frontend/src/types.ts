@@ -35,7 +35,12 @@ export interface Trade {
   ib_tp_order_id: number | null;
   ib_sl_order_id: number | null;
   ib_brackets_checked_at: string | null;
-  // Human-readable IB↔DB correlation (format: TICKER-YYMMDD-NN)
+  // Parent (entry) order IDs — shown in ID cell tooltip
+  ib_order_id: number | null;
+  ib_perm_id: number | null;
+  ib_con_id: number | null;
+  // Human-readable IB↔DB correlation (format: TICKER-YYMMDD-NN).
+  // Displayed in the ID cell tooltip, not a standalone column.
   client_trade_id: string | null;
 }
 

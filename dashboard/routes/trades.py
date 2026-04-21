@@ -56,6 +56,14 @@ def _trade_to_dict(t: Trade) -> dict:
             if getattr(t, "ib_brackets_checked_at", None)
             else None
         ),
+        # Parent (entry) order IDs for troubleshooting — unique across
+        # all IB clients when permId is set.
+        "ib_order_id": getattr(t, "ib_order_id", None),
+        "ib_perm_id":  getattr(t, "ib_perm_id", None),
+        "ib_con_id":   getattr(t, "ib_con_id", None),
+        # Human-readable IB↔DB correlation (TICKER-YYMMDD-NN).
+        # Matches IB Order.orderRef / TWS "Order Ref" column.
+        "client_trade_id": getattr(t, "client_trade_id", None),
     }
 
 
