@@ -17,11 +17,27 @@ from __future__ import annotations
 
 import pytest
 import pandas as pd
+from unittest.mock import patch, MagicMock
 
 from strategy.scanner import Scanner
 from strategy.signal_engine import SignalEngine
 from strategy.base_strategy import BaseStrategy, Signal
 from strategy.trade_entry_manager import TradeEntryManager
+
+
+@pytest.fixture(autouse=True)
+def _always_in_trade_window():
+    """can_enter() consults the live market_hours clock; outside RTH it
+    returns 'market closed (past EOD cutoff)' before ever reaching the
+    per-strategy ticker-lock logic. These tests are about the lock, so
+    patch the clock to always-open."""
+    fake_clock = MagicMock()
+    fake_clock.entries_allowed.return_value = True
+    fake_clock.is_past_close.return_value = False
+    fake_clock.in_eod_sweep_window.return_value = False
+    fake_clock.minutes_until_close.return_value = 120.0
+    with patch("strategy.market_hours.get_market_clock", return_value=fake_clock):
+        yield
 
 
 # ─── Shared fakes ─────────────────────────────────────────────
