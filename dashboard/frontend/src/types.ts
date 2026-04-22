@@ -67,6 +67,8 @@ export interface Ticker {
   is_active: boolean;
   contracts: number;
   notes: string | null;
+  // Multi-strategy v2: tickers are scoped per strategy (NOT NULL FK).
+  strategy_id: number;
   created_at: string;
   updated_at: string;
 }
