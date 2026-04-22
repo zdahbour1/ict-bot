@@ -35,25 +35,29 @@ async def trade_poller():
                 from db.models import Trade
                 session = get_session()
                 if session:
-                    # Get all open trades
+                    # Get all open trades. v2: per-leg fields (symbol,
+                    # direction, prices, contracts) now live on trade_legs
+                    # — pull them from the first leg for the single-leg
+                    # strategies we support today.
                     open_trades = session.query(Trade).filter(Trade.status == "open").all()
-                    trades_data = [
-                        {
-                            "id": t.id, "ticker": t.ticker, "symbol": t.symbol,
-                            "direction": t.direction,
-                            "contracts_entered": t.contracts_entered,
-                            "contracts_open": t.contracts_open,
-                            "entry_price": float(t.entry_price) if t.entry_price else 0,
-                            "current_price": float(t.current_price) if t.current_price else 0,
+                    trades_data = []
+                    for t in open_trades:
+                        leg0 = t.legs[0] if t.legs else None
+                        trades_data.append({
+                            "id": t.id, "ticker": t.ticker,
+                            "symbol": leg0.symbol if leg0 else None,
+                            "direction": leg0.direction if leg0 else None,
+                            "contracts_entered": leg0.contracts_entered if leg0 else None,
+                            "contracts_open": leg0.contracts_open if leg0 else None,
+                            "entry_price": float(leg0.entry_price) if leg0 and leg0.entry_price else 0,
+                            "current_price": float(leg0.current_price) if leg0 and leg0.current_price else 0,
                             "pnl_pct": float(t.pnl_pct) if t.pnl_pct else 0,
                             "pnl_usd": float(t.pnl_usd) if t.pnl_usd else 0,
                             "peak_pnl_pct": float(t.peak_pnl_pct) if t.peak_pnl_pct else 0,
                             "dynamic_sl_pct": float(t.dynamic_sl_pct) if t.dynamic_sl_pct else 0,
                             "status": t.status,
                             "entry_time": t.entry_time.isoformat() if t.entry_time else None,
-                        }
-                        for t in open_trades
-                    ]
+                        })
                     session.close()
                     await sio.emit("trade_update", {"trades": trades_data})
         except Exception as e:
