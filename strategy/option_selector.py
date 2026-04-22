@@ -53,9 +53,13 @@ def _trigger_orphan_scan_fast_path(client, ticker: str, option_symbol: str,
         session = get_session()
         has_open_trade = False
         if session is not None:
+            # Phase 2c: ib_con_id moved to trade_legs — join leg 0 for lookup.
             row = session.execute(
-                text("SELECT id FROM trades "
-                     "WHERE ib_con_id = :cid AND status = 'open' LIMIT 1"),
+                text(
+                    "SELECT t.id FROM trades t "
+                    "JOIN trade_legs l ON l.trade_id = t.id AND l.leg_index = 0 "
+                    "WHERE l.ib_con_id = :cid AND t.status = 'open' LIMIT 1"
+                ),
                 {"cid": con_id},
             ).fetchone()
             session.close()

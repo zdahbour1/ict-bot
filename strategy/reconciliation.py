@@ -309,9 +309,11 @@ def _reconcile(client, exit_manager, ib_positions):
         from db.connection import get_session
         session = get_session()
         if session is not None:
+            # Phase 2c: symbol, ib_tp_perm_id, ib_sl_perm_id all live on
+            # trade_legs now; read via the flattened view.
             rows = session.execute(text(
                 "SELECT id, ticker, symbol, ib_tp_perm_id, ib_sl_perm_id "
-                "FROM trades WHERE status='open'"
+                "FROM v_trades_with_first_leg WHERE status='open'"
             )).fetchall()
             for tid, tkr, sym, tp_pid, sl_pid in rows:
                 tp_status = None
@@ -341,14 +343,15 @@ def _reconcile(client, exit_manager, ib_positions):
                     else:
                         sl_status = "MISSING"
 
-                # Write back to the trade row
+                # Write back to the trade row. Phase 2c: all bracket status
+                # fields moved to trade_legs — target leg 0 (single-leg).
                 session.execute(text(
-                    "UPDATE trades SET "
+                    "UPDATE trade_legs SET "
                     "  ib_tp_status=:tps, ib_sl_status=:sls, "
                     "  ib_tp_price=:tpp, ib_sl_price=:slp, "
                     "  ib_tp_order_id=:tpo, ib_sl_order_id=:slo, "
                     "  ib_brackets_checked_at=now() "
-                    "WHERE id=:id"
+                    "WHERE trade_id=:id AND leg_index=0"
                 ), {"tps": tp_status, "sls": sl_status,
                     "tpp": tp_price, "slp": sl_price,
                     "tpo": tp_order_id, "slo": sl_order_id,
@@ -451,9 +454,11 @@ def _get_db_open_trades() -> list:
         session = get_session()
         if not session:
             return []
+        # Phase 2c: symbol/ib_con_id/entry_price/direction live on trade_legs;
+        # read via the flattened single-leg view.
         rows = session.execute(
             text("SELECT id, ticker, symbol, ib_con_id, entry_price, direction "
-                 "FROM trades WHERE status='open'")
+                 "FROM v_trades_with_first_leg WHERE status='open'")
         ).fetchall()
         session.close()
         return [
@@ -492,11 +497,15 @@ def _restore_brackets_for(session, client, trade_id: int, ticker: str, symbol: s
     a time' lock.
     """
     from sqlalchemy import text
-    # Read current state from DB so we use committed values.
+    # Read current state from DB so we use committed values. Phase 2c:
+    # contracts_open/entry_price/profit_target/stop_loss_level moved to
+    # trade_legs; client_trade_id still lives on the trades envelope.
     row = session.execute(text(
-        "SELECT contracts_open, entry_price, profit_target, stop_loss_level, "
-        "       client_trade_id "
-        "FROM trades WHERE id=:id"
+        "SELECT l.contracts_open, l.entry_price, l.profit_target, "
+        "       l.stop_loss_level, t.client_trade_id "
+        "FROM trades t "
+        "JOIN trade_legs l ON l.trade_id = t.id AND l.leg_index = 0 "
+        "WHERE t.id=:id"
     ), {"id": trade_id}).fetchone()
     if row is None:
         log.warning(f"[RECONCILE] restore: trade {trade_id} not found")
@@ -537,13 +546,14 @@ def _restore_brackets_for(session, client, trade_id: int, ticker: str, symbol: s
     sl_order_id = result.get("sl_order_id")
     sl_perm_id  = result.get("sl_perm_id")
 
+    # Phase 2c: every bracket column moved to trade_legs.
     session.execute(text(
-        "UPDATE trades SET "
+        "UPDATE trade_legs SET "
         "  ib_tp_order_id=:tpo, ib_tp_perm_id=:tpp, ib_tp_price=:tpx, "
         "  ib_sl_order_id=:slo, ib_sl_perm_id=:slp, ib_sl_price=:slx, "
         "  ib_tp_status=:tps, ib_sl_status=:sls, "
         "  ib_brackets_checked_at=now() "
-        "WHERE id=:id"
+        "WHERE trade_id=:id AND leg_index=0"
     ), {"tpo": tp_order_id, "tpp": tp_perm_id, "tpx": tp_price,
         "slo": sl_order_id, "slp": sl_perm_id, "slx": sl_price,
         "tps": result.get("tp_status"), "sls": result.get("sl_status"),
@@ -571,8 +581,13 @@ def _get_db_open_con_ids() -> set:
         session = get_session()
         if not session:
             return set()
+        # Phase 2c: ib_con_id now lives on trade_legs.
         rows = session.execute(
-            text("SELECT ib_con_id FROM trades WHERE status='open' AND ib_con_id IS NOT NULL")
+            text(
+                "SELECT l.ib_con_id FROM trades t "
+                "JOIN trade_legs l ON l.trade_id = t.id AND l.leg_index = 0 "
+                "WHERE t.status='open' AND l.ib_con_id IS NOT NULL"
+            )
         ).fetchall()
         session.close()
         return {int(r[0]) for r in rows if r[0]}
@@ -620,8 +635,12 @@ def _get_exit_price(client, ticker, db_trade) -> float:
         from sqlalchemy import text
         session = get_session()
         if session:
+            # Phase 2c: current_price moved to trade_legs.
             row = session.execute(
-                text("SELECT current_price FROM trades WHERE id = :id"),
+                text(
+                    "SELECT current_price FROM trade_legs "
+                    "WHERE trade_id = :id AND leg_index = 0"
+                ),
                 {"id": db_trade.get("id")}
             ).fetchone()
             session.close()

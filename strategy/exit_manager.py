@@ -103,10 +103,16 @@ class ExitManager:
             from db.connection import get_session
             session = get_session()
             if session:
-                # Check by conId first (exact match), then by ticker
+                # Check by conId first (exact match), then by ticker.
+                # Phase 2c: ib_con_id moved to trade_legs — join on leg_index=0
+                # (single-leg trades) so the duplicate guard still works.
                 if con_id:
                     existing = session.execute(
-                        text("SELECT id FROM trades WHERE ib_con_id = :cid AND status = 'open' LIMIT 1"),
+                        text(
+                            "SELECT t.id FROM trades t "
+                            "JOIN trade_legs l ON l.trade_id = t.id AND l.leg_index = 0 "
+                            "WHERE l.ib_con_id = :cid AND t.status = 'open' LIMIT 1"
+                        ),
                         {"cid": con_id}
                     ).fetchone()
                 else:
