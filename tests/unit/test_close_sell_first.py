@@ -134,7 +134,9 @@ class TestVerifyBracketsClearedPostSell:
         trade = _trade()
         ok = verify_brackets_cleared_post_sell(client, trade, timeout=0.6)
         # Explicit cancel attempted for the straggler
-        client.cancel_order_by_id.assert_called_with(9001)
+        # Phase 5: cancel_order_by_id now takes preferred_client_id; when
+        # the trade has no ib_client_id stamped, we pass None.
+        client.cancel_order_by_id.assert_called_with(9001, preferred_client_id=None)
         assert ok is False
 
     def test_fires_handle_error_when_bracket_survives_explicit_cancel(self):

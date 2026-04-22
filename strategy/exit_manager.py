@@ -612,6 +612,9 @@ class ExitManager:
             "ib_perm_id": locked_data["ib_perm_id"],
             "ib_tp_order_id": locked_data["ib_tp_order_id"],
             "ib_sl_order_id": locked_data["ib_sl_order_id"],
+            # Phase 5: pool slot that placed the entry — passed through
+            # to cancel_order_by_id for thread-owned close routing.
+            "ib_client_id": locked_data.get("ib_client_id"),
             # These come from cache — acceptable for exit conditions/enrichment
             "peak_pnl_pct": trade.get("peak_pnl_pct", 0),
             "dynamic_sl_pct": trade.get("dynamic_sl_pct", -0.6),

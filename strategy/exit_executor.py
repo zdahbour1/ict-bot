@@ -98,11 +98,17 @@ def cancel_all_orders_and_verify(client, trade: dict) -> bool:
         POLLS_PER_ROUND = 6
         POLL_SLEEP = 0.5
 
+        # Phase 5: route cancels straight to the owning pool slot when we
+        # know which one placed the order. Falls back to fan-out inside
+        # cancel_order_by_id if the slot is missing or the attempt raises.
+        preferred_cid = trade.get("ib_client_id")
+
         def _send_cancels(ids):
             for oid in ids:
                 try:
-                    client.cancel_order_by_id(oid)
-                    _trace(ticker, f"STEP 2: Cancel sent for orderId={oid}")
+                    client.cancel_order_by_id(oid, preferred_client_id=preferred_cid)
+                    _trace(ticker, f"STEP 2: Cancel sent for orderId={oid}"
+                                   f"{f' (preferred clientId={preferred_cid})' if preferred_cid else ''}")
                 except Exception as e:
                     _trace(ticker, f"STEP 2: Failed to cancel orderId={oid}: {e}", "warn")
 
@@ -244,9 +250,11 @@ def best_effort_cancel_brackets(client, trade: dict) -> None:
         return
     _trace(ticker, f"PRE-SELL cancel: firing best-effort cancel for "
                     f"{len(open_orders)} order(s) (non-blocking)")
+    # Phase 5: prefer the pool slot that placed the entry.
+    preferred_cid = trade.get("ib_client_id")
     for o in open_orders:
         try:
-            client.cancel_order_by_id(o["orderId"])
+            client.cancel_order_by_id(o["orderId"], preferred_client_id=preferred_cid)
         except Exception as e:
             _trace(ticker, f"PRE-SELL cancel: orderId={o['orderId']} raised {e} "
                             "(ignoring, will verify post-SELL)", "warn")
@@ -285,9 +293,11 @@ def verify_brackets_cleared_post_sell(client, trade: dict, timeout: float) -> bo
     _trace(ticker, f"POST-SELL verify: {len(alive)} bracket(s) still alive after "
                     f"{timeout}s — issuing explicit cancel: "
                     f"{[o['orderId'] for o in alive]}", "warn")
+    # Phase 5: prefer the pool slot that placed the entry.
+    preferred_cid = trade.get("ib_client_id")
     for o in alive:
         try:
-            client.cancel_order_by_id(o["orderId"])
+            client.cancel_order_by_id(o["orderId"], preferred_client_id=preferred_cid)
         except Exception as e:
             _trace(ticker, f"POST-SELL verify: explicit cancel orderId={o['orderId']} "
                             f"raised {e}", "warn")

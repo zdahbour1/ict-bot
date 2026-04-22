@@ -229,6 +229,9 @@ def get_open_trades_from_db() -> list:
                 "signal": r.signal_type,
                 "pnl_pct": float(r.pnl_pct) if r.pnl_pct else 0,
                 "pnl_usd": float(r.pnl_usd) if r.pnl_usd else 0,
+                # Phase 5: pool slot that placed the entry — lets close
+                # flow route cancels back to the owning client.
+                "ib_client_id": r.ib_client_id,
             })
         session.close()
         return result
@@ -318,7 +321,7 @@ def lock_trade_for_close(trade_id: int):
         row = session.execute(
             text("SELECT t.id, l.entry_price, l.contracts_entered, l.contracts_open, "
                  "t.ticker, l.symbol, l.ib_con_id, l.ib_order_id, l.ib_perm_id, "
-                 "l.ib_tp_perm_id, l.ib_sl_perm_id, l.direction "
+                 "l.ib_tp_perm_id, l.ib_sl_perm_id, l.direction, t.ib_client_id "
                  "FROM trades t "
                  "LEFT JOIN trade_legs l ON l.trade_id = t.id AND l.leg_index = 0 "
                  "WHERE t.id = :id AND t.status = 'open' FOR UPDATE OF t NOWAIT"),
@@ -341,6 +344,8 @@ def lock_trade_for_close(trade_id: int):
             "ib_tp_order_id": int(row[9]) if row[9] else None,
             "ib_sl_order_id": int(row[10]) if row[10] else None,
             "direction": row[11] or "LONG",
+            # Phase 5: pool slot that placed the entry
+            "ib_client_id": int(row[12]) if row[12] is not None else None,
         }
         log.debug(f"DB: locked trade {trade_id} for close")
         return session, trade_data
