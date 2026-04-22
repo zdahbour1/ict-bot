@@ -622,11 +622,18 @@ class IBOrdersMixin:
             from sqlalchemy import text
             session = get_session()
             if session:
-                rows = session.execute(
-                    text("SELECT ib_order_id FROM trades WHERE status='open' AND ib_order_id IS NOT NULL "
-                         "UNION SELECT ib_tp_perm_id FROM trades WHERE status='open' AND ib_tp_perm_id IS NOT NULL "
-                         "UNION SELECT ib_sl_perm_id FROM trades WHERE status='open' AND ib_sl_perm_id IS NOT NULL")
-                ).fetchall()
+                # Multi-strategy v2: IB order ids moved from trades to trade_legs.
+                # Join so we pick up order ids for every leg of every open trade.
+                rows = session.execute(text(
+                    "SELECT l.ib_order_id   FROM trade_legs l JOIN trades t ON t.id = l.trade_id "
+                    "  WHERE t.status='open' AND l.ib_order_id   IS NOT NULL "
+                    "UNION "
+                    "SELECT l.ib_tp_perm_id FROM trade_legs l JOIN trades t ON t.id = l.trade_id "
+                    "  WHERE t.status='open' AND l.ib_tp_perm_id IS NOT NULL "
+                    "UNION "
+                    "SELECT l.ib_sl_perm_id FROM trade_legs l JOIN trades t ON t.id = l.trade_id "
+                    "  WHERE t.status='open' AND l.ib_sl_perm_id IS NOT NULL"
+                )).fetchall()
                 db_order_ids = {int(r[0]) for r in rows if r[0]}
                 session.close()
         except Exception as e:
