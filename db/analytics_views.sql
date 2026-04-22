@@ -3,20 +3,13 @@
 -- Run: psql -U ict_bot -d ict_bot -f db/analytics_views.sql
 -- ============================================================
 --
--- TODO Phase 2c-2: rewrite v_trades_analytics (and every view that
--- depends on it) to source the moved columns from trade_legs. After the
--- Phase 2a/2b rebuild the following columns no longer exist on the
--- trades table and this file will fail to install:
---     symbol, direction, contracts_entered, contracts_open,
---     contracts_closed, entry_price, exit_price, current_price,
---     profit_target, stop_loss_level, ict_entry, ict_sl, ict_tp,
---     sec_type, multiplier, exchange, currency, underlying,
---     ib_* (order/perm/con ids + bracket status/price/checked_at).
--- Easiest migration is to replace `FROM trades t` with
--- `FROM v_trades_with_first_leg t` (defined in migration 007) for the
--- single-leg case, then audit the multi-leg callsites separately.
--- Deferred because the running bot does not load this file; it is run
--- manually against the dashboard DB.
+-- Phase 2c-2: the moved per-leg columns (symbol, direction, prices,
+-- contracts, bracket ids/status, ict_* and profit_target/stop_loss_level)
+-- now live on trade_legs. v_trades_analytics reads from
+-- v_trades_with_first_leg (defined in migration 007) which surfaces the
+-- first leg's fields at trade level — correct for single-leg strategies
+-- (ICT / ORB / VWAP today). Multi-leg callsites must query the
+-- trade_legs table directly.
 --
 
 -- ── Base view: all trade data with PT timestamps + computed fields ──
@@ -72,7 +65,7 @@ SELECT
         THEN ROUND(EXTRACT(EPOCH FROM (t.exit_time - t.entry_time)) / 60, 1)
         ELSE NULL
     END AS hold_minutes
-FROM trades t;
+FROM v_trades_with_first_leg t;
 
 
 -- ── P&L by ticker ──
