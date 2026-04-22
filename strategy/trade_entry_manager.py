@@ -68,10 +68,16 @@ class TradeEntryManager:
     - Update thread status in DB
     """
 
-    def __init__(self, client, exit_manager, ticker: str):
+    def __init__(self, client, exit_manager, ticker: str,
+                 strategy_id: int = 1, strategy_name: str = "ict"):
         self.client = client
         self.exit_manager = exit_manager
         self.ticker = ticker
+        # Phase 4: per-strategy scoping. The open-trade lock below is
+        # keyed by (strategy_id, ticker) so Strategy A's SPY position
+        # does NOT block Strategy B from entering SPY.
+        self.strategy_id = strategy_id
+        self.strategy_name = strategy_name
         self._trades_today: int = 0
         self._errors_today: int = 0
         self._last_trade_time: datetime | None = None
@@ -93,7 +99,9 @@ class TradeEntryManager:
             return
 
         ticker_in_open = any(
-            t.get("ticker") == self.ticker for t in self.exit_manager.open_trades
+            t.get("ticker") == self.ticker
+            and (t.get("strategy_id") in (None, self.strategy_id))
+            for t in self.exit_manager.open_trades
         )
         if ticker_in_open:
             self._entry_pending = False
@@ -106,7 +114,9 @@ class TradeEntryManager:
     def check_trade_closed(self):
         """Detect when a trade closes — set cooldown and clear state."""
         ticker_has_trade = any(
-            t.get("ticker") == self.ticker for t in self.exit_manager.open_trades
+            t.get("ticker") == self.ticker
+            and (t.get("strategy_id") in (None, self.strategy_id))
+            for t in self.exit_manager.open_trades
         )
         if self._was_in_trade and not ticker_has_trade:
             self._last_exit_time = datetime.now(PT)
@@ -140,9 +150,14 @@ class TradeEntryManager:
             # to the other checks. Monitoring will catch any bad state.
             pass
 
-        # Already in a trade for this ticker?
+        # Already in a trade for this (strategy, ticker)?
+        # Per-strategy lock (Phase 4): Strategy A's SPY open does NOT
+        # block Strategy B from entering SPY. Backed by the
+        # idx_trades_open_per_strategy_ticker partial unique index.
         ticker_has_open = any(
-            t.get("ticker") == self.ticker for t in self.exit_manager.open_trades
+            t.get("ticker") == self.ticker
+            and (t.get("strategy_id") in (None, self.strategy_id))
+            for t in self.exit_manager.open_trades
         )
         if ticker_has_open or self._entry_pending:
             return False, "already in trade"
@@ -277,6 +292,10 @@ class TradeEntryManager:
                 trade["ict_entry"] = signal.entry_price
                 trade["ict_sl"] = signal.sl
                 trade["ict_tp"] = signal.tp
+                # Phase 4: stamp strategy_id so insert_trade() persists
+                # it correctly and the (strategy_id, ticker) unique
+                # index accepts concurrent strategies on same ticker.
+                trade["strategy_id"] = self.strategy_id
 
                 # Entry-time enrichment (Greeks, VIX, indicators)
                 self._enrich_trade(trade, bars_1m)
@@ -441,6 +460,7 @@ class TradeEntryManager:
                     "direction": direction,
                     "ib_order_id": fill.get("order_id"),
                     "_adopted_from_fill": True,
+                    "strategy_id": self.strategy_id,
                 }
 
                 # Register with exit manager (writes to DB)

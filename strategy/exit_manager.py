@@ -116,10 +116,25 @@ class ExitManager:
                         {"cid": con_id}
                     ).fetchone()
                 else:
-                    existing = session.execute(
-                        text("SELECT id FROM trades WHERE ticker = :ticker AND status = 'open' LIMIT 1"),
-                        {"ticker": ticker}
-                    ).fetchone()
+                    # Phase 4: scope the duplicate guard by (strategy_id, ticker)
+                    # so multiple strategies can hold concurrent positions on
+                    # the same ticker. Backed by idx_trades_open_per_strategy_ticker.
+                    sid = trade.get("strategy_id")
+                    if sid is not None:
+                        existing = session.execute(
+                            text(
+                                "SELECT id FROM trades "
+                                "WHERE ticker = :ticker "
+                                "  AND strategy_id = :sid "
+                                "  AND status = 'open' LIMIT 1"
+                            ),
+                            {"ticker": ticker, "sid": sid}
+                        ).fetchone()
+                    else:
+                        existing = session.execute(
+                            text("SELECT id FROM trades WHERE ticker = :ticker AND status = 'open' LIMIT 1"),
+                            {"ticker": ticker}
+                        ).fetchone()
                 session.close()
                 if existing:
                     log.warning(f"[{ticker}] DUPLICATE GUARD: open trade already exists "
