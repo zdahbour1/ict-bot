@@ -92,8 +92,16 @@ def _roadmap_fields(trade: dict) -> dict:
 
 
 def insert_trade(trade: dict, account: str) -> int | None:
-    """Insert a new trade row. Returns the DB id."""
-    from db.models import Trade
+    """Insert a new trade envelope + first leg in one transaction.
+
+    Multi-strategy v2 Phase 2b: the slim `trades` row holds only envelope
+    metadata; all instrument + order fields live on `trade_legs`. Legacy
+    callers still pass a flat dict — we split it between the two tables
+    here and write both atomically.
+
+    Returns the new `trades.id` (integer) or None on failure.
+    """
+    from db.models import Trade, TradeLeg
     session = get_session()
     if not session:
         return None
@@ -104,40 +112,77 @@ def insert_trade(trade: dict, account: str) -> int | None:
             if key in trade:
                 entry_enrichment[key] = trade[key]
 
-        row = Trade(
+        entry_time = trade.get("entry_time", datetime.now(timezone.utc))
+        roadmap = _roadmap_fields(trade)
+
+        # ── Envelope row (trades table) ─────────────────────────────
+        envelope = Trade(
             account=account,
             ticker=trade.get("ticker", "UNK"),
+            strategy_id=_resolve_strategy_id(trade),
+            signal_type=trade.get("signal"),
+            strategy_config=roadmap.get("strategy_config") or {},
+            entry_time=entry_time,
+            status="open",
+            entry_enrichment=_sanitize_for_json(entry_enrichment),
+            notes=trade.get("notes"),
+            client_trade_id=trade.get("client_trade_id"),
+            ib_client_id=trade.get("ib_client_id"),
+            n_legs=1,
+        )
+        session.add(envelope)
+        # Flush to assign envelope.id without committing.
+        session.flush()
+        trade_id = envelope.id
+
+        # ── First leg row (trade_legs table) ────────────────────────
+        leg_kwargs = dict(
+            trade_id=trade_id,
+            leg_index=0,
+            leg_role=trade.get("leg_role"),
+            sec_type=roadmap.get("sec_type", "OPT"),
             symbol=trade["symbol"],
+            underlying=roadmap.get("underlying"),
+            multiplier=roadmap.get("multiplier", 100),
+            exchange=roadmap.get("exchange", "SMART"),
+            currency=roadmap.get("currency", "USD"),
             direction=trade.get("direction", "LONG"),
             contracts_entered=trade["contracts"],
             contracts_open=trade["contracts"],
+            contracts_closed=0,
             entry_price=float(trade["entry_price"]),
-            ib_fill_price=float(trade["entry_price"]),
             current_price=float(trade["entry_price"]),
+            ib_fill_price=float(trade["entry_price"]),
             ib_order_id=trade.get("ib_order_id"),
             ib_perm_id=trade.get("ib_perm_id"),
             ib_con_id=trade.get("ib_con_id"),
+            ib_tp_order_id=trade.get("ib_tp_order_id"),
             ib_tp_perm_id=trade.get("ib_tp_perm_id"),
+            ib_sl_order_id=trade.get("ib_sl_order_id"),
             ib_sl_perm_id=trade.get("ib_sl_perm_id"),
-            client_trade_id=trade.get("client_trade_id"),
-            profit_target=float(trade.get("profit_target", 0)),
-            stop_loss_level=float(trade.get("stop_loss", 0)),
-            signal_type=trade.get("signal"),
+            entry_time=entry_time,
+            leg_status="open",
+            profit_target=float(trade["profit_target"]) if trade.get("profit_target") is not None else None,
+            stop_loss_level=float(trade["stop_loss"]) if trade.get("stop_loss") is not None else None,
             ict_entry=float(trade["ict_entry"]) if trade.get("ict_entry") else None,
             ict_sl=float(trade["ict_sl"]) if trade.get("ict_sl") else None,
             ict_tp=float(trade["ict_tp"]) if trade.get("ict_tp") else None,
-            entry_time=trade.get("entry_time", datetime.now(timezone.utc)),
-            entry_enrichment=_sanitize_for_json(entry_enrichment),
-            strategy_id=_resolve_strategy_id(trade),
-            # Roadmap schema extensions — caller may override, else DB defaults
-            # (OPT / 100 / SMART / USD) fire and behavior is identical to before.
-            **_roadmap_fields(trade),
         )
-        session.add(row)
+        # Option-specific fields (only set when caller provided them)
+        for opt_key in ("strike", "expiry"):
+            if trade.get(opt_key) is not None:
+                leg_kwargs[opt_key] = trade[opt_key]
+        # 'right' is both a reserved word and a builtin — be liberal
+        # about what key the caller passed it under.
+        right_val = trade.get("right") or trade.get("option_right")
+        if right_val is not None:
+            leg_kwargs["right"] = right_val
+
+        leg = TradeLeg(**leg_kwargs)
+        session.add(leg)
         session.commit()
-        trade_id = row.id
         session.close()
-        log.debug(f"DB: inserted trade {trade_id} for {trade.get('ticker')}")
+        log.debug(f"DB: inserted trade {trade_id} + leg 0 for {trade.get('ticker')}")
         return trade_id
     except Exception as e:
         session.rollback()
@@ -148,8 +193,11 @@ def insert_trade(trade: dict, account: str) -> int | None:
 @_safe_db
 def get_open_trades_from_db() -> list:
     """Get all open trades from DB. Used by exit_manager as source of truth.
-    Returns list of trade dicts with all fields needed for monitoring."""
-    from db.models import Trade
+    Returns list of trade dicts with all fields needed for monitoring.
+
+    Multi-strategy v2 Phase 2b: trade envelope joined with first leg
+    (single-leg strategies only — multi-leg support lands in Phase 2c+)."""
+    from db.models import Trade, TradeLeg
     session = get_session()
     if not session:
         return []
@@ -157,22 +205,25 @@ def get_open_trades_from_db() -> list:
         rows = session.query(Trade).filter(Trade.status == "open").all()
         result = []
         for r in rows:
+            leg = r.legs[0] if r.legs else None
+            if leg is None:
+                continue  # envelope with no legs — skip (shouldn't happen)
             result.append({
                 "db_id": r.id,
                 "ticker": r.ticker,
-                "symbol": r.symbol,
-                "contracts": r.contracts_open,
-                "direction": r.direction or "LONG",
-                "entry_price": float(r.entry_price) if r.entry_price else 0,
+                "symbol": leg.symbol,
+                "contracts": leg.contracts_open,
+                "direction": leg.direction or "LONG",
+                "entry_price": float(leg.entry_price) if leg.entry_price else 0,
                 "entry_time": r.entry_time,
-                "current_price": float(r.current_price) if r.current_price else 0,
-                "profit_target": float(r.profit_target) if r.profit_target else 0,
-                "stop_loss": float(r.stop_loss_level) if r.stop_loss_level else 0,
-                "ib_con_id": r.ib_con_id,
-                "ib_order_id": r.ib_order_id,
-                "ib_perm_id": r.ib_perm_id,
-                "ib_tp_order_id": r.ib_tp_perm_id,
-                "ib_sl_order_id": r.ib_sl_perm_id,
+                "current_price": float(leg.current_price) if leg.current_price else 0,
+                "profit_target": float(leg.profit_target) if leg.profit_target else 0,
+                "stop_loss": float(leg.stop_loss_level) if leg.stop_loss_level else 0,
+                "ib_con_id": leg.ib_con_id,
+                "ib_order_id": leg.ib_order_id,
+                "ib_perm_id": leg.ib_perm_id,
+                "ib_tp_order_id": leg.ib_tp_perm_id,
+                "ib_sl_order_id": leg.ib_sl_perm_id,
                 "peak_pnl_pct": float(r.peak_pnl_pct) if r.peak_pnl_pct else 0,
                 "dynamic_sl_pct": float(r.dynamic_sl_pct) if r.dynamic_sl_pct else -0.6,
                 "signal": r.signal_type,
@@ -190,19 +241,29 @@ def get_open_trades_from_db() -> list:
 def update_trade_price(trade_id: int, current_price: float, pnl_pct: float,
                        pnl_usd: float, peak_pnl_pct: float, dynamic_sl_pct: float):
     """Update live pricing for an open trade. Only updates if trade is still open.
-    Uses GREATEST() to never downgrade peak_pnl_pct."""
+    Uses GREATEST() to never downgrade peak_pnl_pct.
+
+    Multi-strategy v2 Phase 2b: current_price moves to trade_legs.
+    pnl/peak/dynamic_sl stay on the envelope (cached aggregate)."""
     from sqlalchemy import text
     session = get_session()
     if not session:
         return
     try:
+        # Envelope-level aggregates
         session.execute(
-            text("UPDATE trades SET current_price=:cp, pnl_pct=:pp, pnl_usd=:pu, "
+            text("UPDATE trades SET pnl_pct=:pp, pnl_usd=:pu, "
                  "peak_pnl_pct = GREATEST(peak_pnl_pct, :peak), "
                  "dynamic_sl_pct=:dsl "
                  "WHERE id=:id AND status='open'"),
-            {"cp": current_price, "pp": pnl_pct, "pu": pnl_usd,
+            {"pp": pnl_pct, "pu": pnl_usd,
              "peak": peak_pnl_pct, "dsl": dynamic_sl_pct, "id": trade_id}
+        )
+        # Per-leg current price (first leg for single-leg strategies)
+        session.execute(
+            text("UPDATE trade_legs SET current_price=:cp "
+                 "WHERE trade_id=:id AND leg_index=0 AND leg_status='open'"),
+            {"cp": current_price, "id": trade_id}
         )
         session.commit()
         session.close()
@@ -251,11 +312,16 @@ def lock_trade_for_close(trade_id: int):
     if not session:
         return None, None
     try:
-        # NOWAIT: fail immediately if another process holds the lock
+        # NOWAIT: fail immediately if another process holds the lock.
+        # Multi-strategy v2 Phase 2b: envelope joins first leg for the
+        # per-instrument fields the caller needs.
         row = session.execute(
-            text("SELECT id, entry_price, contracts_entered, contracts_open, ticker, symbol, "
-                 "ib_con_id, ib_order_id, ib_perm_id, ib_tp_perm_id, ib_sl_perm_id, direction "
-                 "FROM trades WHERE id = :id AND status = 'open' FOR UPDATE NOWAIT"),
+            text("SELECT t.id, l.entry_price, l.contracts_entered, l.contracts_open, "
+                 "t.ticker, l.symbol, l.ib_con_id, l.ib_order_id, l.ib_perm_id, "
+                 "l.ib_tp_perm_id, l.ib_sl_perm_id, l.direction "
+                 "FROM trades t "
+                 "LEFT JOIN trade_legs l ON l.trade_id = t.id AND l.leg_index = 0 "
+                 "WHERE t.id = :id AND t.status = 'open' FOR UPDATE OF t NOWAIT"),
             {"id": trade_id}
         ).fetchone()
 
@@ -265,8 +331,9 @@ def lock_trade_for_close(trade_id: int):
             return None, None
 
         trade_data = {
-            "id": row[0], "entry_price": float(row[1]),
-            "contracts_entered": int(row[2]), "contracts_open": int(row[3]),
+            "id": row[0], "entry_price": float(row[1]) if row[1] is not None else 0.0,
+            "contracts_entered": int(row[2]) if row[2] is not None else 0,
+            "contracts_open": int(row[3]) if row[3] is not None else 0,
             "ticker": row[4], "symbol": row[5],
             "ib_con_id": int(row[6]) if row[6] else None,
             "ib_order_id": int(row[7]) if row[7] else None,
@@ -296,8 +363,11 @@ def finalize_close(session, trade_id: int, exit_price: float, result: str,
     import json as json_mod
     from sqlalchemy import text
     try:
+        # Multi-strategy v2 Phase 2b: per-leg figures live on trade_legs;
+        # envelope keeps only the aggregated lifecycle fields.
         row = session.execute(
-            text("SELECT entry_price, contracts_entered FROM trades WHERE id = :id"),
+            text("SELECT entry_price, contracts_entered FROM trade_legs "
+                 "WHERE trade_id = :id AND leg_index = 0"),
             {"id": trade_id}
         ).fetchone()
         entry_price = float(row[0]) if row else 0
@@ -308,15 +378,22 @@ def finalize_close(session, trade_id: int, exit_price: float, result: str,
 
         safe_enrichment = _sanitize_for_json(exit_enrichment or {})
 
+        # Update the leg (instrument-level state)
         session.execute(
-            text("UPDATE trades SET exit_price=:ep, current_price=:ep, "
-                 "pnl_pct=:pp, pnl_usd=:pu, exit_time=NOW(), "
-                 "status='closed', exit_reason=:rn, exit_result=:er, "
+            text("UPDATE trade_legs SET exit_price=:ep, current_price=:ep, "
                  "contracts_open=0, contracts_closed=:cc, "
+                 "leg_status='closed', exit_time=NOW() "
+                 "WHERE trade_id=:id AND leg_index=0"),
+            {"ep": exit_price, "cc": contracts, "id": trade_id}
+        )
+        # Update the envelope (lifecycle + aggregated P&L cache)
+        session.execute(
+            text("UPDATE trades SET pnl_pct=:pp, pnl_usd=:pu, exit_time=NOW(), "
+                 "status='closed', exit_reason=:rn, exit_result=:er, "
                  "exit_enrichment=CAST(:ee AS jsonb) "
                  "WHERE id=:id"),
-            {"ep": exit_price, "pp": pnl_pct, "pu": pnl_usd,
-             "rn": reason, "er": result, "cc": contracts,
+            {"pp": pnl_pct, "pu": pnl_usd,
+             "rn": reason, "er": result,
              "ee": json_mod.dumps(safe_enrichment), "id": trade_id}
         )
         session.commit()
@@ -378,14 +455,20 @@ def record_partial_close(trade_id: int, contracts: int, close_price: float,
         )
         session.add(close)
 
+        # Multi-strategy v2 Phase 2b: contract counts + exit_price on leg;
+        # envelope only carries status + exit_time.
         trade = session.query(Trade).filter(Trade.id == trade_id).first()
         if trade:
-            trade.contracts_open = max(0, trade.contracts_open - contracts)
-            trade.contracts_closed += contracts
-            if trade.contracts_open == 0:
-                trade.status = "closed"
-                trade.exit_time = datetime.now(timezone.utc)
-                trade.exit_price = close_price
+            leg = trade.legs[0] if trade.legs else None
+            if leg:
+                leg.contracts_open = max(0, leg.contracts_open - contracts)
+                leg.contracts_closed += contracts
+                if leg.contracts_open == 0:
+                    leg.leg_status = "closed"
+                    leg.exit_time = datetime.now(timezone.utc)
+                    leg.exit_price = close_price
+                    trade.status = "closed"
+                    trade.exit_time = datetime.now(timezone.utc)
 
         session.commit()
         session.close()

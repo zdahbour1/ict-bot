@@ -3,7 +3,7 @@ SQLAlchemy ORM models for all 8 database tables.
 """
 from datetime import datetime, timezone
 from sqlalchemy import (
-    Column, Integer, String, Boolean, Text, Numeric, Date, DateTime,
+    Column, Integer, SmallInteger, String, Boolean, Text, Numeric, Date, DateTime,
     TIMESTAMP,
     ForeignKey, CheckConstraint, UniqueConstraint, Index
 )
@@ -18,93 +18,141 @@ def utcnow():
 
 
 class Trade(Base):
+    """Logical "deal" envelope. Per-leg IB order details live in TradeLeg.
+
+    Multi-strategy v2 Phase 2b: this table no longer carries per-leg instrument
+    or order data. One Trade may have N TradeLeg rows (1 for single-leg
+    strategies, N for delta-neutral / spreads).
+    See docs/multi_strategy_architecture_v2.md §2.
+    """
     __tablename__ = "trades"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     account = Column(String(20), nullable=False, index=True)
     ticker = Column(String(10), nullable=False, index=True)
-    symbol = Column(String(40), nullable=False)
-    direction = Column(String(5), nullable=False, default="LONG")
+    strategy_id = Column(Integer, ForeignKey("strategies.strategy_id"),
+                         nullable=False, index=True)
 
-    contracts_entered = Column(Integer, nullable=False)
-    contracts_open = Column(Integer, nullable=False)
-    contracts_closed = Column(Integer, nullable=False, default=0)
+    # Signal metadata (strategy-level — applies to the whole deal)
+    signal_type = Column(String(40))
+    # Snapshot of strategy tuning params at trade time.
+    strategy_config = Column(JSONB, nullable=False, default=dict)
 
-    entry_price = Column(Numeric(10, 4), nullable=False)
-    exit_price = Column(Numeric(10, 4))
-    current_price = Column(Numeric(10, 4))
-    ib_fill_price = Column(Numeric(10, 4))
-    ib_order_id = Column(Integer)
-    ib_perm_id = Column(Integer)       # IB permanent order ID (survives restarts)
-    ib_tp_perm_id = Column(Integer)    # TP bracket leg permanent ID
-    ib_sl_perm_id = Column(Integer)    # SL bracket leg permanent ID
-    ib_con_id = Column(Integer)        # IB contract ID (unique per option)
-
-    # Bracket health — refreshed by reconcile PASS 4 every cycle.
-    # See strategy/reconciliation.py and docs/logging_and_audit.md.
-    ib_tp_order_id = Column(Integer)    # current orderId for TP (may change)
-    ib_sl_order_id = Column(Integer)    # current orderId for SL (may change)
-    ib_tp_status = Column(String(20))   # Submitted / PreSubmitted / Cancelled / MISSING / etc.
-    ib_sl_status = Column(String(20))
-    ib_tp_price = Column(Numeric(10, 4))   # working TP limit price from IB
-    ib_sl_price = Column(Numeric(10, 4))   # working SL stop price from IB
-    ib_brackets_checked_at = Column(TIMESTAMP(timezone=True))
-
-    # IB↔DB correlation ID — human-readable, tagged on every bracket
-    # leg via IB Order.orderRef. Format: TICKER-YYMMDD-NN.
-    # See docs/ib_db_correlation.md and db/trade_ref.py.
-    # Format: ``<strategy>-<TICKER>-<YYMMDD>-<NN>`` (e.g. 'ict-SPY-260421-01').
-    # Widened to 40 chars in migration 006 to fit strategy prefix.
-    client_trade_id = Column(String(40))
-
+    # Aggregated P&L across all legs (cached for fast reads;
+    # v_trades_aggregate_pnl view is authoritative on cache drift).
     pnl_pct = Column(Numeric(8, 4), default=0)
     pnl_usd = Column(Numeric(12, 4), default=0)
     peak_pnl_pct = Column(Numeric(8, 4), default=0)
     dynamic_sl_pct = Column(Numeric(8, 4), default=-0.60)
 
-    profit_target = Column(Numeric(10, 4), nullable=False)
-    stop_loss_level = Column(Numeric(10, 4), nullable=False)
-
-    signal_type = Column(String(40))
-    ict_entry = Column(Numeric(10, 4))
-    ict_sl = Column(Numeric(10, 4))
-    ict_tp = Column(Numeric(10, 4))
-
+    # Lifecycle
     entry_time = Column(DateTime(timezone=True), nullable=False)
     exit_time = Column(DateTime(timezone=True))
-
     status = Column(String(10), nullable=False, default="open", index=True)
     exit_reason = Column(String(40))
     exit_result = Column(String(10))
     error_message = Column(Text)
 
+    # Observability
     entry_enrichment = Column(JSONB, default={})
     exit_enrichment = Column(JSONB, default={})
     notes = Column(Text)
 
-    # ENH-024 rollout #1: strategy attribution (audit only — logic unchanged)
-    strategy_id = Column(Integer, ForeignKey("strategies.strategy_id"),
-                         nullable=False, index=True)
-
-    # Roadmap schema extensions (forward-compatible; defaults = today's behavior)
-    # Security typing for OPT / FOP / STK / FUT / BAG
-    sec_type = Column(String(5), nullable=False, default="OPT")
-    multiplier = Column(Integer, nullable=False, default=100)
-    exchange = Column(String(20), nullable=False, default="SMART")
-    currency = Column(String(5), nullable=False, default="USD")
-    underlying = Column(String(20))
-    # Snapshot of strategy tuning params at trade time (distinct from
-    # strategy_id/signal_type — this captures the exact values like
-    # PROFIT_TARGET/STOP_LOSS/ROLL_THRESHOLD that produced this trade).
-    strategy_config = Column(JSONB, nullable=False, default=dict)
+    # Cross-system correlation — human-readable ref tagged on every
+    # bracket leg via IB Order.orderRef.
+    # Format: ``<strategy>-<TICKER>-<YYMMDD>-<NN>`` (e.g. 'ict-SPY-260421-01').
+    client_trade_id = Column(String(40))
+    # Pool slot that placed the first leg — Phase 5 uses for close routing.
+    ib_client_id = Column(SmallInteger)
+    # Cached leg count (1 for single-leg, N for multi-leg).
+    n_legs = Column(SmallInteger, nullable=False, default=1)
 
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
-    updated_at = Column(DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False,
+                         default=utcnow, onupdate=utcnow)
 
+    # Relationships
+    legs = relationship("TradeLeg", back_populates="trade",
+                         cascade="all, delete-orphan",
+                         order_by="TradeLeg.leg_index")
     closes = relationship("TradeClose", back_populates="trade", cascade="all, delete-orphan")
     commands = relationship("TradeCommand", back_populates="trade", cascade="all, delete-orphan")
     errors = relationship("Error", back_populates="trade")
     strategy = relationship("Strategy", back_populates="trades")
+
+
+class TradeLeg(Base):
+    """Individual IB order leg belonging to a Trade envelope.
+
+    Carries every per-instrument and per-order field that used to live on
+    the monolithic trades table. Single-leg strategies have one row per
+    trade (leg_index=0). Multi-leg strategies have N rows.
+    """
+    __tablename__ = "trade_legs"
+
+    leg_id = Column(Integer, primary_key=True, autoincrement=True)
+    trade_id = Column(Integer, ForeignKey("trades.id", ondelete="CASCADE"),
+                       nullable=False, index=True)
+    leg_index = Column(SmallInteger, nullable=False, default=0)
+    leg_role = Column(String(30))  # 'short_call', 'hedge_stock', etc.
+
+    # Instrument definition
+    sec_type = Column(String(5), nullable=False, default="OPT")
+    symbol = Column(String(40), nullable=False)
+    underlying = Column(String(20))
+    strike = Column(Numeric(10, 4))
+    # 'right' is a SQL reserved word — map to a quoted DB column.
+    right = Column("right", String(1))
+    expiry = Column(String(8))
+    multiplier = Column(Integer, nullable=False, default=100)
+    exchange = Column(String(20), nullable=False, default="SMART")
+    currency = Column(String(5), nullable=False, default="USD")
+
+    # Position state
+    direction = Column(String(5), nullable=False, default="LONG")
+    contracts_entered = Column(Integer, nullable=False)
+    contracts_open = Column(Integer, nullable=False)
+    contracts_closed = Column(Integer, nullable=False, default=0)
+
+    # Pricing
+    entry_price = Column(Numeric(10, 4), nullable=False)
+    exit_price = Column(Numeric(10, 4))
+    current_price = Column(Numeric(10, 4))
+    ib_fill_price = Column(Numeric(10, 4))
+
+    # Strategy-provided reference levels
+    profit_target = Column(Numeric(10, 4))
+    stop_loss_level = Column(Numeric(10, 4))
+    ict_entry = Column(Numeric(10, 4))
+    ict_sl = Column(Numeric(10, 4))
+    ict_tp = Column(Numeric(10, 4))
+
+    # IB identifiers for this leg's parent (entry) order
+    ib_order_id = Column(Integer)
+    ib_perm_id = Column(Integer)
+    ib_con_id = Column(Integer)
+
+    # Protective brackets
+    ib_tp_order_id = Column(Integer)
+    ib_tp_perm_id = Column(Integer)
+    ib_tp_status = Column(String(20))
+    ib_tp_price = Column(Numeric(10, 4))
+    ib_sl_order_id = Column(Integer)
+    ib_sl_perm_id = Column(Integer)
+    ib_sl_status = Column(String(20))
+    ib_sl_price = Column(Numeric(10, 4))
+    ib_brackets_checked_at = Column(DateTime(timezone=True))
+
+    # Lifecycle (per-leg)
+    entry_time = Column(DateTime(timezone=True), nullable=False)
+    exit_time = Column(DateTime(timezone=True))
+    leg_status = Column(String(10), nullable=False, default="open")
+
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False,
+                         default=utcnow, onupdate=utcnow)
+
+    trade = relationship("Trade", back_populates="legs")
 
 
 class TradeClose(Base):
