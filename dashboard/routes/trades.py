@@ -15,21 +15,29 @@ class CloseRequest(BaseModel):
 
 
 def _trade_to_dict(t: Trade) -> dict:
+    # Multi-strategy v2: per-leg fields (symbol, direction, prices,
+    # contracts, IB identifiers, brackets, strategy levels) now live on
+    # trade_legs. For single-leg strategies (everything today) we surface
+    # the first leg's fields at trade level to preserve the legacy
+    # envelope-shaped response the UI expects.
+    leg0 = t.legs[0] if t.legs else None
     return {
-        "id": t.id, "account": t.account, "ticker": t.ticker, "symbol": t.symbol,
-        "direction": t.direction,
-        "contracts_entered": t.contracts_entered, "contracts_open": t.contracts_open,
-        "contracts_closed": t.contracts_closed,
-        "entry_price": float(t.entry_price) if t.entry_price else None,
-        "exit_price": float(t.exit_price) if t.exit_price else None,
-        "current_price": float(t.current_price) if t.current_price else None,
-        "ib_fill_price": float(t.ib_fill_price) if t.ib_fill_price else None,
+        "id": t.id, "account": t.account, "ticker": t.ticker,
+        "symbol": leg0.symbol if leg0 else None,
+        "direction": leg0.direction if leg0 else None,
+        "contracts_entered": leg0.contracts_entered if leg0 else None,
+        "contracts_open": leg0.contracts_open if leg0 else None,
+        "contracts_closed": leg0.contracts_closed if leg0 else None,
+        "entry_price": float(leg0.entry_price) if leg0 and leg0.entry_price else None,
+        "exit_price": float(leg0.exit_price) if leg0 and leg0.exit_price else None,
+        "current_price": float(leg0.current_price) if leg0 and leg0.current_price else None,
+        "ib_fill_price": float(leg0.ib_fill_price) if leg0 and leg0.ib_fill_price else None,
         "pnl_pct": float(t.pnl_pct) if t.pnl_pct else 0,
         "pnl_usd": float(t.pnl_usd) if t.pnl_usd else 0,
         "peak_pnl_pct": float(t.peak_pnl_pct) if t.peak_pnl_pct else 0,
         "dynamic_sl_pct": float(t.dynamic_sl_pct) if t.dynamic_sl_pct else 0,
-        "profit_target": float(t.profit_target) if t.profit_target else None,
-        "stop_loss_level": float(t.stop_loss_level) if t.stop_loss_level else None,
+        "profit_target": float(leg0.profit_target) if leg0 and leg0.profit_target else None,
+        "stop_loss_level": float(leg0.stop_loss_level) if leg0 and leg0.stop_loss_level else None,
         "signal_type": t.signal_type,
         "entry_time": t.entry_time.isoformat() if t.entry_time else None,
         "exit_time": t.exit_time.isoformat() if t.exit_time else None,
@@ -38,29 +46,29 @@ def _trade_to_dict(t: Trade) -> dict:
         "entry_enrichment": t.entry_enrichment or {},
         "exit_enrichment": t.exit_enrichment or {},
         "notes": t.notes,
-        # Bracket visibility (updated by reconcile PASS 4).
+        # Bracket visibility (updated by reconcile PASS 4). Now on the leg.
         # Status values: Submitted / PreSubmitted / PendingSubmit
         # (active), Cancelled / ApiCancelled / Inactive / Filled
         # (terminal), MISSING (permId not found on IB at all),
         # NULL (never placed / old row).
-        "ib_tp_perm_id":   t.ib_tp_perm_id,
-        "ib_sl_perm_id":   t.ib_sl_perm_id,
-        "ib_tp_status":    getattr(t, "ib_tp_status", None),
-        "ib_sl_status":    getattr(t, "ib_sl_status", None),
-        "ib_tp_price":     float(t.ib_tp_price) if getattr(t, "ib_tp_price", None) else None,
-        "ib_sl_price":     float(t.ib_sl_price) if getattr(t, "ib_sl_price", None) else None,
-        "ib_tp_order_id":  getattr(t, "ib_tp_order_id", None),
-        "ib_sl_order_id":  getattr(t, "ib_sl_order_id", None),
+        "ib_tp_perm_id":   leg0.ib_tp_perm_id if leg0 else None,
+        "ib_sl_perm_id":   leg0.ib_sl_perm_id if leg0 else None,
+        "ib_tp_status":    leg0.ib_tp_status if leg0 else None,
+        "ib_sl_status":    leg0.ib_sl_status if leg0 else None,
+        "ib_tp_price":     float(leg0.ib_tp_price) if leg0 and leg0.ib_tp_price else None,
+        "ib_sl_price":     float(leg0.ib_sl_price) if leg0 and leg0.ib_sl_price else None,
+        "ib_tp_order_id":  leg0.ib_tp_order_id if leg0 else None,
+        "ib_sl_order_id":  leg0.ib_sl_order_id if leg0 else None,
         "ib_brackets_checked_at": (
-            t.ib_brackets_checked_at.isoformat()
-            if getattr(t, "ib_brackets_checked_at", None)
+            leg0.ib_brackets_checked_at.isoformat()
+            if leg0 and leg0.ib_brackets_checked_at
             else None
         ),
         # Parent (entry) order IDs for troubleshooting — unique across
-        # all IB clients when permId is set.
-        "ib_order_id": getattr(t, "ib_order_id", None),
-        "ib_perm_id":  getattr(t, "ib_perm_id", None),
-        "ib_con_id":   getattr(t, "ib_con_id", None),
+        # all IB clients when permId is set. Now on the leg.
+        "ib_order_id": leg0.ib_order_id if leg0 else None,
+        "ib_perm_id":  leg0.ib_perm_id if leg0 else None,
+        "ib_con_id":   leg0.ib_con_id if leg0 else None,
         # Human-readable IB↔DB correlation (TICKER-YYMMDD-NN).
         # Matches IB Order.orderRef / TWS "Order Ref" column.
         "client_trade_id": getattr(t, "client_trade_id", None),
@@ -242,15 +250,19 @@ async def close_trade(trade_id: int, req: CloseRequest = CloseRequest()):
                             "(atomic close + pool-aware bracket cleanup)"}
 
         # Bot down — use sidecar's direct-IB close (emergency path).
+        # v2: per-leg fields live on trade.legs[0] (single-leg only here).
+        leg0 = trade.legs[0] if trade.legs else None
+        if leg0 is None:
+            raise HTTPException(500, f"Trade {trade_id} has no legs — cannot close")
         try:
             import httpx
             import os
             sidecar_url = os.getenv("BOT_SIDECAR_URL", "http://host.docker.internal:9000")
             async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.post(f"{sidecar_url}/close-trade",
-                    json={"trade_id": trade_id, "symbol": trade.symbol,
-                          "ticker": trade.ticker, "contracts": req.contracts or trade.contracts_open,
-                          "direction": trade.direction})
+                    json={"trade_id": trade_id, "symbol": leg0.symbol,
+                          "ticker": trade.ticker, "contracts": req.contracts or leg0.contracts_open,
+                          "direction": leg0.direction})
                 if resp.status_code == 200:
                     result = resp.json()
                     # Update DB based on sidecar response
@@ -258,7 +270,7 @@ async def close_trade(trade_id: int, req: CloseRequest = CloseRequest()):
 
                     # Use IB fill price, fall back to last known price
                     ib_exit_price = result.get("exit_price", 0)
-                    exit_p = float(ib_exit_price) if ib_exit_price else float(trade.current_price or trade.entry_price or 0)
+                    exit_p = float(ib_exit_price) if ib_exit_price else float(leg0.current_price or leg0.entry_price or 0)
 
                     # Use IB execution time, fall back to now
                     ib_exit_time = result.get("exit_time")
@@ -277,14 +289,16 @@ async def close_trade(trade_id: int, req: CloseRequest = CloseRequest()):
 
                     trade.status = "closed"
                     trade.exit_time = exit_time
-                    trade.exit_price = exit_p
-                    trade.current_price = exit_p  # sync current with exit
-                    entry = float(trade.entry_price) if trade.entry_price else 0
+                    leg0.exit_price = exit_p
+                    leg0.current_price = exit_p  # sync current with exit
+                    leg0.exit_time = exit_time
+                    leg0.leg_status = "closed"
+                    entry = float(leg0.entry_price) if leg0.entry_price else 0
                     trade.pnl_pct = (exit_p - entry) / entry if entry > 0 else 0
-                    trade.pnl_usd = (exit_p - entry) * 100 * trade.contracts_entered
+                    trade.pnl_usd = (exit_p - entry) * 100 * leg0.contracts_entered
                     trade.exit_result = "WIN" if trade.pnl_pct > 0 else "LOSS" if trade.pnl_pct < 0 else "SCRATCH"
-                    trade.contracts_open = 0
-                    trade.contracts_closed = trade.contracts_entered
+                    leg0.contracts_open = 0
+                    leg0.contracts_closed = leg0.contracts_entered
                     session.commit()
                     session.close()
                     return {"status": "closed", "trade_id": trade_id, "detail": result}
@@ -337,20 +351,25 @@ async def close_all_trades():
                 continue
 
             # Bot down — emergency sidecar path (may leave brackets alive).
+            # v2: per-leg fields live on t.legs[0] (single-leg only here).
+            leg0 = t.legs[0] if t.legs else None
+            if leg0 is None:
+                results.append({"id": t.id, "status": "skipped_no_legs"})
+                continue
             try:
                 import httpx
                 import os
                 sidecar_url = os.getenv("BOT_SIDECAR_URL", "http://host.docker.internal:9000")
                 async with httpx.AsyncClient(timeout=15.0) as client:
                     resp = await client.post(f"{sidecar_url}/close-trade",
-                        json={"trade_id": t.id, "symbol": t.symbol,
-                              "ticker": t.ticker, "contracts": t.contracts_open,
-                              "direction": t.direction})
+                        json={"trade_id": t.id, "symbol": leg0.symbol,
+                              "ticker": t.ticker, "contracts": leg0.contracts_open,
+                              "direction": leg0.direction})
                     if resp.status_code == 200:
                         from datetime import datetime, timezone
                         detail = resp.json()
                         ib_exit = detail.get("exit_price", 0)
-                        exit_p = float(ib_exit) if ib_exit else float(t.current_price or t.entry_price or 0)
+                        exit_p = float(ib_exit) if ib_exit else float(leg0.current_price or leg0.entry_price or 0)
                         ib_time = detail.get("exit_time")
                         if ib_time:
                             try:
@@ -361,15 +380,17 @@ async def close_all_trades():
                             exit_time = datetime.now(timezone.utc)
                         t.status = "closed"
                         t.exit_time = exit_time
-                        t.exit_price = exit_p
-                        t.current_price = exit_p
+                        leg0.exit_price = exit_p
+                        leg0.current_price = exit_p
+                        leg0.exit_time = exit_time
+                        leg0.leg_status = "closed"
                         t.exit_reason = "CLOSED (UI CLOSE ALL — sidecar)"
-                        entry = float(t.entry_price) if t.entry_price else 0
+                        entry = float(leg0.entry_price) if leg0.entry_price else 0
                         t.pnl_pct = (exit_p - entry) / entry if entry > 0 else 0
-                        t.pnl_usd = (exit_p - entry) * 100 * t.contracts_entered
+                        t.pnl_usd = (exit_p - entry) * 100 * leg0.contracts_entered
                         t.exit_result = "WIN" if t.pnl_pct > 0 else "LOSS" if t.pnl_pct < 0 else "SCRATCH"
-                        t.contracts_open = 0
-                        t.contracts_closed = t.contracts_entered
+                        leg0.contracts_open = 0
+                        leg0.contracts_closed = leg0.contracts_entered
                         results.append({"id": t.id, "status": "closed"})
                         continue
             except Exception:
@@ -437,10 +458,15 @@ def export_trades(
             pnl_pct = float(t.pnl_pct * 100) if t.pnl_pct else 0
             pnl_usd = float(t.pnl_usd) if t.pnl_usd else 0
             peak = float(t.peak_pnl_pct * 100) if t.peak_pnl_pct else 0
+            # v2: per-leg fields live on t.legs[0] (single-leg strategies today).
+            leg0 = t.legs[0] if t.legs else None
             row_data = [
-                t.id, t.ticker, t.symbol, t.direction, t.contracts_entered,
-                float(t.entry_price) if t.entry_price else None,
-                float(t.exit_price) if t.exit_price else None,
+                t.id, t.ticker,
+                leg0.symbol if leg0 else None,
+                leg0.direction if leg0 else None,
+                leg0.contracts_entered if leg0 else None,
+                float(leg0.entry_price) if leg0 and leg0.entry_price else None,
+                float(leg0.exit_price) if leg0 and leg0.exit_price else None,
                 round(pnl_pct, 2), round(pnl_usd, 2), round(peak, 2),
                 t.status, t.exit_reason, t.exit_result, t.signal_type,
                 t.entry_time.strftime("%Y-%m-%d %H:%M") if t.entry_time else None,
