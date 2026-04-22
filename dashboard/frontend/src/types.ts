@@ -79,7 +79,23 @@ export interface Setting {
   data_type: string;
   description: string | null;
   is_secret: boolean;
+  // Multi-strategy v2: NULL = inherited global; non-NULL = override for
+  // that strategy. The UI uses this to render a pill / muted styling.
+  strategy_id: number | null;
   updated_at: string;
+}
+
+export interface StrategyRow {
+  strategy_id: number;
+  name: string;
+  display_name: string;
+  description: string | null;
+  class_path: string;
+  enabled: boolean;
+  is_default: boolean;
+  is_active: boolean;
+  created_at: string | null;
+  updated_at: string | null;
 }
 
 export interface Summary {
