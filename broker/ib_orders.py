@@ -6,7 +6,7 @@ Separated from ib_client.py for readability (ARCH-003 Phase 2).
 """
 import logging
 
-from ib_async import MarketOrder, LimitOrder, StopOrder
+from ib_async import MarketOrder, LimitOrder, StopOrder, Stock
 
 import config
 
@@ -325,6 +325,176 @@ class IBOrdersMixin:
                         f"code={ib_error['code']} {ib_error['message']}")
 
         return result
+
+    # ── Multi-leg orders (Phase 6) ────────────────────────────
+    def place_multi_leg_order(self, legs: list[dict],
+                               order_ref: str | None = None) -> dict:
+        """Submit N legs as independent orders in one OCA group.
+
+        Each leg dict (from LegSpec.__dict__ or equivalent) carries:
+            sec_type:  'OPT' | 'FOP' | 'STK'
+            symbol:    OCC for options, ticker for STK
+            direction: 'LONG' | 'SHORT'
+            contracts: int
+            # option-only:
+            strike, right, expiry, multiplier, exchange, currency
+            leg_role, underlying
+
+        All legs share one ocaGroup so the first exit cancels the rest.
+        Every leg's ``orderRef`` is stamped with ``order_ref`` for IB↔DB
+        correlation (docs/ib_db_correlation.md).
+
+        Returns a dict:
+            {
+                "oca_group": "MULTILEG-<n>",
+                "order_ref": order_ref,
+                "legs": [
+                    {"leg_index": 0, "symbol": ..., "order_id": ...,
+                     "perm_id": ..., "con_id": ..., "status": ...,
+                     "fill_price": ..., "client_id": <pool slot>},
+                    ...
+                ],
+                "all_filled": bool,
+                "fills_received": int,
+                "ib_client_id": <placing clientId — same for all legs>,
+            }
+
+        On partial-fill failure, returns the partial result (caller decides
+        whether to unwind). See docs/multi_strategy_architecture_v2.md §7
+        Phase 6.
+        """
+        if config.DRY_RUN:
+            log.info(f"[DRY RUN] MULTI-LEG: {len(legs)} legs ref={order_ref}")
+            return {
+                "dry_run": True,
+                "oca_group": "DRY-RUN",
+                "order_ref": order_ref,
+                "legs": [
+                    {"leg_index": i, "symbol": l.get("symbol"),
+                     "order_id": None, "perm_id": None, "con_id": None,
+                     "status": "DryRun", "fill_price": 0.0, "client_id": None}
+                    for i, l in enumerate(legs)
+                ],
+                "all_filled": False,
+                "fills_received": 0,
+                "ib_client_id": None,
+            }
+        return self._submit_to_ib(self._ib_place_multi_leg, legs, order_ref)
+
+    def _build_leg_contract(self, leg: dict):
+        """Build an IB Contract for a single leg. Runs on IB thread."""
+        sec_type = (leg.get("sec_type") or "OPT").upper()
+        if sec_type in ("OPT", "FOP"):
+            contract = self._occ_to_contract(leg["symbol"])
+            if not contract or not contract.conId:
+                raise RuntimeError(
+                    f"Contract validation failed for {leg.get('symbol')}")
+            _check_not_flex(contract, leg["symbol"])
+            return contract
+        if sec_type == "STK":
+            symbol = leg.get("underlying") or leg["symbol"]
+            exchange = leg.get("exchange") or "SMART"
+            currency = leg.get("currency") or "USD"
+            contract = Stock(symbol, exchange, currency)
+            try:
+                qualified = self.ib.qualifyContracts(contract)
+                if qualified:
+                    contract = qualified[0]
+            except Exception as e:
+                log.debug(f"[MULTILEG] qualifyContracts({symbol}) failed: {e}")
+            return contract
+        raise RuntimeError(f"Unsupported sec_type={sec_type!r} for multi-leg")
+
+    def _ib_place_multi_leg(self, legs: list[dict],
+                             order_ref: str | None = None) -> dict:
+        """Runs on IB thread. Places each leg as an independent MarketOrder
+        in one OCA group and waits up to 10s for fills."""
+        try:
+            uniq = self.ib.client.getReqId()
+        except Exception:
+            uniq = id(legs) & 0xFFFFFF
+        oca_group = f"MULTILEG-{uniq}"
+
+        try:
+            placing_client_id = self.ib.client.clientId
+        except Exception:
+            placing_client_id = None
+
+        submitted: list[tuple[int, dict, object, object]] = []
+        for i, leg in enumerate(legs):
+            direction = (leg.get("direction") or "LONG").upper()
+            action = "BUY" if direction == "LONG" else "SELL"
+            contracts = int(leg.get("contracts") or 1)
+
+            contract = self._build_leg_contract(leg)
+
+            order = MarketOrder(action, contracts)
+            order.orderId = self.ib.client.getReqId()
+            order.ocaGroup = oca_group
+            order.ocaType = 1  # Cancel on fill
+            order.tif = "DAY"
+            if config.IB_ACCOUNT:
+                order.account = config.IB_ACCOUNT
+            if order_ref:
+                order.orderRef = order_ref
+
+            ib_trade = self.ib.placeOrder(contract, order)
+            submitted.append((i, leg, contract, ib_trade))
+            log.info(f"[IB clientId={placing_client_id}] MULTILEG leg={i} "
+                     f"{action} {contracts}x {leg.get('symbol')} "
+                     f"role={leg.get('leg_role') or '—'} oca={oca_group} "
+                     f"orderId={order.orderId} ref={order_ref or '—'}")
+
+        # Wait for fills (up to 10s)
+        TERMINAL = {"Filled", "Cancelled", "Inactive", "ApiCancelled"}
+        for _ in range(20):
+            try:
+                self.ib.sleep(0.5)
+            except Exception:
+                break
+            if all(t[3].orderStatus.status in TERMINAL for t in submitted):
+                break
+
+        legs_result = []
+        fills_received = 0
+        all_filled = True
+        for i, leg, contract, ib_trade in submitted:
+            status = ib_trade.orderStatus.status
+            fill_price = ib_trade.orderStatus.avgFillPrice or 0.0
+            if status == "Filled":
+                fills_received += 1
+            else:
+                all_filled = False
+            legs_result.append({
+                "leg_index": i,
+                "symbol": leg.get("symbol"),
+                "leg_role": leg.get("leg_role"),
+                "sec_type": leg.get("sec_type"),
+                "direction": leg.get("direction"),
+                "contracts": int(leg.get("contracts") or 1),
+                "order_id": ib_trade.order.orderId,
+                "perm_id": ib_trade.order.permId,
+                "con_id": getattr(contract, "conId", None),
+                "status": status,
+                "fill_price": float(fill_price) if fill_price else 0.0,
+                "client_id": placing_client_id,
+                "oca_group": oca_group,
+                "order_ref": order_ref,
+            })
+
+        if not all_filled and fills_received > 0:
+            log.error(f"[IB] MULTILEG partial: {fills_received}/{len(legs)} "
+                      f"filled oca={oca_group} ref={order_ref} — "
+                      f"caller must decide whether to unwind")
+
+        return {
+            "oca_group": oca_group,
+            "order_ref": order_ref,
+            "legs": legs_result,
+            "all_filled": all_filled,
+            "fills_received": fills_received,
+            "ib_client_id": placing_client_id,
+        }
 
     # ── Bracket SL modification ───────────────────────────────
     def update_bracket_sl(self, sl_order_id: int, new_sl_price: float) -> bool:
