@@ -190,6 +190,101 @@ def insert_trade(trade: dict, account: str) -> int | None:
         raise
 
 
+def insert_multi_leg_trade(trade_envelope: dict, legs_result: dict,
+                            account: str = "paper") -> int | None:
+    """Insert a multi-leg trade envelope + N trade_legs rows in ONE tx.
+
+    Phase 6 multi-strategy v2: the iron-condor / spread / hedged-position
+    entry path. Exactly the single-transaction guarantee the envelope +
+    first-leg insert already has — just extended to N legs.
+
+    Args:
+        trade_envelope: dict with keys ``strategy_id``, ``ticker``,
+            ``signal_type``, ``client_trade_id``, ``n_legs``,
+            ``ib_client_id`` (and optional ``notes``, ``strategy_config``).
+        legs_result: the dict returned by ``place_multi_leg_order`` —
+            carries ``oca_group`` + ``legs`` list.
+        account: IB account label.
+
+    Returns the new ``trades.id`` (integer) or None on failure.
+    """
+    from db.models import Trade, TradeLeg
+
+    session = get_session()
+    if not session:
+        return None
+    try:
+        entry_time = datetime.now(timezone.utc)
+        legs = legs_result.get("legs", []) or []
+        n_legs = int(trade_envelope.get("n_legs") or len(legs) or 1)
+
+        envelope = Trade(
+            account=account,
+            ticker=trade_envelope.get("ticker", "UNK"),
+            strategy_id=int(trade_envelope.get("strategy_id") or 1),
+            signal_type=trade_envelope.get("signal_type"),
+            strategy_config=trade_envelope.get("strategy_config") or {},
+            entry_time=entry_time,
+            status="open",
+            entry_enrichment=_sanitize_for_json(
+                trade_envelope.get("entry_enrichment") or {}),
+            notes=trade_envelope.get("notes"),
+            client_trade_id=trade_envelope.get("client_trade_id"),
+            ib_client_id=trade_envelope.get("ib_client_id"),
+            n_legs=n_legs,
+        )
+        session.add(envelope)
+        session.flush()
+        trade_id = envelope.id
+
+        for leg in legs:
+            leg_kwargs = dict(
+                trade_id=trade_id,
+                leg_index=int(leg.get("leg_index") or 0),
+                leg_role=leg.get("leg_role"),
+                sec_type=(leg.get("sec_type") or "OPT"),
+                symbol=leg.get("symbol") or "",
+                underlying=leg.get("underlying"),
+                multiplier=int(leg.get("multiplier") or 100),
+                exchange=leg.get("exchange") or "SMART",
+                currency=leg.get("currency") or "USD",
+                direction=(leg.get("direction") or "LONG"),
+                contracts_entered=int(leg.get("contracts") or 0),
+                contracts_open=int(leg.get("contracts") or 0),
+                contracts_closed=0,
+                entry_price=float(leg.get("fill_price") or 0.0),
+                current_price=float(leg.get("fill_price") or 0.0),
+                ib_fill_price=float(leg.get("fill_price") or 0.0),
+                ib_order_id=leg.get("order_id"),
+                ib_perm_id=leg.get("perm_id"),
+                ib_con_id=leg.get("con_id"),
+                entry_time=entry_time,
+                leg_status="open",
+            )
+            # Option-only fields — leave None for STK legs
+            if leg.get("strike") is not None:
+                leg_kwargs["strike"] = leg["strike"]
+            if leg.get("expiry") is not None:
+                leg_kwargs["expiry"] = leg["expiry"]
+            right_val = leg.get("right") or leg.get("option_right")
+            if right_val is not None:
+                leg_kwargs["right"] = right_val
+
+            session.add(TradeLeg(**leg_kwargs))
+
+        session.commit()
+        log.info(f"DB: inserted multi-leg trade {trade_id} with "
+                 f"{len(legs)} legs for "
+                 f"{trade_envelope.get('ticker')} "
+                 f"(ref={trade_envelope.get('client_trade_id')})")
+        session.close()
+        return trade_id
+    except Exception:
+        session.rollback()
+        session.close()
+        raise
+
+
 @_safe_db
 def get_open_trades_from_db() -> list:
     """Get all open trades from DB. Used by exit_manager as source of truth.

@@ -109,6 +109,7 @@ class Scanner:
         self.trade_manager = TradeEntryManager(
             client, exit_manager, self.ticker,
             strategy_id=strategy_id, strategy_name=strategy_name,
+            plugin_instance=self.plugin,
         )
 
         self._stop = threading.Event()

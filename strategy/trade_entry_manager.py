@@ -69,7 +69,8 @@ class TradeEntryManager:
     """
 
     def __init__(self, client, exit_manager, ticker: str,
-                 strategy_id: int = 1, strategy_name: str = "ict"):
+                 strategy_id: int = 1, strategy_name: str = "ict",
+                 plugin_instance=None):
         self.client = client
         self.exit_manager = exit_manager
         self.ticker = ticker
@@ -78,6 +79,11 @@ class TradeEntryManager:
         # does NOT block Strategy B from entering SPY.
         self.strategy_id = strategy_id
         self.strategy_name = strategy_name
+        # Phase 6 (multi-strategy v2): optional plugin reference so
+        # multi-leg strategies (iron condor, spreads) can override
+        # ``place_legs(signal)`` and route through the multi-leg path.
+        # None = classic single-leg flow preserved exactly.
+        self.plugin_instance = plugin_instance
         self._trades_today: int = 0
         self._errors_today: int = 0
         self._last_trade_time: datetime | None = None
@@ -267,6 +273,13 @@ class TradeEntryManager:
                 log.warning(f"[{self.ticker}] Reconciliation failed: {e}")
             return None
 
+        # Phase 6 multi-strategy v2: if the plugin declares a multi-leg
+        # entry via place_legs(), route through the multi-leg path and
+        # skip the single-leg option_selector flow.
+        legs = self._collect_plugin_legs(signal)
+        if legs:
+            return self._enter_multi_leg(signal, legs)
+
         self._entry_pending = True
         trade = None
 
@@ -352,6 +365,122 @@ class TradeEntryManager:
             handle_error(f"scanner-{self.ticker}", "trade_entry", e,
                          context={"ticker": self.ticker}, critical=True)
             return None
+
+    # ── Multi-leg entry (Phase 6) ─────────────────────────
+    def _collect_plugin_legs(self, signal: Signal):
+        """Ask the plugin for a multi-leg spec. Returns list[dict] of
+        leg dicts ready for ``place_multi_leg_order`` or None/[] if the
+        plugin is single-leg."""
+        if self.plugin_instance is None:
+            return None
+        place_legs = getattr(self.plugin_instance, "place_legs", None)
+        if place_legs is None:
+            return None
+        try:
+            leg_specs = place_legs(signal)
+        except Exception as e:
+            log.warning(f"[{self.ticker}] plugin.place_legs raised: {e} — "
+                        f"falling back to single-leg path")
+            return None
+        if not leg_specs:
+            return None
+        # Accept LegSpec dataclass or plain dict
+        out = []
+        for ls in leg_specs:
+            if hasattr(ls, "__dict__"):
+                out.append({k: v for k, v in ls.__dict__.items()
+                            if not k.startswith("_")})
+            elif isinstance(ls, dict):
+                out.append(dict(ls))
+            else:
+                log.warning(f"[{self.ticker}] place_legs returned unknown "
+                            f"type {type(ls).__name__} — skipping")
+        return out
+
+    def _enter_multi_leg(self, signal: Signal, legs: list[dict]) -> dict | None:
+        """Place N legs in one OCA group + write envelope+legs atomically.
+
+        Phase 6 scope: entry only. Exit-across-legs is a follow-up.
+        """
+        try:
+            from db.trade_ref import generate_trade_ref
+            order_ref = generate_trade_ref(
+                self.ticker, strategy_name=self.strategy_name)
+        except Exception as e:
+            log.warning(f"[{self.ticker}] trade_ref generation failed: {e} — "
+                        f"proceeding untagged")
+            order_ref = None
+
+        log.info(f"[{self.ticker}] MULTILEG ENTRY: {len(legs)} legs "
+                 f"ref={order_ref} strategy={self.strategy_name}")
+        _update_entry_thread("placing", self.ticker,
+                             f"multi-leg x{len(legs)} ref={order_ref or '—'}")
+
+        self._entry_pending = True
+        try:
+            result = self.client.place_multi_leg_order(legs, order_ref=order_ref)
+        except Exception as e:
+            self._entry_pending = False
+            self._errors_today += 1
+            handle_error(f"scanner-{self.ticker}", "multi_leg_entry", e,
+                         context={"ticker": self.ticker,
+                                  "n_legs": len(legs)},
+                         critical=True)
+            _update_entry_thread("failed", self.ticker,
+                                 f"multi-leg exception: {type(e).__name__}")
+            return None
+
+        if not result:
+            self._entry_pending = False
+            return None
+
+        trade_envelope = {
+            "strategy_id": self.strategy_id,
+            "ticker": self.ticker,
+            "signal_type": signal.signal_type,
+            "client_trade_id": order_ref,
+            "n_legs": len(legs),
+            "ib_client_id": result.get("ib_client_id"),
+        }
+
+        try:
+            from db.writer import insert_multi_leg_trade
+            import config as _config
+            account = getattr(_config, "IB_ACCOUNT", "paper") or "paper"
+            trade_id = insert_multi_leg_trade(trade_envelope, result,
+                                               account=account)
+        except Exception as e:
+            handle_error(f"scanner-{self.ticker}", "multi_leg_db_insert", e,
+                         context={"ticker": self.ticker,
+                                  "oca_group": result.get("oca_group")},
+                         critical=True)
+            trade_id = None
+
+        self._trades_today += 1
+        self._last_trade_time = datetime.now(PT)
+        self._entry_pending = False
+
+        trade_dict = {
+            "db_id": trade_id,
+            "ticker": self.ticker,
+            "strategy_id": self.strategy_id,
+            "signal": signal.signal_type,
+            "client_trade_id": order_ref,
+            "n_legs": len(legs),
+            "oca_group": result.get("oca_group"),
+            "legs": result.get("legs", []),
+            "ib_client_id": result.get("ib_client_id"),
+        }
+        _update_entry_thread(
+            "filled" if result.get("all_filled") else "partial",
+            self.ticker,
+            f"multi-leg x{len(legs)} fills={result.get('fills_received', 0)}",
+        )
+        log.info(f"[{self.ticker}] MULTILEG #{self._trades_today} opened: "
+                 f"trade_id={trade_id} fills="
+                 f"{result.get('fills_received', 0)}/{len(legs)} "
+                 f"oca={result.get('oca_group')}")
+        return trade_dict
 
     def _place_order_with_timeout(self, signal: Signal) -> dict | None:
         """Place order via thread pool with 30s timeout + 5s recovery.
