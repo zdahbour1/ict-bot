@@ -13,6 +13,7 @@ IB is the source of truth for what positions actually exist.
 import logging
 from datetime import datetime
 import pytz
+from sqlalchemy import text
 import config
 
 log = logging.getLogger(__name__)
