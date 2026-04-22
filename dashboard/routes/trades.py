@@ -4,7 +4,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
 from db.connection import get_session
-from db.models import Trade, TradeCommand
+from db.models import Trade, TradeCommand, Strategy
 import io
 
 router = APIRouter(tags=["trades"])
@@ -23,6 +23,9 @@ def _trade_to_dict(t: Trade) -> dict:
     leg0 = t.legs[0] if t.legs else None
     return {
         "id": t.id, "account": t.account, "ticker": t.ticker,
+        "strategy_id": t.strategy_id,
+        "strategy_name": t.strategy.name if t.strategy else None,
+        "strategy_display_name": t.strategy.display_name if t.strategy else None,
         "symbol": leg0.symbol if leg0 else None,
         "direction": leg0.direction if leg0 else None,
         "contracts_entered": leg0.contracts_entered if leg0 else None,

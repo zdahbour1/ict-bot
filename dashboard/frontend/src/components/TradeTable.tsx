@@ -426,6 +426,28 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
       },
     }),
     col.accessor('ticker', { header: 'Ticker', cell: info => <strong>{info.getValue()}</strong> }),
+    col.accessor('strategy_name' as any, {
+      id: 'strategy',
+      header: 'Strategy',
+      cell: info => {
+        const name = info.getValue() as string | null;
+        const display = (info.row.original.strategy_display_name as string | null) || name;
+        if (!name) return <span className="text-gray-600">—</span>;
+        const palette: Record<string, string> = {
+          ict: 'bg-blue-500/20 text-blue-400',
+          orb: 'bg-purple-500/20 text-purple-400',
+          vwap_revert: 'bg-amber-500/20 text-amber-400',
+          delta_neutral: 'bg-emerald-500/20 text-emerald-400',
+        };
+        const cls = palette[name] || 'bg-gray-700 text-gray-400';
+        return (
+          <span className={`px-2 py-0.5 rounded text-[11px] font-mono ${cls}`}
+                title={display ?? name}>
+            {name}
+          </span>
+        );
+      },
+    }),
     col.accessor('direction', {
       header: 'Type',
       cell: info => {

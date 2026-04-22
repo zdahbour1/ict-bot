@@ -2,6 +2,10 @@ export interface Trade {
   id: number;
   account: string;
   ticker: string;
+  // Multi-strategy v2: which strategy owns this trade
+  strategy_id: number | null;
+  strategy_name: string | null;          // short code: 'ict', 'orb', 'vwap_revert'
+  strategy_display_name: string | null;  // user-friendly: 'Inner Circle Trader'
   symbol: string;
   direction: 'LONG' | 'SHORT';
   contracts_entered: number;
