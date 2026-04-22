@@ -28,15 +28,18 @@ It's wrong for:
 
 ### Done looks like
 
-1. Multiple rows in `strategies` can be `is_active=TRUE AND enabled=TRUE`
-   at the same time. The bot reads that set at boot and spawns per-ticker
-   thread sets for each.
-2. A `trade` row is the *logical deal*; its 1..N rows in `trade_legs`
-   are the actual IB orders. Single-leg strategies keep working unchanged
-   (backfilled into one `trade_legs` row).
-3. Settings tab has a strategy dropdown; scoped settings shown as editable,
+1. Multiple rows in `strategies` can be `enabled=TRUE` at the same
+   time. The bot reads that set at boot and spawns per-ticker thread
+   sets for each. (`enabled` is the sole activation signal — see §2.1.)
+2. A `trade` row is the *logical deal envelope*; its 1..N rows in
+   `trade_legs` carry every per-leg field (contract identity, IB ids,
+   entry/exit prices, bracket state, ICT levels, etc.). **Every trade
+   has at least one leg row** — no partial backward-compat path.
+3. Each `(strategy_id, ticker)` pair gets one concurrent-trade slot:
+   ICT can be long SPY while ORB is short SPY simultaneously. See §3.3.
+4. Settings tab has a strategy dropdown; scoped settings shown as editable,
    globals shown as inherited.
-4. Close flow routes through the pool slot (clientId) that placed the
+5. Close flow routes through the pool slot (clientId) that placed the
    order, via `trades.ib_client_id` — concretely implementing the
    ARCH-007 "stable clientId routing" idea from
    `docs/ib_db_correlation.md` §11.
@@ -60,51 +63,114 @@ It's wrong for:
 
 ## §2 — Target data model
 
-All changes ship in one migration: `db/migrations/007_multi_strategy_v2.sql`.
-Additive + one DELETE-then-rebuild for the `ACTIVE_STRATEGY` seeding
-step. Fully reversible.
+All changes ship in one migration: `db/migrations/007_trades_legs_rebuild.sql`.
+This is a **big-bang rebuild** of `trades`: the old table is renamed to
+`trades_pre_legs` (preserving data + indexes under renamed names), a new
+slim `trades` table is created, and `trade_legs` is introduced to carry
+every per-leg field. The `ACTIVE_STRATEGY` singleton setting row is
+deleted in the same migration. Bot must be stopped during application.
 
-### 2.1 `strategies.is_active`
+### 2.1 Strategy activation — use `enabled`
 
-Replaces the singleton `ACTIVE_STRATEGY` setting.
+No schema change to `strategies`. The existing `enabled` column is the
+sole activation signal. At boot the bot runs:
 
 ```sql
-ALTER TABLE strategies
-    ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT FALSE;
-
-CREATE INDEX idx_strategies_is_active
-    ON strategies(is_active) WHERE is_active = TRUE;
+SELECT * FROM strategies WHERE enabled = TRUE;
 ```
 
-**Backfill** (single transaction, inside the migration):
+The singleton `ACTIVE_STRATEGY` setting is deleted (it was always going
+to go). `is_default` stays as-is — it's used by the UI to pre-select
+the "default" strategy in dropdowns (e.g. Settings-tab scoped views).
+We do **not** add an `is_active` column; `enabled` already carries
+that meaning and adding a parallel flag would just create a two-source
+inconsistency risk.
 
 ```sql
--- Read whatever ACTIVE_STRATEGY currently points at, flip is_active=TRUE
--- for that one strategy, then drop the setting row.
-UPDATE strategies s SET is_active = TRUE
- WHERE s.name = (
-     SELECT value FROM settings
-      WHERE key = 'ACTIVE_STRATEGY' AND strategy_id IS NULL
- );
-
-DELETE FROM settings WHERE key = 'ACTIVE_STRATEGY';
+DELETE FROM settings
+ WHERE key = 'ACTIVE_STRATEGY' AND strategy_id IS NULL;
 ```
 
-If no `ACTIVE_STRATEGY` row exists (fresh install), the default row
-(`is_default=TRUE`) should be activated instead; the migration guards
-for both cases with a `COALESCE`-style fallback.
+If `ACTIVE_STRATEGY` previously pointed at a disabled strategy, the
+migration flips that strategy's `enabled=TRUE` first so behavior
+is preserved across the boundary.
 
-### 2.2 `trades` extensions
+### 2.2 `trades` rebuild — envelope only
+
+The new `trades` is the logical **deal envelope**. Every per-leg field
+moves to `trade_legs` (§2.3). The columns that stay on `trades`:
+
+| Column              | Notes                                              |
+|---------------------|----------------------------------------------------|
+| `id`                | PK                                                 |
+| `account`           |                                                    |
+| `ticker`            | Underlying ticker (for the per-(strategy,ticker) lock) |
+| `strategy_id`       | FK                                                 |
+| `signal_type`       |                                                    |
+| `pnl_pct`           | **Aggregated** across legs, cached for fast reads  |
+| `pnl_usd`           | **Aggregated** across legs, cached for fast reads  |
+| `peak_pnl_pct`      |                                                    |
+| `dynamic_sl_pct`    |                                                    |
+| `entry_time`        | First fill across all legs                         |
+| `exit_time`         | Last close across all legs                         |
+| `status`            | Envelope status (open/closed/cancelled/error)      |
+| `exit_reason`       |                                                    |
+| `exit_result`       |                                                    |
+| `error_message`     |                                                    |
+| `notes`             |                                                    |
+| `client_trade_id`   |                                                    |
+| `ib_client_id`      | Pool slot clientId that placed the entry           |
+| `n_legs`            | Cached count of leg rows                           |
+| `strategy_config`   |                                                    |
+| `entry_enrichment`  |                                                    |
+| `exit_enrichment`   |                                                    |
+| `created_at`        |                                                    |
+| `updated_at`        |                                                    |
+
+Everything else moves off `trades` → onto `trade_legs`.
+
+New table shape:
 
 ```sql
-ALTER TABLE trades
-    ADD COLUMN ib_client_id SMALLINT,             -- pool slot's clientId
-    ADD COLUMN n_legs       SMALLINT NOT NULL DEFAULT 1;
+CREATE TABLE trades (
+    id                SERIAL PRIMARY KEY,
+    account           VARCHAR(40),
+    ticker            VARCHAR(20) NOT NULL,
+    strategy_id       INT NOT NULL REFERENCES strategies(strategy_id),
+    signal_type       VARCHAR(40),
 
-CREATE INDEX idx_trades_strategy_status
-    ON trades(strategy_id, status);
-CREATE INDEX idx_trades_client_id
-    ON trades(ib_client_id) WHERE ib_client_id IS NOT NULL;
+    -- Aggregated P&L (cached; canonical value from v_trades_aggregate_pnl)
+    pnl_pct           NUMERIC(10,4),
+    pnl_usd           NUMERIC(14,2),
+    peak_pnl_pct      NUMERIC(10,4),
+    dynamic_sl_pct    NUMERIC(10,4),
+
+    entry_time        TIMESTAMPTZ,
+    exit_time         TIMESTAMPTZ,
+    status            VARCHAR(20) NOT NULL,
+    exit_reason       VARCHAR(40),
+    exit_result       VARCHAR(40),
+    error_message     TEXT,
+    notes             TEXT,
+
+    client_trade_id   VARCHAR(64),
+    ib_client_id      SMALLINT,             -- pool slot that placed the entry
+    n_legs            SMALLINT NOT NULL DEFAULT 1,
+
+    strategy_config   JSONB,
+    entry_enrichment  JSONB,
+    exit_enrichment   JSONB,
+
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_trades_strategy_status ON trades(strategy_id, status);
+CREATE INDEX idx_trades_ticker_status   ON trades(ticker, status);
+CREATE INDEX idx_trades_client_id       ON trades(ib_client_id)
+    WHERE ib_client_id IS NOT NULL;
+-- Plus every index that previously existed on trades, recreated here
+-- under its original name (so downstream code + EXPLAIN plans are stable).
 ```
 
 `ib_client_id` is stamped at order placement with the clientId of the
@@ -112,41 +178,68 @@ pool connection that submitted the entry order (see
 `broker/ib_pool.py:37-40` for the clientId assignment). `n_legs` is a
 cached count for UI — avoids a subselect when rendering the Trades tab.
 
-### 2.3 `trade_legs` (new)
+### 2.3 `trade_legs` (new) — carries every per-leg field
 
-A `trade` row is the deal; `trade_legs` rows are the orders. Schema
-accommodates OPT/FOP **and** STK legs (stock hedge needs NULLable
-`strike`/`right`/`expiry`).
+Schema accommodates OPT/FOP **and** STK legs (stock hedge needs NULLable
+`strike`/`right`/`expiry`). Every trade has ≥1 leg row — single-leg
+strategies get exactly one row with `leg_index=0`.
 
 ```sql
 CREATE TABLE trade_legs (
     leg_id        SERIAL PRIMARY KEY,
     trade_id      INT NOT NULL REFERENCES trades(id) ON DELETE CASCADE,
     leg_index     SMALLINT NOT NULL,       -- 0..N-1, order matters for display
-    role          VARCHAR(24),             -- 'short_call','long_put','hedge_stock',etc.
+    role          VARCHAR(24),             -- 'primary','short_call','hedge_stock',etc.
 
-    -- Contract identity
+    -- Contract identity (moved from trades)
     sec_type      VARCHAR(4) NOT NULL,     -- 'OPT' | 'FOP' | 'STK'
     symbol        VARCHAR(40) NOT NULL,    -- local_symbol for OPT/FOP, ticker for STK
+    underlying    VARCHAR(20),             -- underlying ticker (redundant w/ trades.ticker)
     strike        NUMERIC(12,4),           -- NULL for STK
     right         VARCHAR(1),              -- 'C'|'P'; NULL for STK
     expiry        DATE,                    -- NULL for STK
     multiplier    INT NOT NULL DEFAULT 100,
+    exchange      VARCHAR(20),
+    currency      VARCHAR(8),
 
-    -- Sizing & direction
-    contracts     INT NOT NULL,            -- share count for STK legs
-    side          VARCHAR(4) NOT NULL,     -- 'BUY'|'SELL' (entry side)
+    -- Sizing & direction (moved from trades)
+    direction          VARCHAR(8) NOT NULL,      -- 'LONG' | 'SHORT'
+    contracts_entered  INT NOT NULL,
+    contracts_open     INT NOT NULL,
+    contracts_closed   INT NOT NULL DEFAULT 0,
 
-    -- IB correlation
-    ib_order_id   INT,
-    ib_perm_id    BIGINT,
-    ib_con_id     INT,
+    -- Prices (moved from trades)
+    entry_price        NUMERIC(10,4),
+    exit_price         NUMERIC(10,4),
+    current_price      NUMERIC(10,4),
+    ib_fill_price      NUMERIC(10,4),
+    profit_target      NUMERIC(10,4),
+    stop_loss_level    NUMERIC(10,4),
+
+    -- ICT-specific per-leg levels (moved from trades)
+    ict_entry          NUMERIC(10,4),
+    ict_sl             NUMERIC(10,4),
+    ict_tp             NUMERIC(10,4),
+
+    -- IB correlation (moved from trades)
+    ib_order_id        INT,
+    ib_perm_id         BIGINT,
+    ib_con_id          INT,
+
+    -- Bracket state (moved from trades)
+    ib_tp_order_id     INT,
+    ib_tp_perm_id      BIGINT,
+    ib_tp_status       VARCHAR(20),
+    ib_tp_price        NUMERIC(10,4),
+    ib_sl_order_id     INT,
+    ib_sl_perm_id      BIGINT,
+    ib_sl_status       VARCHAR(20),
+    ib_sl_price        NUMERIC(10,4),
+    ib_brackets_checked_at TIMESTAMPTZ,
 
     -- Execution state
     status        VARCHAR(20) NOT NULL DEFAULT 'pending',  -- pending|filled|cancelled|closed
-    entry_price   NUMERIC(10,4),
     entry_time    TIMESTAMPTZ,
-    exit_price    NUMERIC(10,4),
     exit_time     TIMESTAMPTZ,
 
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -160,74 +253,291 @@ CREATE INDEX idx_trade_legs_perm_id  ON trade_legs(ib_perm_id)
     WHERE ib_perm_id IS NOT NULL;
 CREATE INDEX idx_trade_legs_con_id   ON trade_legs(ib_con_id)
     WHERE ib_con_id IS NOT NULL;
+CREATE INDEX idx_trade_legs_tp_perm  ON trade_legs(ib_tp_perm_id)
+    WHERE ib_tp_perm_id IS NOT NULL;
+CREATE INDEX idx_trade_legs_sl_perm  ON trade_legs(ib_sl_perm_id)
+    WHERE ib_sl_perm_id IS NOT NULL;
 ```
 
-**Single-leg backfill** (same migration):
+### 2.4 Big-bang migration — loud-failure backup
+
+User-chosen approach: rename the old `trades` to a frozen snapshot,
+build the new schema, backfill. We keep `trades_pre_legs` as a frozen
+snapshot with its indexes renamed. **Any code that still references
+the old column names will now hit SQL errors loudly against the new
+`trades` table — there's no silent stale behavior.** Once we've
+validated a few days of live running, the backup can be dropped.
 
 ```sql
-INSERT INTO trade_legs
-    (trade_id, leg_index, role, sec_type, symbol, strike, right, expiry,
-     contracts, side, ib_order_id, ib_perm_id, ib_con_id,
-     status, entry_price, entry_time, exit_price, exit_time)
-SELECT id, 0, 'primary',
-       COALESCE(sec_type, 'OPT'),
-       COALESCE(option_symbol, symbol, ticker),
-       strike, right, expiration,
-       contracts, direction_to_side(direction),
-       ib_order_id, ib_perm_id, ib_con_id,
-       CASE WHEN status IN ('open','closed','cancelled') THEN status ELSE 'filled' END,
-       entry_price, entry_time, exit_price, exit_time
-  FROM trades
- WHERE NOT EXISTS (SELECT 1 FROM trade_legs WHERE trade_id = trades.id);
+-- Phase A: snapshot everything that structurally changes
+ALTER TABLE trades RENAME TO trades_pre_legs;
+-- Rename its indexes too so the new table's indexes can use the
+-- original names:
+ALTER INDEX trades_pkey                 RENAME TO trades_pre_legs_pkey;
+ALTER INDEX idx_trades_strategy_status  RENAME TO idx_trades_strategy_status_pre_legs;
+ALTER INDEX idx_trades_ticker_status    RENAME TO idx_trades_ticker_status_pre_legs;
+-- ... and every other existing index on trades, same pattern.
+-- (strategies is not rebuilt — per Revision A+D it doesn't change.)
+
+-- Phase B: create the new slim trades table (§2.2 DDL above).
+-- Recreate the expected indexes under their original names.
+
+-- Phase C: create trade_legs table (§2.3 DDL above).
+
+-- Phase D: backfill
+INSERT INTO trades (
+    id, account, ticker, strategy_id, signal_type,
+    pnl_pct, pnl_usd, peak_pnl_pct, dynamic_sl_pct,
+    entry_time, exit_time, status, exit_reason, exit_result,
+    error_message, notes, client_trade_id, ib_client_id, n_legs,
+    strategy_config, entry_enrichment, exit_enrichment,
+    created_at, updated_at
+)
+SELECT
+    id, account, ticker, strategy_id, signal_type,
+    pnl_pct, pnl_usd, peak_pnl_pct, dynamic_sl_pct,
+    entry_time, exit_time, status, exit_reason, exit_result,
+    error_message, notes, client_trade_id, ib_client_id, 1 AS n_legs,
+    strategy_config, entry_enrichment, exit_enrichment,
+    created_at, updated_at
+FROM trades_pre_legs;
+
+-- Preserve the id sequence state (so newly-inserted trades don't collide):
+SELECT setval(pg_get_serial_sequence('trades','id'),
+              (SELECT COALESCE(MAX(id), 0) FROM trades));
+
+INSERT INTO trade_legs (
+    trade_id, leg_index, role,
+    sec_type, symbol, underlying, strike, right, expiry, multiplier,
+    exchange, currency,
+    direction, contracts_entered, contracts_open, contracts_closed,
+    entry_price, exit_price, current_price, ib_fill_price,
+    profit_target, stop_loss_level,
+    ict_entry, ict_sl, ict_tp,
+    ib_order_id, ib_perm_id, ib_con_id,
+    ib_tp_order_id, ib_tp_perm_id, ib_tp_status, ib_tp_price,
+    ib_sl_order_id, ib_sl_perm_id, ib_sl_status, ib_sl_price,
+    ib_brackets_checked_at,
+    status, entry_time, exit_time
+)
+SELECT
+    id, 0 AS leg_index, 'primary',
+    COALESCE(sec_type, 'OPT'), symbol, underlying, strike, right, expiry,
+    COALESCE(multiplier, 100),
+    exchange, currency,
+    direction, contracts_entered, contracts_open, contracts_closed,
+    entry_price, exit_price, current_price, ib_fill_price,
+    profit_target, stop_loss_level,
+    ict_entry, ict_sl, ict_tp,
+    ib_order_id, ib_perm_id, ib_con_id,
+    ib_tp_order_id, ib_tp_perm_id, ib_tp_status, ib_tp_price,
+    ib_sl_order_id, ib_sl_perm_id, ib_sl_status, ib_sl_price,
+    ib_brackets_checked_at,
+    CASE WHEN status IN ('open','closed','cancelled') THEN status ELSE 'filled' END,
+    entry_time, exit_time
+FROM trades_pre_legs;
+
+-- Phase E: delete ACTIVE_STRATEGY singleton setting (no longer needed)
+DELETE FROM settings WHERE key = 'ACTIVE_STRATEGY' AND strategy_id IS NULL;
 ```
 
-After backfill, `trades.n_legs` is set to 1 for all existing rows
-(the `DEFAULT 1` already covers this).
+**Post-migration verification** (manual, before unstopping the bot):
 
-### 2.4 `backtest_trades.strategy_id` — verify, don't re-add
+```sql
+SELECT
+    (SELECT COUNT(*) FROM trades_pre_legs) AS pre_legs_count,
+    (SELECT COUNT(*) FROM trades)          AS new_trades_count,
+    (SELECT COUNT(*) FROM trade_legs)      AS new_legs_count;
+-- Expect: pre_legs_count == new_trades_count == new_legs_count
+-- (every legacy trade gets exactly one leg row)
+```
+
+**Rollback** (companion `007_trades_legs_rebuild_rollback.sql`):
+
+```sql
+DROP TABLE trade_legs;
+DROP TABLE trades;
+ALTER TABLE trades_pre_legs RENAME TO trades;
+-- Rename every snapshot index back to its original name:
+ALTER INDEX trades_pre_legs_pkey                RENAME TO trades_pkey;
+ALTER INDEX idx_trades_strategy_status_pre_legs RENAME TO idx_trades_strategy_status;
+ALTER INDEX idx_trades_ticker_status_pre_legs   RENAME TO idx_trades_ticker_status;
+-- ... and every other snapshotted index, same pattern in reverse.
+-- Finally, re-seed ACTIVE_STRATEGY if your deployment still relies on it.
+```
+
+### 2.5 Table rebuild convention
+
+**Whenever this initiative alters a table's structure, we rename the
+original to `<table>_pre_legs` (preserving its data + indexes), then
+create a fresh table with the new shape and backfill from the snapshot.
+Same for indexes — rename the old indexes onto the snapshot table,
+recreate new indexes under the original names on the new table. This
+forces legacy code to fail loudly instead of silently reading the wrong
+schema.**
+
+In this initiative only `trades` is rebuilt; `strategies` and `settings`
+are unchanged (Revision D) aside from the single `DELETE` of the
+`ACTIVE_STRATEGY` row. Future table-shape changes under this initiative
+follow the same convention.
+
+### 2.6 Convenience views
+
+Most read-side code wants either (a) single-leg trades flattened to one
+row with leg fields surfaced, or (b) true aggregate P&L summed across
+legs. We define two SQL views in the same migration file so the
+refactor in Phase 2c has targets to read from:
+
+```sql
+-- v_trades_with_first_leg: flattens single-leg trades for backward-compat
+-- reads (most Trades-tab queries). Returns one row per trade with the
+-- first leg's columns surfaced. For multi-leg trades, shows the first
+-- leg + `n_legs` so the UI knows to expand.
+CREATE VIEW v_trades_with_first_leg AS
+SELECT
+    t.*,
+    l.leg_id         AS first_leg_id,
+    l.sec_type,
+    l.symbol,
+    l.underlying,
+    l.strike,
+    l.right,
+    l.expiry,
+    l.multiplier,
+    l.exchange,
+    l.currency,
+    l.direction,
+    l.contracts_entered,
+    l.contracts_open,
+    l.contracts_closed,
+    l.entry_price,
+    l.exit_price,
+    l.current_price,
+    l.ib_fill_price,
+    l.profit_target,
+    l.stop_loss_level,
+    l.ict_entry,
+    l.ict_sl,
+    l.ict_tp,
+    l.ib_order_id,
+    l.ib_perm_id,
+    l.ib_con_id,
+    l.ib_tp_order_id,
+    l.ib_tp_perm_id,
+    l.ib_tp_status,
+    l.ib_tp_price,
+    l.ib_sl_order_id,
+    l.ib_sl_perm_id,
+    l.ib_sl_status,
+    l.ib_sl_price,
+    l.ib_brackets_checked_at
+FROM trades t
+LEFT JOIN LATERAL (
+    SELECT *
+      FROM trade_legs
+     WHERE trade_id = t.id
+     ORDER BY leg_index ASC
+     LIMIT 1
+) l ON TRUE;
+
+-- v_trades_aggregate_pnl: sums leg-level pnl into trade-level totals
+-- for pages that need the true aggregate (e.g. summary cards, backtest
+-- comparisons). Use this rather than the cached trades.pnl_pct/pnl_usd
+-- when stale-cache is suspected.
+CREATE VIEW v_trades_aggregate_pnl AS
+SELECT
+    t.id,
+    t.strategy_id,
+    t.ticker,
+    t.status,
+    SUM(
+        (COALESCE(l.exit_price, l.current_price, 0) - l.entry_price)
+        * l.contracts_entered
+        * CASE l.direction WHEN 'LONG' THEN 1 ELSE -1 END
+        * l.multiplier
+    ) AS pnl_usd,
+    SUM(l.contracts_entered * l.multiplier * l.entry_price) AS cost_basis_usd
+FROM trades t
+LEFT JOIN trade_legs l ON l.trade_id = t.id
+GROUP BY t.id, t.strategy_id, t.ticker, t.status;
+```
+
+The cached `trades.pnl_pct` / `trades.pnl_usd` columns **remain** on the
+envelope for fast reads (Trades tab, summary cards hot path). The view
+is the authoritative value when stale-cache is suspected — reconciliation
+jobs and audit tooling should read from the view and optionally write
+back into the cache columns.
+
+### 2.7 `backtest_trades.strategy_id` — verify, don't re-add
 
 `backtest_runs.strategy_id` already exists (confirmed). The migration
 checks `backtest_trades` for the column and adds it nullable with a
 backfill-from-run if missing; otherwise no-op.
 
-### 2.5 ER diagram
+### 2.8 ER diagram
 
 ```mermaid
 erDiagram
     strategies ||--o{ trades : produces
     strategies ||--o{ settings : scopes
     strategies ||--o{ backtest_runs : owns
-    trades ||--|{ trade_legs : has
+    trades ||--|{ trade_legs : "has 1..N"
     trades }o--|| strategies : strategy_id
 
     strategies {
         int    strategy_id PK
         string name
+        string display_name
+        string description
         string class_path
         bool   enabled
         bool   is_default
-        bool   is_active
     }
     trades {
-        int    id PK
-        int    strategy_id FK
-        string ticker
-        string status
-        int    n_legs
+        int      id PK
+        int      strategy_id FK
+        string   ticker
+        string   signal_type
+        string   status
+        numeric  pnl_pct "aggregated, cached"
+        numeric  pnl_usd "aggregated, cached"
+        numeric  peak_pnl_pct
+        numeric  dynamic_sl_pct
+        timestamptz entry_time
+        timestamptz exit_time
         smallint ib_client_id
+        smallint n_legs
+        jsonb    strategy_config
+        jsonb    entry_enrichment
+        jsonb    exit_enrichment
     }
     trade_legs {
-        int    leg_id PK
-        int    trade_id FK
-        int    leg_index
-        string sec_type
-        string symbol
+        int     leg_id PK
+        int     trade_id FK
+        int     leg_index
+        string  role
+        string  sec_type
+        string  symbol
         numeric strike
-        string right
-        date   expiry
-        int    contracts
-        int    ib_perm_id
-        int    ib_con_id
+        string  right
+        date    expiry
+        int     multiplier
+        string  direction
+        int     contracts_entered
+        int     contracts_open
+        int     contracts_closed
+        numeric entry_price
+        numeric exit_price
+        numeric current_price
+        numeric ict_entry
+        numeric ict_sl
+        numeric ict_tp
+        int     ib_order_id
+        bigint  ib_perm_id
+        int     ib_con_id
+        bigint  ib_tp_perm_id
+        bigint  ib_sl_perm_id
+        string  status
     }
     settings {
         string key
@@ -236,20 +546,14 @@ erDiagram
     }
 ```
 
-### 2.6 Migration strategy — rollback
+### 2.9 `strategies` columns — no schema change
 
-The migration is a single file; rollback is a companion
-`db/migrations/007_multi_strategy_v2_rollback.sql` that:
-
-1. Drops `trade_legs` (cascades from `trades.id` won't fire because
-   we're dropping the child outright).
-2. Drops the new `trades` columns.
-3. Drops `strategies.is_active` and re-inserts an `ACTIVE_STRATEGY`
-   settings row derived from whichever `strategies.is_active=TRUE` row
-   was most recently updated.
-
-At every step the live bot can still operate on the single active
-strategy — rollback is boring.
+The existing `strategies` columns — `name` (short code like `ict`),
+`display_name` (user-friendly short like "ICT"), and `description`
+(long prose) — are sufficient for the UI needs of this initiative. No
+schema change to `strategies`. The only tables the migration modifies
+are: `settings` (deletes one row), `trades` (full rebuild under §2.4),
+and `trade_legs` (new).
 
 ---
 
@@ -257,8 +561,8 @@ strategy — rollback is boring.
 
 ### 3.1 Isolation model
 
-Each active strategy gets its **own per-ticker thread set**. If ICT and
-ORB are both active and the ticker universe is 23 symbols, that's 46
+Each enabled strategy gets its **own per-ticker thread set**. If ICT
+and ORB are both enabled and the ticker universe is 23 symbols, that's 46
 scanner threads. Simpler to reason about than multi-plugin-per-thread;
 if the thread count later becomes a real cost we revisit.
 
@@ -279,9 +583,9 @@ sequenceDiagram
     participant Threads as Per-ticker threads
     participant TEM as TradeEntryManager
 
-    Main->>DB: SELECT * FROM strategies WHERE is_active=TRUE AND enabled=TRUE
+    Main->>DB: SELECT * FROM strategies WHERE enabled=TRUE
     DB-->>Main: [ICTStrategy, ORBStrategy]
-    loop for each active strategy
+    loop for each enabled strategy
         Main->>Reg: instantiate(class_path)
         Reg-->>Main: strategy instance
         loop for each ticker in strategy-scoped tickers
@@ -290,39 +594,47 @@ sequenceDiagram
     end
     Threads->>Threads: detect() → Signal
     Threads->>TEM: enter(signal, strategy_id)
-    TEM->>DB: SELECT 1 FROM trades WHERE ticker=? AND status='open' FOR UPDATE NOWAIT
-    alt lock acquired
+    TEM->>DB: SELECT 1 FROM trades WHERE strategy_id=? AND ticker=? AND status='open' FOR UPDATE NOWAIT
+    alt lock acquired (this strategy has no open trade on this ticker)
         TEM->>Pool: place_bracket_order (stamps ib_client_id)
         Pool-->>TEM: order ids
-        TEM->>DB: INSERT trades (strategy_id, ib_client_id, n_legs=1)
-        TEM->>DB: INSERT trade_legs (leg_index=0, …)
-    else another strategy already open on ticker
+        TEM->>DB: INSERT trades (strategy_id, ib_client_id, n_legs=1, ...)
+        TEM->>DB: INSERT trade_legs (leg_index=0, symbol, direction, ...)
+    else this strategy already has an open trade on this ticker
         TEM-->>Threads: None (drop signal, log)
     end
+    Note over TEM,DB: Another strategy may simultaneously hold an open<br/>trade on the same ticker — each (strategy_id, ticker) pair<br/>is an independent slot.
 ```
 
 ### 3.3 Concurrent-trade policy (ARCH-006 extension)
 
-> **One open trade per ticker, globally, across all strategies.**
+> **One open trade per `(strategy_id, ticker)` pair. Multiple strategies
+> may hold open trades on the same ticker simultaneously.**
 
-If ICT is already open on SPY, ORB is blocked from entering SPY until
-ICT closes. This is the existing behavior (see
-`strategy/exit_manager.py:99-121`) extended to the multi-strategy
-context. First strategy to signal *and* acquire the row-level lock
-wins; the loser gets `NOWAIT` back and tries again next cycle.
+If ICT is already open on SPY, ORB is **not** blocked from entering SPY
+— it gets its own independent slot. So ICT can be long SPY while ORB is
+short SPY at the same time.
+
+**Rationale:** Strategies run isolated per user choice #1. Blocking
+across strategies would defeat the purpose of running them in parallel
+during market hours — the whole point is to observe how many survive
+live conditions. Each strategy's `orderRef` (e.g. `ict-SPY-260421-01`
+vs `orb-SPY-260421-01`) identifies which position belongs to which
+strategy in IB.
 
 The enforcement query (ARCH-002 pattern):
 
 ```sql
 SELECT 1 FROM trades
- WHERE ticker = :ticker AND status = 'open'
+ WHERE strategy_id = :sid AND ticker = :ticker AND status = 'open'
  FOR UPDATE NOWAIT;
 ```
 
-No partial unique index; the live row-level lock is enough. We
-explicitly reject the stronger `(ticker, strategy_id)` form from
-`multi_strategy_data_model.md` §2 — the user wants first-to-signal-wins,
-not multiple-open-per-ticker.
+The `(strategy_id, ticker, status='open')` combination is the unit of
+contention; each pair gets one slot. Cross-strategy exposure caps
+(single-account net delta / gross notional limits) are a **separate
+concern** handled outside this doc — see §8 open-questions for the
+follow-up.
 
 ### 3.4 Close flow is strategy-agnostic
 
@@ -419,7 +731,7 @@ Minimal UI surface change. Layout:
 ```
 Settings tab
 ┌──────────────────────────────────────────────────────────┐
-│ Viewing settings for:  [ ICT ▾ ]   (active strategies    │
+│ Viewing settings for:  [ ICT ▾ ]   (enabled strategies   │
 │                                     only — ORB, ICT)     │
 ├──────────────────────────────────────────────────────────┤
 │ PROFIT_TARGET         [ 0.30 ]            (ICT-scoped)   │
@@ -434,8 +746,9 @@ Settings tab
 
 Rules:
 
-- Dropdown lists `strategies WHERE is_active=TRUE AND enabled=TRUE`,
-  defaulting to the first (lowest `strategy_id`) active row.
+- Dropdown lists `strategies WHERE enabled=TRUE`, pre-selecting the
+  row with `is_default=TRUE` (falls back to lowest `strategy_id` if
+  no default is marked).
 - Scoped rows (`WHERE strategy_id = :sid`) render editable.
 - Global rows (`WHERE strategy_id IS NULL`) with no scoped override
   render greyed out with an "inherited" pill.
@@ -545,30 +858,70 @@ semantics, applied leg-by-leg under the single row-level trade lock.
 
 ## §7 — Migration path & phasing
 
-Five phases. Each is independently shippable; the live bot keeps
-single-strategy trading after each phase lands.
+This is now a bigger migration than originally phased — the `trades`
+table is rebuilt (§2.4) rather than extended. Phases 3–6 remain
+independently shippable after Phase 2 lands.
 
-### Phase 2 — DB foundation
-- Ship `007_multi_strategy_v2.sql`: `is_active`, `trade_legs`,
-  `trades.ib_client_id`, `trades.n_legs`, backfill.
-- No code changes. Writers ignore the new columns for now.
-- **Rollback:** run `007_..._rollback.sql`; drops new columns/table.
+### Phase 2a — DB migration (big-bang)
+- Ship `db/migrations/007_trades_legs_rebuild.sql`: the renaming +
+  rebuild described in §2.4, plus the two views from §2.6.
+- **Bot must be stopped during application.** This is not a zero-
+  downtime migration.
+- Apply in a single transaction where possible; the `ALTER TABLE ...
+  RENAME` chain is fast but requires no live writers.
+- **Verify post-migration:** `SELECT COUNT(*)` on `trades` and
+  `trade_legs` both equal the pre-migration count on
+  `trades_pre_legs`; confirm `trades_pre_legs` is frozen (no FKs
+  pointing at it from the new schema, no writers targeting it).
+- **Rollback:** run `007_trades_legs_rebuild_rollback.sql` — drops the
+  new `trade_legs` + `trades`, renames `trades_pre_legs` back to
+  `trades`, renames indexes back.
 
-### Phase 3 — UI scoping
-- Settings tab dropdown + inherited/scoped rendering.
+### Phase 2b — ORM + writer refactor
+- Update `db/models.py` to reflect the new schema; add a `TradeLeg`
+  model.
+- Refactor `db/writer.py::insert_trade` to write **one** `trades` row
+  + **N** `trade_legs` rows in a single transaction (single-leg path
+  writes exactly one leg row with `leg_index=0`).
+- Update every `UPDATE trades SET <per-leg-column>=...` call site to
+  target `trade_legs` instead. Legacy references will fail loudly
+  against the new slim `trades` table — good.
+- **Rollback:** revert the writer bundle; DB schema stays on v2.
+
+### Phase 2c — Read-side refactor
+- Every route/module that reads trade fields now either joins
+  `trade_legs` or reads from one of the two views:
+  - `v_trades_with_first_leg` — for the Trades tab and other places
+    that expect a flat row shape (single-leg path stays ergonomic).
+  - `v_trades_aggregate_pnl` — for summary cards, backtest comparisons,
+    and anywhere we want the true cross-leg aggregate rather than the
+    cached `trades.pnl_*` columns.
+- Views are created in the same migration file as a follow-up block
+  after the Phase-D backfill.
+- **Rollback:** revert the route bundle; views + tables stay in place.
+
+### Phase 3 — UI scoping + Trades tab leg expansion
+- Settings tab dropdown + inherited/scoped rendering (unchanged from
+  the pre-rev plan). Dropdown pre-selects the row with
+  `is_default=TRUE`.
+- Trades tab: single-leg rows render unchanged (read via
+  `v_trades_with_first_leg`). Multi-leg trades get an expand row
+  showing each leg (`contracts_entered`, `entry_price`, `exit_price`,
+  `status` per leg).
 - `GET /api/settings?strategy_id=<id>` route.
 - **Rollback:** revert frontend + API bundle; DB unaffected.
 
 ### Phase 4 — Scanner plugin dispatch
 - `strategy/scanner.py:96` stops hardcoding `SignalEngine`.
-- `main.py` reads `SELECT * FROM strategies WHERE is_active AND enabled`
-  and spawns per-strategy thread sets.
+- `main.py` reads `SELECT * FROM strategies WHERE enabled=TRUE` and
+  spawns per-strategy thread sets.
 - `TradeEntryManager` stamps `trades.strategy_id` (already FK) and
-  passes `strategy_id` down the entry path.
-- **Rollback:** flip `is_active` back to exactly one row; old single-
-  strategy path still works because nothing got deleted.
+  passes `strategy_id` down the entry path. Lock query now uses the
+  `(strategy_id, ticker, status='open')` form (§3.3).
+- **Rollback:** disable all but one strategy via `enabled=FALSE`; old
+  single-strategy path still works because nothing got deleted.
 
-### Phase 5 — Thread-owned close via clientId
+### Phase 5 — Thread-owned close via `trades.ib_client_id`
 - `TradeEntryManager` writes `trades.ib_client_id = <pool slot clientId>`
   at order placement.
 - `_atomic_close` + sidecar `/close-trade` read this column and route
@@ -576,26 +929,37 @@ single-strategy trading after each phase lands.
 - **Rollback:** revert close code; `ib_client_id` column can stay
   populated harmlessly.
 
-### Phase 6 — Multi-leg
-- `LegSpec` + `BaseStrategy.place_legs` default impl.
-- `broker/ib_orders.py::place_multi_leg_order`.
-- `TradeEntryManager._enter_multi_leg` branch.
-- Delta-neutral plugin goes live against paper first.
+### Phase 6 — Multi-leg execution + delta-neutral plugin
+- The schema already supports multi-leg (shipped in Phase 2a). This
+  phase is purely code:
+  - `LegSpec` + `BaseStrategy.place_legs` default impl.
+  - `broker/ib_orders.py::place_multi_leg_order` submit path.
+  - `TradeEntryManager._enter_multi_leg` branch.
+  - Delta-neutral plugin code; goes live against paper first.
 - **Rollback:** strategies stop overriding `place_legs`; single-leg
   path unaffected.
 
-Total DDL footprint: **1 table added** (`trade_legs`), **3 columns
-added** (`strategies.is_active`, `trades.ib_client_id`, `trades.n_legs`),
-**1 settings row deleted** (`ACTIVE_STRATEGY`), **1 column verified**
-(`backtest_trades.strategy_id`, added if missing).
+**Total DDL footprint:**
+- **1 table rebuilt** (`trades`, via rename-to-snapshot + recreate).
+- **1 table added** (`trade_legs`).
+- **1 snapshot table retained** (`trades_pre_legs`, frozen; dropped
+  manually after validation window).
+- **2 views added** (`v_trades_with_first_leg`,
+  `v_trades_aggregate_pnl`).
+- **1 settings row deleted** (`ACTIVE_STRATEGY`).
+- **1 column verified** (`backtest_trades.strategy_id`, added if
+  missing).
+- **No changes to `strategies`.**
 
 ---
 
 ## §8 — Open questions & deferred items
 
-1. **Priority on `is_active`?** For now a simple boolean. If we need
-   deterministic "first to signal" tie-breaking we add
-   `strategies.priority SMALLINT NOT NULL DEFAULT 0` later. Deferred
+1. **Priority among enabled strategies?** Not currently needed —
+   §3.3's per-`(strategy_id, ticker)` slot means strategies don't
+   compete with each other for the same row-level lock. If we later
+   need deterministic tie-breaking (e.g. shared risk budget), we'd
+   add `strategies.priority SMALLINT NOT NULL DEFAULT 0`. Deferred
    until we actually hit a contention pattern that warrants it.
 
 2. **Stock hedge clientId separation?** Delta-neutral's STK leg most
@@ -619,8 +983,21 @@ added** (`strategies.is_active`, `trades.ib_client_id`, `trades.n_legs`),
    add `n_legs` as a small badge (e.g. "5L" for iron condor + hedge)
    so users can spot multi-leg deals at a glance. Wire in Phase 3.
 
-6. **Same-ticker cross-strategy exposure cap.** Since we block at
-   one open per ticker globally (§3.3), exposure is already bounded
-   at 1× strategy contracts. If we ever relax ARCH-006 to per-strategy,
-   a `MAX_CONCURRENT_CONTRACTS_PER_TICKER` settings row becomes
-   necessary. Not now.
+6. **Cross-strategy exposure cap (single-account net delta / gross
+   notional limits).** With §3.3's per-`(strategy_id, ticker)` policy,
+   two strategies can simultaneously hold opposing or reinforcing
+   positions on the same ticker. Net account exposure is therefore
+   *unbounded by this doc*. A separate initiative needs to add:
+   - a `MAX_CONCURRENT_CONTRACTS_PER_TICKER` (cross-strategy sum) cap,
+   - optional net-delta and gross-notional limits at the account level,
+   - a pre-trade check in `TradeEntryManager` that rolls up
+     `SUM(contracts_open)` across all open legs on the ticker before
+     admitting a new entry.
+   Flagged here as a **deferred follow-up**, explicitly out of scope
+   for the multi-strategy v2 initiative.
+
+7. **Dropping `trades_pre_legs`.** The snapshot table is kept indefinitely
+   post-migration so any stale legacy code paths trip on missing columns
+   loudly rather than silently. Drop it manually (not via migration)
+   after a validation window — suggested: one full trading week of clean
+   live running with no production errors traceable to the schema change.
