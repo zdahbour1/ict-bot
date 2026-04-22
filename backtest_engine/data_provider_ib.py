@@ -233,13 +233,26 @@ def fetch_bars_ib(
         duration_days = max_days
 
     cache_file = spec.cache_path(interval, end, duration_days)
-    if use_cache and cache_file.exists():
-        try:
-            df = pd.read_parquet(cache_file)
-            log.info(f"IB cache hit: {cache_file.name} ({len(df)} bars)")
-            return df
-        except Exception as e:
-            log.warning(f"IB cache read failed {cache_file.name}: {e}")
+    # Pickle fallback is used when parquet engines (pyarrow/fastparquet)
+    # aren't installed. Same cache dir, .pkl extension. Caught 2026-04-21
+    # when an entire 192-cell sweep re-fetched every cell from IB because
+    # parquet writes silently failed with "no usable engine".
+    pickle_file = cache_file.with_suffix(".pkl")
+    if use_cache:
+        if cache_file.exists():
+            try:
+                df = pd.read_parquet(cache_file)
+                log.info(f"IB cache hit: {cache_file.name} ({len(df)} bars)")
+                return df
+            except Exception as e:
+                log.warning(f"IB cache read failed {cache_file.name}: {e}")
+        elif pickle_file.exists():
+            try:
+                df = pd.read_pickle(pickle_file)
+                log.info(f"IB cache hit (pickle): {pickle_file.name} ({len(df)} bars)")
+                return df
+            except Exception as e:
+                log.warning(f"IB pickle cache read failed {pickle_file.name}: {e}")
 
     # Live fetch — needs TWS
     if IB is None:
@@ -300,10 +313,20 @@ def fetch_bars_ib(
             pass
 
     if not df.empty and use_cache:
+        # Prefer parquet (compact + typed); fall back to pickle when no
+        # parquet engine is available so the cache still works.
         try:
             df.to_parquet(cache_file)
+            log.debug(f"IB cache wrote {cache_file.name} ({len(df)} bars)")
         except Exception as e:
-            log.warning(f"IB cache write failed {cache_file.name}: {e}")
+            log.info(f"parquet engine unavailable ({e}); falling back to "
+                     f"pickle for {cache_file.name}")
+            try:
+                df.to_pickle(pickle_file)
+                log.debug(f"IB cache wrote (pickle) {pickle_file.name} ({len(df)} bars)")
+            except Exception as e2:
+                log.warning(f"IB cache write failed entirely for "
+                            f"{cache_file.name}: {e2}")
 
     return df
 

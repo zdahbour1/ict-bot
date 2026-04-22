@@ -9,3 +9,10 @@ numpy
 ib_async
 sqlalchemy>=2.0
 psycopg2-binary
+# parquet engine for backtest_engine/data_provider_ib.py bar cache.
+# Without this, cache writes silently fail and every backtest cell
+# re-fetches from IB (~60s each). Caught 2026-04-21 — sweep of 192
+# cells burned full IB round-trips for every cell.
+pyarrow
+# Excel export for trades (dashboard/routes/trades.py::export_trades)
+openpyxl
