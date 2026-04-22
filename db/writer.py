@@ -306,6 +306,11 @@ def get_open_trades_from_db() -> list:
             result.append({
                 "db_id": r.id,
                 "ticker": r.ticker,
+                # Phase 4: include strategy_id so TradeEntryManager.can_enter()
+                # can correctly apply the per-(strategy_id, ticker) lock.
+                # Without this every open trade looks strategy_id=None which
+                # resolves as "blocks all strategies" and defeats multi-strategy.
+                "strategy_id": r.strategy_id,
                 "symbol": leg.symbol,
                 "contracts": leg.contracts_open,
                 "direction": leg.direction or "LONG",
