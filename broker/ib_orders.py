@@ -127,7 +127,8 @@ class IBOrdersMixin:
         if config.DRY_RUN:
             log.info(f"[DRY RUN] Bracket {action}: {contracts}x {option_symbol} "
                      f"TP=${tp_price:.2f} SL=${sl_price:.2f} ref={order_ref}")
-            return {"dry_run": True, "symbol": option_symbol, "order_ref": order_ref}
+            return {"dry_run": True, "symbol": option_symbol, "order_ref": order_ref,
+                    "client_id": None}
         return self._submit_to_ib(
             self._ib_place_bracket, option_symbol, contracts, action, tp_price, sl_price, order_ref
         )
@@ -284,7 +285,17 @@ class IBOrdersMixin:
         sl_perm_id = sl_trade.order.permId
         con_id = contract.conId
 
-        log.info(f"[IB] BRACKET {action}: {contracts}x {option_symbol} — "
+        # Phase 5 (multi-strategy v2): stamp the clientId that PLACED the
+        # bracket. This lets cancel_order_by_id route the cancel directly
+        # to the owning pool slot instead of fanning out blindly.
+        # See docs/multi_strategy_architecture_v2.md §7 Phase 5.
+        try:
+            placing_client_id = self.ib.client.clientId
+        except Exception:
+            placing_client_id = None
+
+        log.info(f"[IB clientId={placing_client_id}] BRACKET {action}: "
+                 f"{contracts}x {option_symbol} — "
                  f"parent={parent.orderId} permId={perm_id} conId={con_id} "
                  f"status={status} fill=${fill_price:.2f} "
                  f"TP={tp_order.orderId}(perm={tp_perm_id}) @ ${tp_price:.2f} "
@@ -304,6 +315,7 @@ class IBOrdersMixin:
             "status": status,
             "fill_price": fill_price,
             "order_ref": order_ref,
+            "client_id": placing_client_id,
         }
 
         ib_error = self._get_last_error(parent.orderId)
@@ -351,14 +363,52 @@ class IBOrdersMixin:
                 self.ib.cancelOrder(trade.order)
                 log.info(f"[IB] Cancelled orderId={trade.order.orderId}")
 
-    def cancel_order_by_id(self, order_id: int):
+    def cancel_order_by_id(self, order_id: int,
+                           preferred_client_id: int | None = None):
         """Cancel a specific order by orderId, across every client in the pool.
 
         IB's ``cancelOrder`` only succeeds on the client that PLACED the
         order — all other clients get Error 10147. Fan-out across the
         pool so whichever client owns the order processes it; others
         harmlessly emit 10147 which we swallow.
+
+        Phase 5 (multi-strategy v2): ``preferred_client_id`` lets callers
+        route the cancel directly to the pool slot that originally placed
+        the order (stamped on ``trades.ib_client_id`` at entry). If the
+        preferred slot is still in the pool, we try it FIRST and skip the
+        fan-out on success. If it's not present (reconnect/reinit) or the
+        cancel raises, we fall through to the legacy fan-out behavior.
         """
+        # Preferred-client fast path: try the owning slot first.
+        if preferred_client_id is not None and self._pool is not None:
+            preferred_conn = None
+            for conn in self._pool.all_connections:
+                if getattr(conn, "client_id", None) == preferred_client_id:
+                    preferred_conn = conn
+                    break
+            if preferred_conn is not None:
+                try:
+                    if preferred_conn is self._conn:
+                        self._submit_to_ib(self._ib_cancel_single_order,
+                                           order_id, timeout=5)
+                    else:
+                        preferred_conn.submit(
+                            self._ib_cancel_single_order_on_conn,
+                            preferred_conn.ib, order_id, timeout=5,
+                        )
+                    log.debug(f"[IB] Cancel orderId={order_id} routed to "
+                              f"owning clientId={preferred_client_id} "
+                              f"({preferred_conn.label}) — skipping fan-out")
+                    return
+                except Exception as e:
+                    log.debug(f"[IB] Preferred cancel on clientId="
+                              f"{preferred_client_id} failed: {e} — "
+                              f"falling back to fan-out")
+            else:
+                log.debug(f"[IB] preferred_client_id={preferred_client_id} "
+                          f"not in pool — falling back to fan-out")
+
+        # Legacy fan-out: own connection + every other pool connection.
         try:
             self._submit_to_ib(self._ib_cancel_single_order, order_id, timeout=5)
         except Exception as e:
@@ -391,10 +441,17 @@ class IBOrdersMixin:
                 return
         log.debug(f"[IB] orderId={order_id} not in this connection's openTrades")
 
-    def cancel_order_by_perm_id(self, perm_id: int):
+    def cancel_order_by_perm_id(self, perm_id: int,
+                                preferred_client_id: int | None = None):
         """Cancel by IB permId — globally unique across all clients.
         Fans out across the pool; the owning client processes the
-        cancel, others harmlessly return 10147."""
+        cancel, others harmlessly return 10147.
+
+        Phase 5 (multi-strategy v2): ``preferred_client_id`` — same
+        contract as ``cancel_order_by_id``. If the owning pool slot is
+        present, we submit the cancel there first and skip the fan-out.
+        Falls back to fan-out if the slot is missing or the attempt raises.
+        """
         if not perm_id:
             return
         if self._pool is None:
@@ -403,6 +460,30 @@ class IBOrdersMixin:
             except Exception as e:
                 log.warning(f"Failed to cancel permId={perm_id}: {e}")
             return
+
+        # Preferred-client fast path
+        if preferred_client_id is not None:
+            preferred_conn = None
+            for conn in self._pool.all_connections:
+                if getattr(conn, "client_id", None) == preferred_client_id:
+                    preferred_conn = conn
+                    break
+            if preferred_conn is not None:
+                try:
+                    preferred_conn.submit(self._ib_cancel_by_perm_id_on,
+                                          preferred_conn.ib, perm_id, timeout=5)
+                    log.debug(f"[IB] Cancel permId={perm_id} routed to "
+                              f"owning clientId={preferred_client_id} "
+                              f"({preferred_conn.label}) — skipping fan-out")
+                    return
+                except Exception as e:
+                    log.debug(f"[IB] Preferred cancel permId={perm_id} on "
+                              f"clientId={preferred_client_id} failed: {e} — "
+                              f"falling back to fan-out")
+            else:
+                log.debug(f"[IB] preferred_client_id={preferred_client_id} "
+                          f"not in pool — falling back to fan-out")
+
         for conn in self._pool.all_connections:
             try:
                 conn.submit(self._ib_cancel_by_perm_id_on, conn.ib, perm_id, timeout=5)
