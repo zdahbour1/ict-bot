@@ -20,6 +20,32 @@ import pandas as pd
 
 
 @dataclass
+class LegSpec:
+    """One leg of a multi-leg trade (iron condor, spread, hedged position).
+
+    Strategies with multi-leg entries override ``BaseStrategy.place_legs()``
+    to return a list of ``LegSpec`` objects. The TradeEntryManager hands
+    them to ``IBClient.place_multi_leg_order`` which submits each leg as
+    an independent order inside one OCA group.
+
+    See docs/multi_strategy_architecture_v2.md Phase 6.
+    """
+    sec_type: str                        # 'OPT' | 'FOP' | 'STK'
+    symbol: str                          # OCC for options, ticker for stock
+    direction: str                       # 'LONG' | 'SHORT'
+    contracts: int
+    # Option-only — None for STK
+    strike: Optional[float] = None
+    right: Optional[str] = None          # 'C' | 'P'
+    expiry: Optional[str] = None         # YYYYMMDD
+    multiplier: int = 100
+    exchange: str = 'SMART'
+    currency: str = 'USD'
+    leg_role: Optional[str] = None       # 'short_call', 'hedge_stock', etc
+    underlying: Optional[str] = None
+
+
+@dataclass
 class Signal:
     """Standard signal output from any strategy.
 
@@ -104,6 +130,18 @@ class BaseStrategy(ABC):
 
     def mark_used(self, setup_id: str) -> None:
         """Optional: mark a setup as consumed so it won't re-fire."""
+        return None
+
+    # ── Multi-leg entry (Phase 6) ─────────────────────────────
+    def place_legs(self, signal: Signal) -> Optional[List["LegSpec"]]:
+        """Return N LegSpec objects for a multi-leg entry, or None for
+        single-leg (default). TradeEntryManager calls this before falling
+        back to the single-leg option_selector path.
+
+        Default implementation returns None — preserves backward compat
+        for every existing single-leg strategy (ICT, ORB, VWAP). Only
+        delta-neutral / spread / hedged plugins override.
+        """
         return None
 
 
