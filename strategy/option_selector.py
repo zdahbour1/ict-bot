@@ -281,6 +281,9 @@ def select_and_enter(client, ticker: str = "QQQ",
         trade["ib_tp_perm_id"] = order_result.get("tp_perm_id")
         trade["ib_sl_order_id"] = order_result.get("sl_order_id")
         trade["ib_sl_perm_id"] = order_result.get("sl_perm_id")
+        # Phase 5: stamp the pool slot's clientId so the close flow can
+        # route cancels back to the owning client.
+        trade["ib_client_id"] = order_result.get("client_id")
 
     log.info(
         f"[{ticker}] Trade opened: {option_symbol} | "
@@ -419,6 +422,8 @@ def select_and_enter_put(client, ticker: str = "QQQ",
         trade["ib_tp_perm_id"] = order_result.get("tp_perm_id")
         trade["ib_sl_order_id"] = order_result.get("sl_order_id")
         trade["ib_sl_perm_id"] = order_result.get("sl_perm_id")
+        # Phase 5: stamp the pool slot's clientId (PUT path).
+        trade["ib_client_id"] = order_result.get("client_id")
 
     log.info(
         f"[{ticker}] PUT trade opened: {option_symbol} | "
