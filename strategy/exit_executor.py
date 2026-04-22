@@ -439,6 +439,158 @@ def _execute_exit_sell_first(client, trade: dict, reason: str,
     return None
 
 
+def _fetch_open_legs(trade_id: int) -> list[dict]:
+    """Read every open leg for a trade from the DB. Used by the multi-leg
+    exit path to know what needs to close. Returns a list of dicts with
+    the fields the close orders need (symbol, sec_type, right, direction,
+    contracts_open, entry_price, ib_con_id, ib_tp_perm_id, ib_sl_perm_id)."""
+    try:
+        from db.connection import get_session
+        from sqlalchemy import text
+        session = get_session()
+        if session is None:
+            return []
+        rows = session.execute(text(
+            "SELECT leg_id, leg_index, leg_role, sec_type, symbol, "
+            '       "right", strike, expiry, direction, '
+            "       contracts_open, entry_price, ib_con_id, "
+            "       ib_tp_perm_id, ib_sl_perm_id "
+            "FROM trade_legs "
+            "WHERE trade_id = :tid AND leg_status = 'open' "
+            "ORDER BY leg_index"
+        ), {"tid": trade_id}).fetchall()
+        session.close()
+        return [
+            {
+                "leg_id": r[0], "leg_index": r[1], "leg_role": r[2],
+                "sec_type": r[3], "symbol": r[4], "right": r[5],
+                "strike": float(r[6]) if r[6] is not None else None,
+                "expiry": r[7], "direction": r[8],
+                "contracts_open": int(r[9] or 0),
+                "entry_price": float(r[10] or 0),
+                "ib_con_id": r[11],
+                "ib_tp_perm_id": r[12], "ib_sl_perm_id": r[13],
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        log.warning(f"_fetch_open_legs(trade_id={trade_id}) failed: {e}")
+        return []
+
+
+def _close_action_for_leg(leg: dict) -> tuple[str, str] | None:
+    """Return (method_name, description) for the IB call that closes
+    this leg, or None if the leg is unsupported. Method names map to
+    IBOrdersMixin: buy_call / buy_put / sell_call / sell_put.
+    Stock legs are handled separately (not yet supported — flagged).
+
+    direction='LONG' + right='C' → sell_call (SELL to close long call)
+    direction='LONG' + right='P' → sell_put
+    direction='SHORT' + right='C' → buy_call (BUY to close short call)
+    direction='SHORT' + right='P' → buy_put
+    """
+    sec_type = (leg.get("sec_type") or "OPT").upper()
+    if sec_type == "STK":
+        return None  # stock hedge legs need a separate path (TODO)
+    right = (leg.get("right") or "").upper()
+    direction = (leg.get("direction") or "").upper()
+    if direction == "LONG":
+        if right == "C": return ("sell_call", "sell-to-close long call")
+        if right == "P": return ("sell_put",  "sell-to-close long put")
+    elif direction == "SHORT":
+        if right == "C": return ("buy_call", "buy-to-close short call")
+        if right == "P": return ("buy_put",  "buy-to-close short put")
+    return None
+
+
+def _execute_multi_leg_exit(client, trade: dict, reason: str) -> float | None:
+    """Close every leg of a multi-leg trade (Phase 6b).
+
+    Assumes multi-leg trades placed via ``place_multi_leg_order`` — each
+    leg is its own IB order, typically in a shared OCA group. Close
+    semantics:
+      1. Fetch all open legs from ``trade_legs``.
+      2. For each leg, determine the closing action based on direction
+         + right (see _close_action_for_leg).
+      3. Send each close order. Don't wait between — fire them all so
+         the legs close as close-to-simultaneously as possible.
+      4. Cancel any still-live TP/SL bracket on each leg by permId.
+      5. Per-leg update in DB happens via finalize_close on the caller
+         (exit_manager) using the trade's aggregated status.
+
+    Simplification: currently uses sell_first-style best-effort. No
+    retries, no post-verify per leg — OCA siblings should cancel
+    themselves on first fill. If closes partially fill, the stuck legs
+    will stay open and reconcile PASS 3 / the next exit cycle will
+    surface them.
+
+    Returns None. Caller uses trade['current_price'] for aggregate P&L
+    the same way it does for single-leg today.
+    """
+    ticker = trade.get("ticker", "UNK")
+    trade_id = trade.get("db_id")
+    if trade_id is None:
+        _trace(ticker, "MULTI-LEG EXIT: trade has no db_id — aborting", "error")
+        return None
+
+    legs = _fetch_open_legs(trade_id)
+    if not legs:
+        _trace(ticker, f"MULTI-LEG EXIT: no open legs for trade {trade_id} "
+                        "— nothing to close (may already be flat)")
+        return None
+
+    _trace(ticker, f"MULTI-LEG EXIT START — reason={reason} db_id={trade_id} "
+                   f"n_legs={len(legs)} "
+                   f"legs=[{', '.join(l.get('leg_role') or l.get('symbol','?') for l in legs)}]")
+
+    preferred_cid = trade.get("ib_client_id")
+    sent = 0
+    skipped = 0
+
+    for leg in legs:
+        action = _close_action_for_leg(leg)
+        if action is None:
+            _trace(ticker, f"MULTI-LEG EXIT: skipping leg {leg.get('leg_index')} "
+                           f"({leg.get('sec_type')} {leg.get('direction')} "
+                           f"right={leg.get('right')}) — no close path (STK or bad shape)",
+                           "warn")
+            skipped += 1
+            continue
+        method_name, desc = action
+        method = getattr(client, method_name, None)
+        if method is None:
+            _trace(ticker, f"MULTI-LEG EXIT: client missing {method_name} — skipping leg "
+                           f"{leg.get('leg_index')}", "warn")
+            skipped += 1
+            continue
+        try:
+            method(leg["symbol"], int(leg["contracts_open"]))
+            _trace(ticker, f"MULTI-LEG EXIT: leg {leg.get('leg_index')} "
+                            f"({leg.get('leg_role') or leg['symbol']}) → "
+                            f"{desc} x{leg['contracts_open']}")
+            sent += 1
+        except Exception as e:
+            _trace(ticker, f"MULTI-LEG EXIT: leg {leg.get('leg_index')} "
+                            f"{method_name}({leg['symbol']}) raised: {e}",
+                            "error")
+
+        # Best-effort bracket cancel by permId (fire-and-forget).
+        for pid_key in ("ib_tp_perm_id", "ib_sl_perm_id"):
+            pid = leg.get(pid_key)
+            if not pid:
+                continue
+            try:
+                if hasattr(client, "cancel_order_by_perm_id"):
+                    client.cancel_order_by_perm_id(int(pid))
+            except Exception as e:
+                _trace(ticker, f"MULTI-LEG EXIT: cancel permId={pid} failed: {e}", "warn")
+
+    _trace(ticker, f"MULTI-LEG EXIT: {sent} close order(s) sent, "
+                    f"{skipped} leg(s) skipped. "
+                    f"Exit finalization handled by caller.")
+    return None
+
+
 def execute_exit(client, trade: dict, reason: str) -> float | None:
     """
     Full exit flow with detailed tracing:
@@ -459,7 +611,17 @@ def execute_exit(client, trade: dict, reason: str) -> float | None:
     _trace(ticker, f"EXECUTE EXIT START — reason={reason} db_id={db_id} "
            f"symbol={symbol} conId={con_id} direction={trade.get('direction')} "
            f"contracts={trade.get('contracts')} "
-           f"bracket TP={trade.get('ib_tp_order_id')} SL={trade.get('ib_sl_order_id')}")
+           f"bracket TP={trade.get('ib_tp_order_id')} SL={trade.get('ib_sl_order_id')} "
+           f"n_legs={trade.get('n_legs', 1)}")
+
+    # Phase 6b: multi-leg trades (iron condors, hedged positions) branch
+    # to a separate close path that iterates every leg and sends the
+    # correct closing order per (direction, right, sec_type). Single-leg
+    # trades (everything today) go through the same sell-first path as
+    # before — zero behavior change.
+    n_legs = int(trade.get("n_legs") or 1)
+    if n_legs > 1:
+        return _execute_multi_leg_exit(client, trade, reason)
 
     # Mode switch — sell-first (new default) vs cancel-first (legacy).
     # See config.CLOSE_MODE_SELL_FIRST and docs/ib_db_correlation.md.

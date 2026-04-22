@@ -332,6 +332,10 @@ def get_open_trades_from_db() -> list:
                 # Phase 5: pool slot that placed the entry — lets close
                 # flow route cancels back to the owning client.
                 "ib_client_id": r.ib_client_id,
+                # Phase 6b: leg count — exit flow branches on >1 to the
+                # multi-leg close path. Individual leg rows are fetched
+                # on demand by the multi-leg exit when needed.
+                "n_legs": r.n_legs,
             })
         session.close()
         return result
