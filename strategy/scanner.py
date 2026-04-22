@@ -86,24 +86,59 @@ class Scanner:
     and trade entry to TradeEntryManager (handles limits, cooldowns, IB).
     """
 
-    def __init__(self, client, exit_manager, ticker=None, scan_offset=0):
+    def __init__(self, client, exit_manager, ticker=None, scan_offset=0,
+                 strategy_id: int = 1, strategy_name: str = "ict",
+                 strategy_instance=None):
         self.client = client
         self.exit_manager = exit_manager
         self.ticker = ticker or config.TICKER
         self._scan_offset = scan_offset
 
-        # Delegate signal detection and trade entry
-        self.signal_engine = SignalEngine(self.ticker)
-        self.trade_manager = TradeEntryManager(client, exit_manager, self.ticker)
+        # Multi-strategy awareness (Phase 4). ICT keeps the fast path —
+        # SignalEngine directly — and every other strategy goes through
+        # the BaseStrategy plugin interface (returns list[Signal]).
+        self.strategy_id = strategy_id
+        self.strategy_name = strategy_name
+        if strategy_name == "ict" or strategy_instance is None:
+            self.signal_engine = SignalEngine(self.ticker)
+            self.plugin = None
+        else:
+            self.signal_engine = None
+            self.plugin = strategy_instance
+
+        self.trade_manager = TradeEntryManager(
+            client, exit_manager, self.ticker,
+            strategy_id=strategy_id, strategy_name=strategy_name,
+        )
 
         self._stop = threading.Event()
         self._scans_today = 0
         self._last_date = None
 
+    def _thread_key(self) -> str:
+        """Unique scanner thread_status key per (strategy, ticker).
+
+        ICT keeps the legacy key ``scanner-<TICKER>`` so dashboards and
+        existing log filters remain unchanged. Every other strategy gets
+        ``scanner-<strategy_name>-<TICKER>`` so concurrent strategies on
+        the same ticker each show their own row.
+        """
+        if self.strategy_name == "ict":
+            return f"scanner-{self.ticker}"
+        return f"scanner-{self.strategy_name}-{self.ticker}"
+
+    def _alerts_today(self) -> int:
+        """Unified alert counter across SignalEngine (ICT) and plugins."""
+        if self.signal_engine is not None:
+            return self.signal_engine.alerts_today
+        if self.plugin is not None:
+            return int(getattr(self.plugin, "alerts_today", 0) or 0)
+        return 0
+
     def start(self):
-        thread = threading.Thread(target=self._loop, daemon=True, name=f"scanner-{self.ticker}")
+        thread = threading.Thread(target=self._loop, daemon=True, name=self._thread_key())
         thread.start()
-        log.info(f"[{self.ticker}] Scanner started — active 6:30 AM–1:00 PM PT.")
+        log.info(f"[{self.ticker}] Scanner started (strategy={self.strategy_name}) — active 6:30 AM–1:00 PM PT.")
 
     def stop(self):
         self._stop.set()
@@ -129,7 +164,13 @@ class Scanner:
         if self._last_date != today:
             self._last_date = today
             self._scans_today = 0
-            self.signal_engine.reset_daily()
+            if self.signal_engine is not None:
+                self.signal_engine.reset_daily()
+            elif self.plugin is not None:
+                try:
+                    self.plugin.reset_daily()
+                except Exception:
+                    pass
             self.trade_manager.reset_daily()
             log.info(f"New trading day: {today}. Counters reset.")
 
@@ -160,7 +201,8 @@ class Scanner:
         was_in_trade = self.trade_manager._was_in_trade
         self.trade_manager.check_trade_closed()
         if was_in_trade and not self.trade_manager._was_in_trade:
-            self.signal_engine.clear_seen_setups()
+            if self.signal_engine is not None:
+                self.signal_engine.clear_seen_setups()
 
         in_market, in_trade_window, is_weekend = self._check_windows()
 
@@ -176,22 +218,26 @@ class Scanner:
         else:
             mode = "ALERT-ONLY MODE"
 
-        log.info(f"[{self.ticker}] Running ICT scan at {now_str} PT [{mode}]...")
+        # Keep literal "Running ICT scan" for ICT (log-line compatibility).
+        if self.strategy_name == "ict":
+            log.info(f"[{self.ticker}] Running ICT scan at {now_str} PT [{mode}]...")
+        else:
+            log.info(f"[{self.ticker}] Running {self.strategy_name.upper()} scan at {now_str} PT [{mode}]...")
 
         # ── Update thread status in DB ────────────────────
         self._scans_today += 1
         try:
             from db.writer import update_thread_status
             update_thread_status(
-                f"scanner-{self.ticker}", self.ticker, "scanning",
+                self._thread_key(), self.ticker, "scanning",
                 f"Scanning at {now_str} PT [{mode}]",
                 scans_today=self._scans_today,
                 trades_today=self.trade_manager.trades_today,
-                alerts_today=self.signal_engine.alerts_today,
+                alerts_today=self._alerts_today(),
                 error_count=self.trade_manager.errors_today,
             )
         except Exception as e:
-            handle_error(f"scanner-{self.ticker}", "update_thread_status", e)
+            handle_error(self._thread_key(), "update_thread_status", e)
 
         # ── News filter ───────────────────────────────────
         near_news, news_label = _is_near_news(now_pt)
@@ -226,7 +272,15 @@ class Scanner:
         log.info(f"EMA bias: {ema_bias} (informational only — not filtering signals)")
 
         # ── Detect signals (pure, no side effects) ────────
-        signals = self.signal_engine.detect(bars_1m, bars_1h, bars_4h, levels)
+        if self.plugin is not None:
+            # Plugin path — BaseStrategy.detect(..., ticker=...) → list[Signal]
+            try:
+                signals = self.plugin.detect(bars_1m, bars_1h, bars_4h, levels, self.ticker)
+            except TypeError:
+                # Older plugins may not accept ticker kwarg
+                signals = self.plugin.detect(bars_1m, bars_1h, bars_4h, levels)
+        else:
+            signals = self.signal_engine.detect(bars_1m, bars_1h, bars_4h, levels)
 
         # ── Process signals ──────────────────────────────
         for signal in signals:
@@ -247,7 +301,13 @@ class Scanner:
                 # Attempt trade entry via TradeEntryManager
                 trade = self.trade_manager.enter(signal, bars_1m=bars_1m)
                 if trade:
-                    self.signal_engine.mark_used(signal.setup_id)
+                    if self.signal_engine is not None:
+                        self.signal_engine.mark_used(signal.setup_id)
+                    elif self.plugin is not None:
+                        try:
+                            self.plugin.mark_used(signal.setup_id)
+                        except Exception:
+                            pass
             else:
                 log.info("Signal outside trade window — alert only, no trade placed.")
 
@@ -266,12 +326,12 @@ class Scanner:
             from db.writer import update_thread_status
             next_scan = (datetime.now(PT) + __import__('datetime').timedelta(seconds=60)).strftime('%H:%M')
             update_thread_status(
-                f"scanner-{self.ticker}", self.ticker, "idle",
+                self._thread_key(), self.ticker, "idle",
                 f"Scan #{self._scans_today} done at {now_str} PT | {len(signals)} signals | Next ~{next_scan} PT",
                 scans_today=self._scans_today,
                 trades_today=self.trade_manager.trades_today,
-                alerts_today=self.signal_engine.alerts_today,
+                alerts_today=self._alerts_today(),
                 error_count=self.trade_manager.errors_today,
             )
         except Exception as e:
-            handle_error(f"scanner-{self.ticker}", "post_scan_thread_update", e)
+            handle_error(self._thread_key(), "post_scan_thread_update", e)
