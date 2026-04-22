@@ -507,16 +507,74 @@ class IBOrdersMixin:
                 if e.get("status") not in TERMINAL_SET]
 
     def get_all_working_orders(self) -> list:
-        """Return every working order across all clientIds in the account."""
+        """Return every working order across all clientIds in the account.
+
+        Pool-aware: fans out across every connection and dedupes by permId
+        keeping the most-terminal status. Bug caught 2026-04-22 — this
+        method was previously single-connection, so brackets placed by
+        scanner-A/B/C (clientIds 2/3/4) were invisible to the exit-mgr
+        (clientId 1) caller. That made reconcile PASS 4 declare every
+        bracket MISSING and trigger spurious bracket restoration (9
+        trades got a duplicate OCA group before the fix landed).
+        """
         try:
-            return self._submit_to_ib(self._ib_get_all_working_orders, timeout=10)
+            own = self._submit_to_ib(self._ib_get_all_working_orders_on_conn,
+                                      self.ib, timeout=10)
         except Exception as e:
-            log.warning(f"Failed to query all working orders: {e}")
-            return []
+            log.warning(f"Failed to query all working orders (own): {e}")
+            own = []
+
+        if self._pool is None:
+            return own
+
+        TERMINAL_RANK = {
+            "Cancelled": 4, "ApiCancelled": 4, "Inactive": 4, "Filled": 4,
+            "PendingCancel": 3, "Submitted": 2, "PreSubmitted": 1,
+            "PendingSubmit": 0,
+        }
+        merged: dict = {}
+
+        def _key(e):
+            pid = e.get("permId") or 0
+            if pid:
+                return ("p", pid)
+            return ("o", e.get("clientId") or 0, e.get("orderId"))
+
+        def _merge(e):
+            k = _key(e)
+            cur = merged.get(k)
+            if cur is None:
+                merged[k] = e
+                return
+            cur_rank = TERMINAL_RANK.get(cur.get("status"), 2)
+            new_rank = TERMINAL_RANK.get(e.get("status"), 2)
+            if new_rank > cur_rank:
+                merged[k] = e
+
+        for e in own:
+            _merge(e)
+        for conn in self._pool.all_connections:
+            if conn is self._conn:
+                continue
+            try:
+                rows = conn.submit(self._ib_get_all_working_orders_on_conn,
+                                    conn.ib, timeout=5)
+            except Exception as e:
+                log.debug(f"get_all_working_orders fan-out on {conn.label}: {e}")
+                continue
+            for row in rows or []:
+                _merge(row)
+        return list(merged.values())
 
     def _ib_get_all_working_orders(self) -> list:
+        """Backward-compat shim — on-self connection only."""
+        return self._ib_get_all_working_orders_on_conn(self.ib)
+
+    @staticmethod
+    def _ib_get_all_working_orders_on_conn(ib) -> list:
+        """Runs on a specific connection's IB thread."""
         results = []
-        for trade in self.ib.openTrades():
+        for trade in ib.openTrades():
             status = trade.orderStatus.status
             if status in ("Cancelled", "ApiCancelled", "Inactive", "Filled"):
                 continue
