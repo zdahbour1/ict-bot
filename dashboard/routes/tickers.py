@@ -1,4 +1,11 @@
-"""Tickers API — CRUD for the tickers table."""
+"""Tickers API — CRUD for the tickers table.
+
+Multi-strategy v2 (Phase 3 extension): tickers are scoped by
+``strategy_id`` (NOT NULL FK). Reads filter by ``strategy_id`` query
+param; writes require ``strategy_id`` in the body. Symbol uniqueness is
+enforced per-(symbol, strategy_id) so e.g. SPY can exist under both ICT
+and ORB independently.
+"""
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
@@ -10,12 +17,15 @@ router = APIRouter(tags=["tickers"])
 
 class TickerCreate(BaseModel):
     symbol: str
+    strategy_id: int
     name: Optional[str] = None
     contracts: int = 2
     notes: Optional[str] = None
 
 
 class TickerUpdate(BaseModel):
+    # strategy_id is intentionally NOT editable — to move a ticker
+    # between strategies, delete and re-add.
     name: Optional[str] = None
     is_active: Optional[bool] = None
     contracts: Optional[int] = None
@@ -26,18 +36,22 @@ def _ticker_to_dict(t: Ticker) -> dict:
     return {
         "id": t.id, "symbol": t.symbol, "name": t.name,
         "is_active": t.is_active, "contracts": t.contracts, "notes": t.notes,
+        "strategy_id": t.strategy_id,
         "created_at": t.created_at.isoformat() if t.created_at else None,
         "updated_at": t.updated_at.isoformat() if t.updated_at else None,
     }
 
 
 @router.get("/tickers")
-def list_tickers():
+def list_tickers(strategy_id: Optional[int] = None):
     session = get_session()
     if not session:
         raise HTTPException(503, "Database not available")
     try:
-        tickers = session.query(Ticker).order_by(Ticker.id).all()
+        q = session.query(Ticker)
+        if strategy_id is not None:
+            q = q.filter(Ticker.strategy_id == strategy_id)
+        tickers = q.order_by(Ticker.id).all()
         result = [_ticker_to_dict(t) for t in tickers]
         session.close()
         return {"tickers": result, "total": len(result),
@@ -68,11 +82,18 @@ def create_ticker(req: TickerCreate):
     if not session:
         raise HTTPException(503, "Database not available")
     try:
-        existing = session.query(Ticker).filter(Ticker.symbol == req.symbol.upper()).first()
+        existing = session.query(Ticker).filter(
+            Ticker.symbol == req.symbol.upper(),
+            Ticker.strategy_id == req.strategy_id,
+        ).first()
         if existing:
-            raise HTTPException(409, f"Ticker {req.symbol.upper()} already exists")
+            raise HTTPException(
+                409,
+                f"Ticker {req.symbol.upper()} already exists for strategy_id={req.strategy_id}",
+            )
         ticker = Ticker(
             symbol=req.symbol.upper(),
+            strategy_id=req.strategy_id,
             name=req.name,
             contracts=req.contracts,
             notes=req.notes,
