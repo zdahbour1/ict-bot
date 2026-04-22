@@ -84,6 +84,32 @@ def get_default_strategy_id() -> Optional[int]:
         session.close()
 
 
+def list_enabled_strategies() -> list[tuple[int, str, str]]:
+    """Return ``[(strategy_id, name, class_path), ...]`` for every row in
+    ``strategies`` where ``enabled = TRUE``, ordered by strategy_id.
+
+    Used by the live scanner at bot boot to spawn one per-ticker thread
+    set per enabled strategy (Phase 4). Returns an empty list if the DB
+    is unreachable — the caller falls back to ICT-only behavior so the
+    bot never fails to boot because of a DB hiccup.
+    """
+    session = get_session()
+    if session is None:
+        return []
+    try:
+        rows = session.execute(text(
+            "SELECT strategy_id, name, class_path "
+            "FROM strategies WHERE enabled = TRUE "
+            "ORDER BY strategy_id"
+        )).fetchall()
+        return [(int(r[0]), str(r[1]), str(r[2]) if r[2] else "") for r in rows]
+    except Exception as e:
+        log.warning(f"list_enabled_strategies failed: {e}")
+        return []
+    finally:
+        session.close()
+
+
 def list_strategies(enabled_only: bool = False) -> list[dict]:
     """Return all strategies (or just enabled ones)."""
     session = get_session()

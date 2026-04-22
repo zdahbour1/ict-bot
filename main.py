@@ -247,25 +247,92 @@ def main():
                         currently_scanning = len(scanners) > 0
 
                         if db_scans and not currently_scanning:
-                            # Start scanners — each gets its own IBClient from the pool
+                            # Start scanners — each gets its own IBClient from the pool.
+                            # Phase 4 (multi-strategy v2): spawn one scanner per
+                            # (enabled strategy × active ticker). ICT keeps its
+                            # fast path (no plugin instance). Every other enabled
+                            # strategy is loaded via importlib on class_path.
                             log.info("DB: scans_active=True — starting scanners...")
                             scanners.clear()
-                            for i, ticker in enumerate(config.TICKERS):
-                                if pool:
-                                    # Pool mode: each scanner gets its own IBClient
-                                    # backed by a scanner connection from the pool
-                                    scanner_conn = pool.get_scanner_connection(ticker)
-                                    scanner_client = IBClient(scanner_conn,
-                                                              pool.contract_cache,
-                                                              pool.cache_lock,
-                                                              pool=pool)
-                                else:
-                                    # Non-IB broker: shared client
-                                    scanner_client = client
-                                scanner = Scanner(scanner_client, exit_manager,
-                                                  ticker=ticker, scan_offset=i * 2)
-                                scanner.start()
-                                scanners.append(scanner)
+
+                            # Resolve enabled strategies. Fall back to
+                            # ICT-only if the DB helper returns nothing
+                            # (keeps the bot alive on DB hiccups).
+                            try:
+                                from db.strategy_writer import list_enabled_strategies
+                                enabled_strats = list_enabled_strategies()
+                            except Exception as e:
+                                log.warning(f"list_enabled_strategies failed: {e}")
+                                enabled_strats = []
+                            if not enabled_strats:
+                                enabled_strats = [(1, "ict", "strategy.signal_engine.SignalEngine")]
+
+                            # Tickers per strategy
+                            try:
+                                from db.settings_loader import load_active_ticker_symbols
+                            except Exception:
+                                load_active_ticker_symbols = None
+
+                            scan_offset_counter = 0
+                            for sid, sname, cpath in enabled_strats:
+                                # Load plugin (skip for ICT fast path)
+                                plugin_instance = None
+                                if sname != "ict":
+                                    try:
+                                        import importlib
+                                        module_path, class_name = cpath.rsplit(".", 1)
+                                        plugin_instance = getattr(
+                                            importlib.import_module(module_path), class_name
+                                        )()
+                                        # Optional per-strategy settings
+                                        if hasattr(plugin_instance, "configure"):
+                                            try:
+                                                from db.settings_loader import load_settings_from_db
+                                                plugin_instance.configure(
+                                                    load_settings_from_db(strategy_id=sid) or {}
+                                                )
+                                            except Exception:
+                                                pass
+                                    except Exception as e:
+                                        log.error(f"Failed to load plugin for strategy "
+                                                  f"'{sname}' (class_path={cpath}): {e} — skipping")
+                                        continue
+
+                                # Resolve tickers for this strategy
+                                strat_tickers = None
+                                if load_active_ticker_symbols is not None:
+                                    try:
+                                        strat_tickers = load_active_ticker_symbols(strategy_id=sid)
+                                    except Exception:
+                                        strat_tickers = None
+                                if not strat_tickers:
+                                    # Fall back to config.TICKERS for ICT to keep
+                                    # backward-compat if DB helper unavailable.
+                                    strat_tickers = list(config.TICKERS) if sname == "ict" else []
+                                if not strat_tickers:
+                                    log.info(f"Strategy '{sname}' has no active tickers — skipping")
+                                    continue
+
+                                for ticker in strat_tickers:
+                                    if pool:
+                                        scanner_conn = pool.get_scanner_connection(ticker)
+                                        scanner_client = IBClient(scanner_conn,
+                                                                  pool.contract_cache,
+                                                                  pool.cache_lock,
+                                                                  pool=pool)
+                                    else:
+                                        scanner_client = client
+                                    scanner = Scanner(
+                                        scanner_client, exit_manager,
+                                        ticker=ticker,
+                                        scan_offset=scan_offset_counter * 2,
+                                        strategy_id=sid,
+                                        strategy_name=sname,
+                                        strategy_instance=plugin_instance,
+                                    )
+                                    scanner.start()
+                                    scanners.append(scanner)
+                                    scan_offset_counter += 1
                             log.info(f"Started {len(scanners)} scanner threads"
                                      f"{f' on {len(pool.scanner_conns)} IB connections' if pool else ''}")
                             try:
