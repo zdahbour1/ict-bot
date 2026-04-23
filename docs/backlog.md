@@ -131,19 +131,13 @@ Status: **Shipped** in commit `82848ae`.
 Spec: `docs/multi_strategy_architecture_v2.md` §8 open question 7.
 Today: no global limit on concurrent strategies' open positions. Possible to have ICT + ORB + VWAP + delta-neutral all long SPY at once → concentrated risk. Proposed: configurable net-delta or gross-notional cap per underlying, checked in `TradeEntryManager.can_enter()`.
 
-### ENH-038: Delta-neutral backtest support ✅ PARTIAL (schema + writer shipped)
+### ENH-038: Delta-neutral backtest support ✅ SHIPPED
 Status:
-- **Schema shipped** — migration 011 adds `backtest_trade_legs` table + `backtest_trades.n_legs` column.
-- **Writer shipped** — `backtest_engine/writer.py::record_multi_leg_trade` writes envelope + N legs in one transaction, auto-computes per-leg `pnl_usd` when caller omits it.
-- **Engine routing shipped** — `run_backtest` detects `trade["_legs"]` and routes to the multi-leg writer, else the single-leg path (backward compat).
-- **Tests** — `tests/unit/test_backtest_multi_leg.py` 4 cases covering envelope write, auto-computed pnl, empty-legs no-op, router branch.
+- **Part 1** — migration 011 (`backtest_trade_legs` + `backtest_trades.n_legs`), `record_multi_leg_trade` writer, engine router on `trade["_legs"]`. Shipped in `03fe86e`.
+- **Part 2** — `backtest_engine/multi_leg_sim.py` (BS + Black-76 per-leg pricing, entry/exit state, synth_price collapse to scalar for evaluate_exit). `_simulate_ticker` now takes the multi-leg branch when `strategy.place_legs()` returns legs. Shipped in `5bbe120`.
+- **Tests** — 4 in `test_backtest_multi_leg.py` + 15 in `test_backtest_multi_leg_sim.py` (helpers + DeltaNeutral end-to-end with stubbed fetch/levels/exit).
 
-**Remaining (ENH-038 part 2 — the simulation side):**
-- `backtest_engine/engine.py::_simulate_ticker` still constructs a single-leg `open_trade` regardless of whether the plugin has `place_legs()`. Need a branch: when `strategy.place_legs(signal)` returns 4+ LegSpecs, simulate per-leg entry fills (Black-Scholes priced), track them as a compound open trade, compute per-leg exit prices at close, attach `_legs` list to the trade dict the engine emits.
-- Per-leg fill model: existing `backtest_engine/option_pricer.py` has Black-Scholes; add a per-leg pricing helper that builds LegSpec-aware quotes.
-- Delta-neutral's `DeltaNeutralStrategy.place_legs()` already builds 4 LegSpec objects — engine just needs to consume them.
-
-Once the simulation side is wired, `python run_backtest_engine.py --strategy delta_neutral ...` will produce real iron-condor backtest results.
+`python run_backtest_engine.py --strategy delta_neutral ...` now produces real iron-condor backtest results.
 
 ### ENH-039: Per-strategy commission accounting
 Spec: v2 doc §8.

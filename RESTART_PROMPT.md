@@ -8,8 +8,29 @@ points here.
 
 ## Last updated
 
-**Apr 20 2026 — Filter-everything + feature importance + sweep UI + 1m validation**
-Latest commit: `74bbfe4` on `feature/profitability-research`
+**Apr 23 2026 — Multi-strategy live fixes + ENH-038 part 2 (backtest multi-leg sim)**
+Latest commit: `5bbe120` on `feature/profitability-research`
+
+Shipped today:
+  1. `96907ba` — Multi-strategy live entries fix. Two bugs: (a)
+     trade_entry_manager single-leg path dropped strategy_name from
+     generate_trade_ref, so every non-ICT signal inherited "ict-"
+     prefix and collided on client_trade_id UNIQUE; (b) delta-neutral
+     used datetime.utcnow() for expiry (non-Friday), IB rejected every
+     leg Error 200. Added _next_expiry_yyyymmdd() helper.
+  2. `5bbe120` — ENH-038 part 2. New backtest_engine/multi_leg_sim.py
+     (price_leg / build_leg_state / price_legs_now / entry_basis /
+     synth_price / build_legs_for_writer). _simulate_ticker now takes
+     the multi-leg branch when strategy.place_legs() returns legs;
+     reprices each leg per bar, collapses to a scalar for evaluate_exit,
+     emits `_legs` on the trade. DeltaNeutralStrategy backtests end-to-end.
+
+Test count: **404 passed + 5 skipped** (was 401+4).
+
+---
+
+**Prior iteration:**
+`74bbfe4` — Filter-everything + feature importance + sweep UI + 1m validation
 
 Shipped this iteration (in order):
   1. Chart-filter-everything (`01b69ba`): clicking a bar now re-slices
