@@ -75,6 +75,67 @@ def _trade_to_dict(t: Trade) -> dict:
         # Human-readable IB↔DB correlation (TICKER-YYMMDD-NN).
         # Matches IB Order.orderRef / TWS "Order Ref" column.
         "client_trade_id": getattr(t, "client_trade_id", None),
+        # Leg count — UI uses this to show an expand caret on multi-leg
+        # rows (iron condors, spreads, hedged positions). ENH-047.
+        "n_legs": getattr(t, "n_legs", None) or (len(t.legs) if t.legs else 1),
+    }
+
+
+def _leg_to_dict(l) -> dict:
+    """Shape one trade_legs row for the UI. Matches ENH-047 drill-down."""
+    def _f(v):
+        return float(v) if v is not None else None
+
+    sign = 1 if (l.direction or "LONG") == "LONG" else -1
+    entry = float(l.entry_price) if l.entry_price is not None else None
+    exit_px = float(l.exit_price) if l.exit_price is not None else None
+    cur = float(l.current_price) if l.current_price is not None else None
+    close_ref = exit_px if exit_px is not None else cur
+    per_leg_pnl = None
+    if entry is not None and close_ref is not None and l.contracts_entered:
+        per_leg_pnl = (
+            (close_ref - entry) * l.contracts_entered * (l.multiplier or 100) * sign
+        )
+
+    return {
+        "leg_id": l.leg_id,
+        "trade_id": l.trade_id,
+        "leg_index": l.leg_index,
+        "leg_role": l.leg_role,
+        "sec_type": l.sec_type,
+        "symbol": l.symbol,
+        "underlying": l.underlying,
+        "strike": _f(l.strike),
+        "right": l.right,
+        "expiry": l.expiry,
+        "multiplier": l.multiplier,
+        "exchange": l.exchange,
+        "currency": l.currency,
+        "direction": l.direction,
+        "contracts_entered": l.contracts_entered,
+        "contracts_open": l.contracts_open,
+        "contracts_closed": l.contracts_closed,
+        "entry_price": entry,
+        "exit_price": exit_px,
+        "current_price": cur,
+        "ib_fill_price": _f(l.ib_fill_price),
+        "profit_target": _f(l.profit_target),
+        "stop_loss_level": _f(l.stop_loss_level),
+        "ib_order_id": l.ib_order_id,
+        "ib_perm_id": l.ib_perm_id,
+        "ib_con_id": l.ib_con_id,
+        "ib_tp_order_id": l.ib_tp_order_id,
+        "ib_tp_perm_id": l.ib_tp_perm_id,
+        "ib_tp_status": l.ib_tp_status,
+        "ib_tp_price": _f(l.ib_tp_price),
+        "ib_sl_order_id": l.ib_sl_order_id,
+        "ib_sl_perm_id": l.ib_sl_perm_id,
+        "ib_sl_status": l.ib_sl_status,
+        "ib_sl_price": _f(l.ib_sl_price),
+        "entry_time": l.entry_time.isoformat() if l.entry_time else None,
+        "exit_time": l.exit_time.isoformat() if l.exit_time else None,
+        "leg_status": l.leg_status,
+        "pnl_usd": per_leg_pnl,
     }
 
 
@@ -168,6 +229,33 @@ def get_trade_audit(trade_id: int):
                 for r in rows
             ],
             "count": len(rows),
+        }
+    finally:
+        session.close()
+
+
+@router.get("/trades/{trade_id}/legs")
+def get_trade_legs(trade_id: int):
+    """Return every leg of a trade, ordered by leg_index.
+
+    ENH-047 — Trades-tab per-leg drill-down. Multi-leg trades (iron
+    condors, spreads) surface as ONE row in the Trades table; this
+    endpoint feeds the expand-panel that shows each leg's symbol,
+    direction, fill prices and per-leg P&L.
+    """
+    session = get_session()
+    if session is None:
+        raise HTTPException(503, "Database not available")
+    try:
+        trade = session.query(Trade).filter(Trade.id == trade_id).first()
+        if not trade:
+            raise HTTPException(404, "Trade not found")
+        legs = sorted(list(trade.legs), key=lambda l: l.leg_index)
+        return {
+            "trade_id": trade_id,
+            "ticker": trade.ticker,
+            "n_legs": getattr(trade, "n_legs", None) or len(legs),
+            "legs": [_leg_to_dict(l) for l in legs],
         }
     finally:
         session.close()

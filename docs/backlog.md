@@ -193,6 +193,14 @@ Work:
 4. Update `strategy/exit_executor.py` multi-leg close path to also use the BAG (buy-to-close at net price).
 5. Backtest: `backtest_engine/multi_leg_sim.py` already evaluates on net premium — matches the combo semantics, no change needed.
 
+### ENH-048: MNQ / MES futures scanners not producing activity
+Observed 2026-04-23: MNQ and MES threads show as alive in the Threads tab but never emit signals or fills. Possible causes: (a) ticker sec_type=FOP but the FOP data provider isn't wired into the scan path for futures-options; (b) ICT signal detection on futures bars never passes; (c) contract qualification is silently failing for the micro-futures front month. Needs investigation — medium priority, not blocking any current work.
+Debug path:
+1. Grep `bot.log` for `[MNQ]` / `[MES]` — confirm scanner heartbeat is firing.
+2. Confirm `data_provider_ib.fetch_multi_timeframe_ib` is reached for FOP and returns bars.
+3. Confirm `scanner.py` dispatches to the right strategy `.detect()` for futures tickers.
+4. Check `tickers` table — verify FOP sec_type + correct `contract_month` / `exchange`.
+
 ### ENH-047: Trades page — per-leg drill-down for multi-leg trades
 `dashboard/frontend/src/components/TradeTable.tsx` renders every trade as one row. Multi-leg trades (n_legs > 1) should render with an expand caret that reveals each leg row (symbol, direction, strike, right, contracts, entry/exit fill, per-leg P&L). Ask the API to surface `/api/trades/{id}/legs` (new endpoint reading from `trade_legs`) so the table can lazy-load the legs on expand.
 

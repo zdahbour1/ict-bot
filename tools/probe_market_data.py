@@ -122,11 +122,13 @@ def main() -> int:
          Future("CL", "202606", "NYMEX", currency="USD")),
         # Quarterly options on quarterly futures — most liquid (user tip).
         # Jun-2026 quarterly: 3rd Friday = 20260619.
-        ("FOP MES 5400 C Jun-26 quarterly (CME)",
-         FuturesOption("MES", "20260619", 5400, "C", "CME",
+        # Use an expiry+strike pulled from the actual FOP chain probe.
+        # 20260424 is a listed weekly expiry on both MES and ES.
+        ("FOP MES 5500 C 24-Apr-26 (CME)",
+         FuturesOption("MES", "20260424", 5500, "C", "CME",
                         multiplier="5", currency="USD")),
-        ("FOP ES 5400 C Jun-26 quarterly (CME)",
-         FuturesOption("ES", "20260619", 5400, "C", "CME",
+        ("FOP ES 5500 C 24-Apr-26 (CME)",
+         FuturesOption("ES", "20260424", 5500, "C", "CME",
                         multiplier="50", currency="USD")),
     ]
 
@@ -153,10 +155,10 @@ def main() -> int:
         time.sleep(0.3)
     print("=" * 100)
     print("\nLegend:")
-    print("  QUALIFIED=Y  → IB recognizes the contract spec (doesn't mean data flows)")
-    print("  BARS > 0     → historical-data subscription is ACTIVE for this asset class")
-    print("  NOT ENTITLED → you can see the contract but not the data")
-    print("  DELAYED      → realtime not subscribed; IB will only give 15-min-delayed")
+    print("  QUALIFIED=Y  -> IB recognizes the contract spec (doesn't mean data flows)")
+    print("  BARS > 0     -> historical-data subscription is ACTIVE for this asset class")
+    print("  NOT ENTITLED -> you can see the contract but not the data")
+    print("  DELAYED      -> realtime not subscribed; IB will only give 15-min-delayed")
     ib.disconnect()
     return 0
 

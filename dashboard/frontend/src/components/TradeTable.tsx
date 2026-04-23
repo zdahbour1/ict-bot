@@ -3,7 +3,7 @@ import {
   useReactTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel,
   flexRender, createColumnHelper, type SortingState, type ColumnFiltersState,
 } from '@tanstack/react-table';
-import type { Trade } from '../types';
+import type { Trade, TradeLeg } from '../types';
 import { apiPost } from '../hooks/useApi';
 
 const col = createColumnHelper<Trade>();
@@ -364,6 +364,108 @@ function AuditModal({ tradeId, ticker, onClose }: {
   );
 }
 
+// ── LegsPanel ───────────────────────────────────────────────
+// Renders each leg of a multi-leg trade (iron condor, spread, hedged
+// position). Fetched lazily from /api/trades/{id}/legs on expand.
+// ENH-047.
+function LegsPanel({ tradeId }: { tradeId: number }) {
+  const [legs, setLegs] = useState<TradeLeg[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/trades/${tradeId}/legs`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (!cancelled) setLegs(data.legs || []);
+      } catch (e: any) {
+        if (!cancelled) setError(e.message || 'Failed to load legs');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [tradeId]);
+
+  if (error) return (
+    <div className="px-4 py-3 text-xs text-red-400">Error: {error}</div>
+  );
+  if (legs === null) return (
+    <div className="px-4 py-3 text-xs text-gray-500">Loading legs…</div>
+  );
+  if (legs.length === 0) return (
+    <div className="px-4 py-3 text-xs text-gray-600">No legs found.</div>
+  );
+
+  return (
+    <div className="px-4 py-3 bg-[#0d1117] border-l-2 border-blue-500/40">
+      <table className="w-full text-[11px] font-mono">
+        <thead>
+          <tr className="text-gray-500 border-b border-[#21262d]">
+            <th className="text-left py-1 pr-3">#</th>
+            <th className="text-left py-1 pr-3">Role</th>
+            <th className="text-left py-1 pr-3">Symbol</th>
+            <th className="text-left py-1 pr-3">Dir</th>
+            <th className="text-right py-1 pr-3">Strike</th>
+            <th className="text-right py-1 pr-3">Qty</th>
+            <th className="text-right py-1 pr-3">Entry</th>
+            <th className="text-right py-1 pr-3">Exit / Cur</th>
+            <th className="text-right py-1 pr-3">P&amp;L $</th>
+            <th className="text-left py-1 pr-3">Status</th>
+            <th className="text-left py-1">IB ids</th>
+          </tr>
+        </thead>
+        <tbody>
+          {legs.map(l => {
+            const dirColor = l.direction === 'LONG' ? 'text-green-400' : 'text-red-400';
+            const pnl = l.pnl_usd;
+            const pnlColor = pnl == null ? 'text-gray-600'
+              : pnl > 0 ? 'text-green-400' : pnl < 0 ? 'text-red-400' : 'text-gray-500';
+            const closePx = l.exit_price ?? l.current_price;
+            return (
+              <tr key={l.leg_id} className="border-b border-[#21262d]/60">
+                <td className="py-1 pr-3 text-gray-500">{l.leg_index}</td>
+                <td className="py-1 pr-3 text-gray-300">{l.leg_role ?? '—'}</td>
+                <td className="py-1 pr-3 text-blue-300">{l.symbol}</td>
+                <td className={`py-1 pr-3 ${dirColor}`}>{l.direction}</td>
+                <td className="py-1 pr-3 text-right text-gray-300">
+                  {l.strike != null ? `$${l.strike.toFixed(2)}` : '—'}
+                  {l.right ? <span className="ml-1 text-gray-500">{l.right}</span> : null}
+                </td>
+                <td className="py-1 pr-3 text-right text-gray-300">
+                  {l.contracts_entered}
+                  {l.contracts_open !== l.contracts_entered && (
+                    <span className="text-gray-500"> ({l.contracts_open} open)</span>
+                  )}
+                </td>
+                <td className="py-1 pr-3 text-right">
+                  {l.entry_price != null ? `$${l.entry_price.toFixed(2)}` : '—'}
+                </td>
+                <td className="py-1 pr-3 text-right">
+                  {closePx != null ? `$${closePx.toFixed(2)}` : '—'}
+                </td>
+                <td className={`py-1 pr-3 text-right ${pnlColor}`}>
+                  {pnl != null ? `${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}` : '—'}
+                </td>
+                <td className="py-1 pr-3">
+                  <span className={l.leg_status === 'open' ? 'text-blue-400' : 'text-gray-500'}>
+                    {l.leg_status}
+                  </span>
+                </td>
+                <td className="py-1 text-gray-500 text-[10px]">
+                  ord={l.ib_order_id ?? '—'} sl={l.ib_sl_order_id ?? '—'}
+                  {l.ib_tp_order_id ? ` tp=${l.ib_tp_order_id}` : ''}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+
 export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades: Trade[]; onRefresh: () => void; lastUpdated?: Date | null }) {
   const [sorting, setSorting] = useState<SortingState>([{ id: 'entry_time', desc: true }]);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
@@ -374,6 +476,15 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
   const [refreshing, setRefreshing] = useState(false);
   const [auditTrade, setAuditTrade] = useState<{ id: number; ticker: string } | null>(null);
   const [detailsTrade, setDetailsTrade] = useState<Trade | null>(null);
+  // ENH-047: track which multi-leg trades are expanded to show legs.
+  const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
+  const toggleExpanded = (tid: number) => {
+    setExpandedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(tid)) next.delete(tid); else next.add(tid);
+      return next;
+    });
+  };
 
   const handleRefresh = () => {
     setRefreshing(true);
@@ -410,6 +521,25 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
   );
 
   const columns = useMemo(() => [
+    col.display({
+      id: 'expander',
+      header: '',
+      cell: info => {
+        const t = info.row.original;
+        const nLegs = (t as any).n_legs ?? 1;
+        if (nLegs <= 1) return <span className="text-gray-700">·</span>;
+        const open = expandedIds.has(t.id);
+        return (
+          <button
+            onClick={(e) => { e.stopPropagation(); toggleExpanded(t.id); }}
+            title={open ? 'Collapse legs' : `Expand ${nLegs} legs`}
+            className="text-blue-400 hover:text-blue-300 font-mono text-xs"
+          >
+            {open ? '▼' : '▶'} <span className="text-gray-500">{nLegs}</span>
+          </button>
+        );
+      },
+    }),
     col.accessor('status', {
       header: 'Status',
       cell: info => <Badge text={info.getValue().toUpperCase()} variant={info.getValue()} />,
@@ -589,7 +719,7 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
         </div>
       ),
     }),
-  ], [onRefresh]);
+  ], [onRefresh, expandedIds]);
 
   const table = useReactTable({
     data: filteredTrades,
@@ -676,15 +806,29 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
             ))}
           </thead>
           <tbody>
-            {table.getRowModel().rows.map(row => (
-              <tr key={row.id} className={`hover:bg-[#1c2128] ${row.original.status === 'closed' ? 'opacity-60' : ''}`}>
-                {row.getVisibleCells().map(cell => (
-                  <td key={cell.id} className="px-3 py-2.5 border-b border-[#21262d] whitespace-nowrap">
-                    {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                  </td>
-                ))}
-              </tr>
-            ))}
+            {table.getRowModel().rows.map(row => {
+              const t = row.original;
+              const open = expandedIds.has(t.id);
+              const colSpan = row.getVisibleCells().length;
+              return (
+                <>
+                  <tr key={row.id} className={`hover:bg-[#1c2128] ${t.status === 'closed' ? 'opacity-60' : ''}`}>
+                    {row.getVisibleCells().map(cell => (
+                      <td key={cell.id} className="px-3 py-2.5 border-b border-[#21262d] whitespace-nowrap">
+                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                      </td>
+                    ))}
+                  </tr>
+                  {open && (
+                    <tr key={`${row.id}-legs`} className="bg-[#0d1117]">
+                      <td colSpan={colSpan} className="p-0 border-b border-[#21262d]">
+                        <LegsPanel tradeId={t.id} />
+                      </td>
+                    </tr>
+                  )}
+                </>
+              );
+            })}
           </tbody>
         </table>
         {filteredTrades.length === 0 && (

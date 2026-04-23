@@ -46,6 +46,57 @@ export interface Trade {
   // Human-readable IB↔DB correlation (format: TICKER-YYMMDD-NN).
   // Displayed in the ID cell tooltip, not a standalone column.
   client_trade_id: string | null;
+  // Leg count — UI uses this to show an expand caret on multi-leg
+  // rows (iron condors, spreads, hedged positions). ENH-047.
+  n_legs: number | null;
+}
+
+export interface TradeLeg {
+  leg_id: number;
+  trade_id: number;
+  leg_index: number;
+  leg_role: string | null;
+  sec_type: string;
+  symbol: string;
+  underlying: string | null;
+  strike: number | null;
+  right: string | null;
+  expiry: string | null;
+  multiplier: number;
+  exchange: string;
+  currency: string;
+  direction: 'LONG' | 'SHORT';
+  contracts_entered: number;
+  contracts_open: number;
+  contracts_closed: number;
+  entry_price: number | null;
+  exit_price: number | null;
+  current_price: number | null;
+  ib_fill_price: number | null;
+  profit_target: number | null;
+  stop_loss_level: number | null;
+  ib_order_id: number | null;
+  ib_perm_id: number | null;
+  ib_con_id: number | null;
+  ib_tp_order_id: number | null;
+  ib_tp_perm_id: number | null;
+  ib_tp_status: string | null;
+  ib_tp_price: number | null;
+  ib_sl_order_id: number | null;
+  ib_sl_perm_id: number | null;
+  ib_sl_status: string | null;
+  ib_sl_price: number | null;
+  entry_time: string | null;
+  exit_time: string | null;
+  leg_status: string;
+  pnl_usd: number | null;
+}
+
+export interface TradeLegsResponse {
+  trade_id: number;
+  ticker: string;
+  n_legs: number;
+  legs: TradeLeg[];
 }
 
 export interface ThreadStatus {
