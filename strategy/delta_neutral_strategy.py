@@ -35,6 +35,25 @@ def _round_to_interval(x: float, interval: float) -> float:
     return round(x / interval) * interval
 
 
+def _next_expiry_yyyymmdd(today=None) -> str:
+    """Return a sane default expiry: the next Friday at least 1 day out.
+
+    Why Friday: equity options universally list standard weekly expiries
+    on Fridays (3rd Friday = monthly). Using today's date fails IB
+    contract qualification on any non-Friday, which was causing every
+    delta-neutral entry to die with 'Error 200: No security definition'.
+    """
+    from datetime import date, timedelta
+    d = today or date.today()
+    # Advance at least 1 day so we never pick a same-day expiry (some
+    # tickers have 0DTE, many don't — Friday is the safe bet).
+    d = d + timedelta(days=1)
+    # Friday = weekday 4. Move forward until we hit one.
+    while d.weekday() != 4:
+        d = d + timedelta(days=1)
+    return d.strftime("%Y%m%d")
+
+
 def _format_occ(underlying: str, expiry_yyyymmdd: str, right: str,
                 strike: float) -> str:
     """Build an OCC option symbol: TICKER + YYMMDD + C/P + strike*1000 (8 digits).
@@ -154,7 +173,7 @@ class DeltaNeutralStrategy(BaseStrategy):
                 "current_price": current_price,
                 "strike_interval": self.strike_interval,
                 "wing_width": self.wing_width,
-                "expiry": self.default_expiry or datetime.utcnow().strftime("%Y%m%d"),
+                "expiry": self.default_expiry or _next_expiry_yyyymmdd(),
             },
         )
         self.alerts_today += 1
@@ -174,7 +193,7 @@ class DeltaNeutralStrategy(BaseStrategy):
         strike_interval = float(details.get("strike_interval") or self.strike_interval)
         wing_width = float(details.get("wing_width") or self.wing_width)
         expiry = details.get("expiry") or (self.default_expiry
-                                           or datetime.utcnow().strftime("%Y%m%d"))
+                                           or _next_expiry_yyyymmdd())
 
         atm = _round_to_interval(current_price, strike_interval)
         long_call_strike = atm + wing_width

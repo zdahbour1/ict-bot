@@ -501,7 +501,12 @@ class TradeEntryManager:
             # See docs/ib_db_correlation.md.
             try:
                 from db.trade_ref import generate_trade_ref
-                order_ref = generate_trade_ref(self.ticker)
+                # Pass strategy_name so the prefix matches THIS strategy
+                # (was defaulting to ACTIVE_STRATEGY → every non-ICT trade
+                # got 'ict-' prefix, causing UNIQUE collisions and silent
+                # entry failures — 2026-04-23 bug).
+                order_ref = generate_trade_ref(
+                    self.ticker, strategy_name=self.strategy_name)
             except Exception as e:
                 # Never block an entry on correlation-ID generation;
                 # fall back to untagged orders.
