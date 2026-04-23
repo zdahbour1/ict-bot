@@ -147,6 +147,17 @@ def main():
 
     exit_manager.start()
 
+    # ── Delta-hedger (ENH-049) — monitors DN trades for delta drift
+    # and rebalances via stock orders. Gated by the
+    # DN_DELTA_HEDGE_ENABLED setting (default false). Always spawned;
+    # checks the flag on each tick so the user can flip at runtime.
+    try:
+        from strategy.delta_hedger import DeltaHedger
+        delta_hedger = DeltaHedger(client)
+        delta_hedger.start()
+    except Exception as e:
+        log.warning(f"Delta-hedger failed to start: {e}")
+
     # ── Scanners NOT auto-started — user must click "Start Scans" ──
     scanners = []
     log.info(f"Bot ready with {len(config.TICKERS)} tickers. Scans NOT started — click 'Start Scans' in dashboard.")

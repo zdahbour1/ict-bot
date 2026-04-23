@@ -737,6 +737,17 @@ class IBOrdersMixin:
                 "client_id": placing_client_id,
                 "oca_group": oca_group,
                 "order_ref": order_ref,
+                # Carry instrument metadata forward so insert_multi_leg_trade
+                # writes strike/right/expiry/underlying on trade_legs.
+                # Dropping these caused NULL strikes, which broke the
+                # UI leg-drill-down (ENH-047) on multi-leg trades.
+                "strike": leg.get("strike"),
+                "right": leg.get("right"),
+                "expiry": leg.get("expiry"),
+                "multiplier": leg.get("multiplier", 100),
+                "underlying": leg.get("underlying"),
+                "exchange": leg.get("exchange", "SMART"),
+                "currency": leg.get("currency", "USD"),
             })
 
         if not all_filled and fills_received > 0:
@@ -919,6 +930,15 @@ class IBOrdersMixin:
                 "client_id": placing_client_id,
                 "order_ref": order_ref,
                 "combo": True,
+                # Instrument metadata so trade_legs gets strike/right/expiry
+                # (see combo-path fix for the multi-leg path above).
+                "strike": leg.get("strike"),
+                "right": leg.get("right"),
+                "expiry": leg.get("expiry"),
+                "multiplier": leg.get("multiplier", 100),
+                "underlying": leg.get("underlying"),
+                "exchange": leg.get("exchange", "SMART"),
+                "currency": leg.get("currency", "USD"),
             })
 
         return {
