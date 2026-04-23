@@ -417,6 +417,29 @@ def _reconcile(client, exit_manager, ib_positions):
                     # protection. Without this the position rides
                     # naked — exactly the failure mode we observed on
                     # 10 positions between 10:52-10:55 PT.
+                    #
+                    # Cooldown (2026-04-23): skip restore if
+                    # ib_brackets_checked_at was updated < 120s ago —
+                    # gives the previous restore's brackets time to
+                    # show up as live in IB before we conclude they're
+                    # gone and place yet another pair.
+                    try:
+                        age_row = session.execute(text(
+                            "SELECT EXTRACT(EPOCH FROM (NOW() - "
+                            "         ib_brackets_checked_at)) "
+                            "FROM trade_legs "
+                            "WHERE trade_id=:id AND leg_index=0"
+                        ), {"id": tid}).fetchone()
+                        age_sec = float(age_row[0]) if age_row and age_row[0] is not None else 99999
+                    except Exception:
+                        age_sec = 99999
+                    if age_sec < 120:
+                        log.info(
+                            f"[RECONCILE] restore cooldown: db_id={tid} "
+                            f"{sym} last-checked {age_sec:.0f}s ago — "
+                            f"skipping to let IB catch up"
+                        )
+                        continue
                     try:
                         _restore_brackets_for(session, client, tid, tkr, sym)
                     except Exception as e:

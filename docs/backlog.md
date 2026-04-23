@@ -193,6 +193,51 @@ Work:
 4. Update `strategy/exit_executor.py` multi-leg close path to also use the BAG (buy-to-close at net price).
 5. Backtest: `backtest_engine/multi_leg_sim.py` already evaluates on net premium — matches the combo semantics, no change needed.
 
+### ENH-049: Delta-neutral strategy — dynamic stock-hedged delta (staged)
+User request 2026-04-23: use stock as the hedge and rebalance to net-zero
+delta on a short interval (proposed 30 seconds) by buying or shorting
+the underlying. Based on the LinkedIn article referenced in
+`docs/delta_neutral_strategy.md` — "Beyond Directional Bets: Building
+Systematic Delta" (Bejar-Garcia).
+
+Staged plan:
+
+**Stage 1 — passive monitoring (foundation).** Compute live portfolio
+delta from option positions via BS greeks on the current underlying
+price + known sigma. Surface per-trade and per-strategy delta on the
+Trades tab + a new Delta card. No trading actions yet — just prove the
+math + instrumentation are trustworthy. Use `backtest_engine/option_pricer.bs_greeks`
+which already exists.
+
+**Stage 2 — periodic rebalance (semi-automatic, paper-only).** Every
+30s, compute combined delta of each open DN trade (4 legs) and
+subtract the current stock hedge (if any). If abs(net_delta) > threshold
+(config `DN_DELTA_BAND_SHARES`, default 10), queue a STK order to
+flatten: BUY if delta < 0, SELL/short if delta > 0. Target `DN_REBALANCE_INTERVAL_SEC`
+(default 30). Record every rebalance in a new `delta_hedges` table
+(trade_id, shares_delta, timestamp, hedge_order_id) so the user can
+audit the chain. Gate on a new setting `DN_DELTA_HEDGE_ENABLED`
+(default false) so it's opt-in.
+
+**Stage 3 — full dynamic hedging.** Replace the 30s timer with event-driven
+recomputation on underlying moves > some basis-points threshold.
+Extend to vega + gamma bands per the article. Close the hedge when
+the option position closes.
+
+Implementation notes:
+- Add a `hedge_shares` column to `trades` envelope (signed: +long /
+  -short).
+- The hedge is a STK LegSpec with leg_role='delta_hedge'. The existing
+  multi-leg infrastructure (place_combo_order accepts STK legs) covers
+  it.
+- BAG/combo orders already support STK+OPT mixed legs (see
+  `_build_leg_contract` — the STK branch is wired up).
+- Backtest engine: new module `backtest_engine/delta_hedge.py`
+  simulates the same rebalance logic on historical bars for
+  apples-to-apples comparisons.
+
+Doc to produce: `docs/delta_neutral_dynamic_hedging.md`.
+
 ### ENH-048: MNQ / MES futures scanners not producing activity
 Observed 2026-04-23: MNQ and MES threads show as alive in the Threads tab but never emit signals or fills. Possible causes: (a) ticker sec_type=FOP but the FOP data provider isn't wired into the scan path for futures-options; (b) ICT signal detection on futures bars never passes; (c) contract qualification is silently failing for the micro-futures front month. Needs investigation — medium priority, not blocking any current work.
 Debug path:

@@ -411,12 +411,21 @@ class IBOrdersMixin:
         # don't interact with any other bracket.
         oca_group = f"RESTORE-{self.ib.client.getReqId()}"
 
+        # BOTH orders transmit=True. The previous ``tp.transmit=False``
+        # pattern is only valid for parent-child bracket orders where the
+        # child's submission is gated on the parent transmitting.
+        # place_protection_brackets attaches to an EXISTING position —
+        # there's no parent — so tp.transmit=False left the TP stuck
+        # in "Transmit" status forever. That failed PASS 4's tp_bad
+        # check on the very next cycle → re-restore → another pair
+        # → another stuck TP → loop. Caught 2026-04-23 as the 4× pairs
+        # of TP/SL brackets showing on every single-leg ICT trade.
         tp_order = LimitOrder("SELL", contracts, tp_price)
         tp_order.orderId = self.ib.client.getReqId()
         tp_order.ocaGroup = oca_group
         tp_order.ocaType = 1
         tp_order.tif = "DAY"
-        tp_order.transmit = False
+        tp_order.transmit = True
         if config.IB_ACCOUNT:
             tp_order.account = config.IB_ACCOUNT
         if order_ref:

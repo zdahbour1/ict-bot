@@ -95,6 +95,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cancel", action="store_true",
                     help="Actually cancel the orphans. Default: dry-run.")
+    ap.add_argument("--aggressive", action="store_true",
+                    help="Cancel EVERY working SELL option order, not just "
+                         "those unreferenced by open DB legs. Use for a "
+                         "full reset when IB is noisy with duplicate brackets.")
+    ap.add_argument("--flat-close", action="store_true",
+                    help="After cancelling, also buy-to-close every "
+                         "remaining option position to flatten the account.")
     ap.add_argument("--client-id", type=int, default=99,
                     help="IB clientId for this session (default 99).")
     ap.add_argument("--host", default=config.IB_HOST)
@@ -107,6 +114,14 @@ def main():
     ib.connect(args.host, args.port, clientId=args.client_id, readonly=False,
                 timeout=8)
     log.info("Connected.")
+    # Fetch orders across ALL clientIds — the bot pool (1-4) placed
+    # these brackets; our fresh clientId=99 wouldn't see them via the
+    # default openTrades() which only returns this-session orders.
+    try:
+        ib.reqAllOpenOrders()
+        ib.sleep(1.0)
+    except Exception as e:
+        log.warning(f"reqAllOpenOrders failed: {e}")
 
     try:
         tracked_brackets = _tracked_bracket_order_ids()
@@ -143,12 +158,13 @@ def main():
                 safe_skip.append((order_id, status, action, symbol, "not-OPT"))
                 continue
 
-            if order_id in tracked_brackets:
-                safe_skip.append((order_id, status, action, symbol, "tracked"))
-                continue
-            if order_id in tracked_entries:
-                safe_skip.append((order_id, status, action, symbol, "recent-entry"))
-                continue
+            if not args.aggressive:
+                if order_id in tracked_brackets:
+                    safe_skip.append((order_id, status, action, symbol, "tracked"))
+                    continue
+                if order_id in tracked_entries:
+                    safe_skip.append((order_id, status, action, symbol, "recent-entry"))
+                    continue
 
             orphans.append({
                 "order_id": order_id, "perm_id": perm_id, "status": status,
@@ -186,6 +202,36 @@ def main():
         # Give IB a moment to process the cancels
         ib.sleep(2.0)
         log.info(f"Done. Cancelled {cancelled}/{len(orphans)} orphan brackets.")
+
+        # ── Optional flat-close pass ─────────────────────────
+        if args.flat_close:
+            log.info("--flat-close requested. Buying-to-close every open "
+                     "option position...")
+            ib.sleep(1.0)
+            positions = ib.positions()
+            closed = 0
+            from ib_async import MarketOrder
+            for p in positions:
+                c = p.contract
+                qty = int(p.position or 0)
+                if qty == 0:
+                    continue
+                if getattr(c, "secType", "") not in ("OPT", "FOP"):
+                    continue
+                # Short position (qty<0) → BUY to close; long (qty>0) → SELL.
+                flat_action = "BUY" if qty < 0 else "SELL"
+                flat_qty = abs(qty)
+                try:
+                    order = MarketOrder(flat_action, flat_qty)
+                    order.orderRef = "flat-close-orphan-cleanup"
+                    ib.placeOrder(c, order)
+                    log.info(f"  FLAT {flat_action} {flat_qty}x "
+                             f"{c.localSymbol} conId={c.conId}")
+                    closed += 1
+                except Exception as e:
+                    log.error(f"  FLAT failed for {c.localSymbol}: {e}")
+            ib.sleep(3.0)
+            log.info(f"Flat-close sent {closed} close orders.")
 
     finally:
         ib.disconnect()
