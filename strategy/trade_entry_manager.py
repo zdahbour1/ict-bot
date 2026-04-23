@@ -416,15 +416,32 @@ class TradeEntryManager:
         _update_entry_thread("placing", self.ticker,
                              f"multi-leg x{len(legs)} ref={order_ref or '—'}")
 
+        # ENH-046: opt into IB BAG/combo orders for defined-risk spreads.
+        # When ``config.USE_COMBO_ORDERS_FOR_MULTI_LEG`` is True (or the
+        # strategy's settings flip the flag), route to the combo path —
+        # ONE IB order fills all legs atomically at a net price. Default
+        # keeps the legacy N-independent-orders path so today's live
+        # behavior is unchanged without an explicit opt-in.
+        use_combo = bool(getattr(config, "USE_COMBO_ORDERS_FOR_MULTI_LEG",
+                                  False))
         self._entry_pending = True
         try:
-            result = self.client.place_multi_leg_order(legs, order_ref=order_ref)
+            if use_combo and hasattr(self.client, "place_combo_order"):
+                result = self.client.place_combo_order(
+                    legs, order_ref=order_ref,
+                    action="BUY",        # IB treats spreads as BUY-the-combo
+                    limit_price=None,     # MKT for now; ENH-046-v2 = net-price
+                )
+            else:
+                result = self.client.place_multi_leg_order(
+                    legs, order_ref=order_ref)
         except Exception as e:
             self._entry_pending = False
             self._errors_today += 1
             handle_error(f"scanner-{self.ticker}", "multi_leg_entry", e,
                          context={"ticker": self.ticker,
-                                  "n_legs": len(legs)},
+                                  "n_legs": len(legs),
+                                  "combo": use_combo},
                          critical=True)
             _update_entry_thread("failed", self.ticker,
                                  f"multi-leg exception: {type(e).__name__}")

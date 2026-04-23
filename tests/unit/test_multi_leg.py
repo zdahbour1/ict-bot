@@ -296,6 +296,22 @@ class _FakeClientForEM:
             "all_filled": True, "fills_received": len(legs),
             "ib_client_id": 7,
         }
+    def place_combo_order(self, legs, order_ref=None, action="BUY",
+                          limit_price=None):
+        if not hasattr(self, "combo_calls"):
+            self.combo_calls = []
+        self.combo_calls.append((legs, order_ref, action, limit_price))
+        return {
+            "combo_order_id": 42_000, "combo_perm_id": 420_000,
+            "order_ref": order_ref, "net_fill_price": 1.25,
+            "legs": [dict(leg, leg_index=i, order_id=42_000,
+                          perm_id=420_000, con_id=5000+i,
+                          status="Filled", fill_price=1.0,
+                          client_id=7, combo=True)
+                     for i, leg in enumerate(legs)],
+            "all_filled": True, "fills_received": len(legs),
+            "ib_client_id": 7,
+        }
     def place_bracket_order(self, *a, **kw):
         self.bracket_calls.append((a, kw))
         return {"symbol": "X", "status": "Filled", "fill_price": 1.0,
@@ -380,6 +396,61 @@ def test_trade_entry_manager_routes_to_multi_leg_when_place_legs_returns(monkeyp
     assert trade["n_legs"] == 2
     assert trade["db_id"] == 99
     assert trade["oca_group"] == "MULTILEG-1"
+
+
+def test_entry_manager_routes_to_combo_when_flag_enabled(monkeypatch):
+    """ENH-046: when USE_COMBO_ORDERS_FOR_MULTI_LEG=True, the entry
+    manager routes to place_combo_order (single IB Bag) instead of
+    place_multi_leg_order (N independent orders)."""
+    import config
+    monkeypatch.setattr(config, "USE_COMBO_ORDERS_FOR_MULTI_LEG", True,
+                         raising=False)
+
+    client = _FakeClientForEM()
+    em = _FakeExitManager()
+    _bypass_gates(monkeypatch, em)
+
+    plugin = _MultiLegPlugin()
+    mgr = TradeEntryManager(client, em, "SPY",
+                             strategy_id=9, strategy_name="multi_test",
+                             plugin_instance=plugin)
+
+    signal = Signal(signal_type="X", direction="LONG", entry_price=100.0,
+                     sl=99.0, tp=101.0, setup_id="s1", ticker="SPY",
+                     strategy_name="multi_test")
+
+    mgr.enter(signal)
+
+    assert hasattr(client, "combo_calls"), "combo path must be taken"
+    assert len(client.combo_calls) == 1, "must call place_combo_order once"
+    assert len(client.multi_leg_calls) == 0, "must NOT call place_multi_leg_order when combo flag is on"
+
+
+def test_entry_manager_default_flag_uses_legacy_multi_leg(monkeypatch):
+    """Default behavior (flag unset/False) keeps today's N-order path
+    so the combo roll-out is strictly opt-in."""
+    import config
+    monkeypatch.setattr(config, "USE_COMBO_ORDERS_FOR_MULTI_LEG", False,
+                         raising=False)
+
+    client = _FakeClientForEM()
+    em = _FakeExitManager()
+    _bypass_gates(monkeypatch, em)
+
+    plugin = _MultiLegPlugin()
+    mgr = TradeEntryManager(client, em, "SPY",
+                             strategy_id=9, strategy_name="multi_test",
+                             plugin_instance=plugin)
+
+    signal = Signal(signal_type="X", direction="LONG", entry_price=100.0,
+                     sl=99.0, tp=101.0, setup_id="s1", ticker="SPY",
+                     strategy_name="multi_test")
+
+    mgr.enter(signal)
+
+    assert len(client.multi_leg_calls) == 1, "legacy path must run when flag is off"
+    # combo_calls attr may not exist yet if the path was never taken
+    assert not getattr(client, "combo_calls", []), "combo must NOT run by default"
 
 
 def test_trade_entry_manager_falls_back_to_single_leg_when_place_legs_none(monkeypatch):

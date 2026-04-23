@@ -744,6 +744,185 @@ class IBOrdersMixin:
             "ib_client_id": placing_client_id,
         }
 
+    # ── Multi-leg as IB BAG / combo order (ENH-046) ───────────
+    def place_combo_order(self, legs: list[dict],
+                           order_ref: str | None = None,
+                           action: str = "BUY",
+                           limit_price: float | None = None) -> dict:
+        """Submit N legs as ONE IB Bag/combo order.
+
+        Unlike ``place_multi_leg_order`` (which submits N independent
+        MarketOrders — one per leg), this builds a single ``Bag``
+        contract with N ``ComboLeg`` entries. IB fills the combo
+        atomically at a net price:
+          - LimitOrder at ``limit_price`` if provided (recommended
+            for real trading — you name your credit/debit)
+          - MarketOrder otherwise (fast, but slippage risk on net)
+
+        Benefits over N-independent-orders:
+          - TWS shows ONE order that expands to its legs
+          - All-or-nothing fill — no partial-condor residual risk
+          - One conId for the combo → one bracket at net P&L instead
+            of N per-leg brackets firing at random
+          - Cleanly maps to the trades envelope ↔ one IB order model
+
+        ``legs`` uses the same dict shape as ``place_multi_leg_order``.
+        Returns a superset of that method's result plus ``combo_order_id``
+        and ``net_fill_price`` for the envelope-level bracketing logic.
+
+        Status: ENH-046 pilot. NOT wired to the live trade-entry path
+        yet — ``TradeEntryManager`` still uses ``place_multi_leg_order``
+        by default. Opt in by flipping a strategy config flag.
+        """
+        if config.DRY_RUN:
+            log.info(f"[DRY RUN] COMBO: {len(legs)} legs action={action} "
+                     f"limit={limit_price} ref={order_ref}")
+            return {
+                "dry_run": True,
+                "combo_order_id": None,
+                "order_ref": order_ref,
+                "net_fill_price": 0.0,
+                "legs": [
+                    {"leg_index": i, "symbol": l.get("symbol"),
+                     "order_id": None, "perm_id": None, "con_id": None,
+                     "status": "DryRun", "fill_price": 0.0,
+                     "client_id": None, "combo": True}
+                    for i, l in enumerate(legs)
+                ],
+                "all_filled": False,
+                "fills_received": 0,
+                "ib_client_id": None,
+            }
+        return self._submit_to_ib(self._ib_place_combo, legs, order_ref,
+                                   action, limit_price)
+
+    def _ib_place_combo(self, legs: list[dict],
+                        order_ref: str | None,
+                        action: str,
+                        limit_price: float | None) -> dict:
+        """Runs on IB thread. Qualifies every leg's contract, builds a
+        Bag contract referencing each leg's conId, and submits one order."""
+        from ib_async import Contract, ComboLeg
+
+        if not legs:
+            raise RuntimeError("place_combo_order requires >= 1 leg")
+
+        # Qualify each leg to get its conId — a Bag needs conIds, not
+        # OCC symbols. Reuse _build_leg_contract which handles OPT/FOP/STK.
+        leg_contracts: list[tuple[int, dict, object]] = []
+        for i, leg in enumerate(legs):
+            c = self._build_leg_contract(leg)
+            if not getattr(c, "conId", None):
+                raise RuntimeError(
+                    f"combo leg {i} {leg.get('symbol')!r} — contract "
+                    f"qualification returned no conId"
+                )
+            leg_contracts.append((i, leg, c))
+
+        # Infer the underlying for the Bag header. For options all legs
+        # share the same underlying; for defensive mixed cases, take
+        # leg 0's. Fall back to the OCC ticker prefix.
+        first_leg = legs[0]
+        underlying = (first_leg.get("underlying")
+                      or (first_leg.get("symbol") or "")[:3])
+        currency = first_leg.get("currency", "USD")
+        exchange = first_leg.get("exchange", "SMART")
+
+        bag = Contract()
+        bag.symbol = underlying
+        bag.secType = "BAG"
+        bag.currency = currency
+        bag.exchange = exchange
+        bag.comboLegs = []
+        for i, leg, c in leg_contracts:
+            combo_leg = ComboLeg()
+            combo_leg.conId = int(c.conId)
+            combo_leg.ratio = int(leg.get("contracts") or 1)
+            leg_dir = (leg.get("direction") or "LONG").upper()
+            combo_leg.action = "BUY" if leg_dir == "LONG" else "SELL"
+            combo_leg.exchange = leg.get("exchange") or exchange
+            combo_leg.openClose = 0  # 0 = same as contract default
+            bag.comboLegs.append(combo_leg)
+
+        qty = int(legs[0].get("contracts") or 1)
+        if limit_price is not None:
+            order = LimitOrder(action, qty, float(limit_price))
+        else:
+            order = MarketOrder(action, qty)
+        order.orderId = self.ib.client.getReqId()
+        order.tif = "DAY"
+        if config.IB_ACCOUNT:
+            order.account = config.IB_ACCOUNT
+        if order_ref:
+            order.orderRef = order_ref
+
+        try:
+            placing_client_id = self.ib.client.clientId
+        except Exception:
+            placing_client_id = None
+
+        ib_trade = self.ib.placeOrder(bag, order)
+        log.info(f"[IB clientId={placing_client_id}] COMBO {action} "
+                 f"{qty}x {underlying} ({len(legs)} legs) "
+                 f"limit={limit_price} orderId={order.orderId} "
+                 f"ref={order_ref or '—'}")
+
+        # Wait up to 10s for fill
+        TERMINAL = {"Filled", "Cancelled", "Inactive", "ApiCancelled"}
+        for _ in range(20):
+            try:
+                self.ib.sleep(0.5)
+            except Exception:
+                break
+            if ib_trade.orderStatus.status in TERMINAL:
+                break
+
+        net_fill = float(ib_trade.orderStatus.avgFillPrice or 0.0)
+        status = ib_trade.orderStatus.status
+        filled = (status == "Filled")
+
+        # Surface per-leg rows so downstream persistence doesn't change.
+        # All legs share the ONE combo order's orderId; per-leg fill
+        # prices come from ib_trade.fills if IB breaks them out, else
+        # zero.
+        leg_fill_prices: dict[int, float] = {}
+        for fill in getattr(ib_trade, "fills", []) or []:
+            # fill.contract is a leg-level contract; match by conId
+            c_id = getattr(fill.contract, "conId", None)
+            if c_id is not None:
+                leg_fill_prices[int(c_id)] = float(fill.execution.avgPrice)
+
+        legs_result = []
+        for i, leg, c in leg_contracts:
+            per_leg_px = leg_fill_prices.get(int(c.conId), 0.0)
+            legs_result.append({
+                "leg_index": i,
+                "symbol": leg.get("symbol"),
+                "leg_role": leg.get("leg_role"),
+                "sec_type": leg.get("sec_type"),
+                "direction": leg.get("direction"),
+                "contracts": int(leg.get("contracts") or 1),
+                "order_id": ib_trade.order.orderId,   # same on every leg
+                "perm_id": ib_trade.order.permId,     # same on every leg
+                "con_id": int(c.conId),
+                "status": status,
+                "fill_price": per_leg_px,
+                "client_id": placing_client_id,
+                "order_ref": order_ref,
+                "combo": True,
+            })
+
+        return {
+            "combo_order_id": ib_trade.order.orderId,
+            "combo_perm_id": ib_trade.order.permId,
+            "order_ref": order_ref,
+            "net_fill_price": net_fill,
+            "legs": legs_result,
+            "all_filled": filled,
+            "fills_received": len(legs) if filled else 0,
+            "ib_client_id": placing_client_id,
+        }
+
     # ── Bracket SL modification ───────────────────────────────
     def update_bracket_sl(self, sl_order_id: int, new_sl_price: float) -> bool:
         """Update the stop loss leg of a bracket order."""
