@@ -37,6 +37,10 @@ from backtest_engine.fill_model import (
 from backtest_engine.indicators import snapshot_at, context_at
 from backtest_engine.metrics import compute_summary
 from backtest_engine import writer as bt_writer
+from backtest_engine.multi_leg_sim import (
+    build_leg_state, price_legs_now, entry_basis, synth_price,
+    build_legs_for_writer,
+)
 
 log = logging.getLogger(__name__)
 
@@ -376,7 +380,63 @@ def _simulate_ticker(
         current_price = float(bar["close"])
 
         # ── Exit check for open trade ───────────────────────
-        if open_trade is not None:
+        if open_trade is not None and open_trade.get("_is_multi_leg"):
+            # Multi-leg: reprice every leg, collapse net P&L into a
+            # synthetic option_price so evaluate_exit still applies the
+            # strategy's TP/SL/trail semantics.
+            leg_prices, net_pnl_ps = price_legs_now(
+                open_trade["_legs_state"],
+                current_price,
+                ts.to_pydatetime(),
+                sigma=cfg.get("option_vol", 0.20),
+                r=cfg.get("option_rate", 0.04),
+            )
+            option_price = synth_price(
+                open_trade["entry_price"],
+                net_pnl_ps,
+                open_trade["_entry_basis"],
+            )
+            exit_result = evaluate_exit(open_trade, option_price, now_pt)
+            if exit_result is not None:
+                exit_dt = ts.to_pydatetime()
+                legs_out = build_legs_for_writer(
+                    open_trade["_legs_state"], leg_prices, exit_dt,
+                )
+                # Aggregate per-leg dollar P&L (writer also computes this,
+                # but we surface pnl_usd/pct on the envelope for metrics).
+                total_pnl_usd = sum(
+                    lg["_sign"] * (xp - lg["entry_price"])
+                    * lg["contracts"] * lg["multiplier"]
+                    for lg, xp in zip(open_trade["_legs_state"], leg_prices)
+                )
+                pnl_pct_val = (
+                    total_pnl_usd / (open_trade["_entry_basis"]
+                                     * open_trade["_legs_state"][0]["multiplier"])
+                ) if open_trade["_entry_basis"] > 0 else 0.0
+                open_trade["exit_price"] = option_price
+                open_trade["exit_time"] = exit_dt
+                open_trade["hold_minutes"] = (
+                    (ts - open_trade["_entry_ts"]).total_seconds() / 60.0
+                )
+                open_trade["pnl_usd"] = total_pnl_usd
+                open_trade["pnl_pct"] = pnl_pct_val
+                open_trade["exit_reason"] = exit_result["reason"]
+                open_trade["exit_result"] = exit_result["result"]
+                open_trade["peak_pnl_pct"] = open_trade.get("peak_pnl_pct", 0)
+                open_trade["dynamic_sl_pct"] = open_trade.get("dynamic_sl_pct", -sl_target)
+                open_trade["slippage_paid"] = 0.0
+                open_trade["commission"] = 0.0
+                open_trade["exit_indicators"] = snapshot_at(base, i)
+                open_trade["_legs"] = legs_out   # kept for writer routing
+
+                clean_trade = {k: v for k, v in open_trade.items()
+                               if not k.startswith("_") or k == "_legs"}
+                trades.append(clean_trade)
+                last_exit_ts = ts
+                open_trade = None
+                continue
+
+        if open_trade is not None and not open_trade.get("_is_multi_leg"):
             # Price the option with Black-Scholes (configurable DTE + vol).
             # This is the ACCURATE option-P&L model — replaces the old
             # flat-5× leverage proxy. Small underlying moves get eaten by
@@ -459,11 +519,13 @@ def _simulate_ticker(
             log.debug(f"{ticker}@{ts}: get_all_levels failed: {e}")
             levels = []
 
+        signal_objs: list = []
         if strategy is not None:
             # Plugin path (ORB, VWAP, etc.)
             try:
                 signals = strategy.detect(bars_1m, bars_1h, bars_4h, levels, ticker)
-                raw_signals = [_signal_to_dict(s) for s in signals]
+                signal_objs = list(signals or [])
+                raw_signals = [_signal_to_dict(s) for s in signal_objs]
             except Exception as e:
                 log.debug(f"{ticker}@{ts}: strategy detect failed: {e}")
                 raw_signals = []
@@ -482,7 +544,67 @@ def _simulate_ticker(
             continue
 
         sig = raw_signals[0]
+        sig_obj = signal_objs[0] if signal_objs else None
         direction = sig.get("direction", "LONG")
+
+        # ── Multi-leg branch (ENH-038 Part 2) ───────────────
+        # If the strategy implements place_legs(), take that path: price
+        # every leg with BS/Black-76, track a combined position, and emit
+        # a trade dict carrying "_legs" for record_multi_leg_trade.
+        legs = None
+        if strategy is not None and sig_obj is not None:
+            try:
+                legs = strategy.place_legs(sig_obj)
+            except Exception as e:
+                log.debug(f"{ticker}@{ts}: place_legs failed: {e}")
+                legs = None
+
+        if legs:
+            underlying_entry = current_price
+            option_entry_proxy = 2.00  # synthetic basis for evaluate_exit
+            entry_dt = ts.to_pydatetime()
+            leg_state = build_leg_state(
+                legs, underlying_entry, entry_dt,
+                sigma=cfg.get("option_vol", 0.20),
+                r=cfg.get("option_rate", 0.04),
+            )
+            basis = entry_basis(leg_state)
+
+            trade_counter += 1
+            trades_today_by_date[bar_day] = today_count + 1
+            if sig_engine is not None:
+                sig_engine.mark_used(sig.get("setup_id", f"idx-{i}"))
+
+            open_trade = {
+                "ticker": ticker,
+                "symbol": leg_state[0].get("symbol") or f"{ticker}_multileg",
+                "direction": direction,
+                "contracts": contracts,
+                "entry_price": option_entry_proxy,
+                "entry_time": entry_dt,
+                "entry_bar_idx": i,
+                "peak_pnl_pct": 0.0,
+                "dynamic_sl_pct": -sl_target,
+                "profit_target": option_entry_proxy * (1 + pnl_target),
+                "stop_loss": option_entry_proxy * (1 - sl_target),
+                "signal_type": sig.get("signal_type"),
+                "tp_level": option_entry_proxy * (1 + pnl_target),
+                "sl_level": option_entry_proxy * (1 - sl_target),
+                "entry_indicators": snapshot_at(base, i),
+                "entry_context": context_at(base, i),
+                "signal_details": {
+                    k: sig.get(k) for k in ("confidence", "strategy_name")
+                    if sig.get(k) is not None
+                },
+                "_underlying_entry": underlying_entry,
+                "_strike": underlying_entry,
+                "_entry_ts": ts,
+                "_entry_commission": 0.0,  # per-leg commissions summed at exit
+                "_legs_state": leg_state,
+                "_entry_basis": basis,
+                "_is_multi_leg": True,
+            }
+            continue
 
         # Fill the option at the current bar's close as entry price proxy
         # Option "entry price" is an arbitrary base — we use the underlying
@@ -528,6 +650,44 @@ def _simulate_ticker(
         }
 
     # Close any still-open trade at the last bar
+    if open_trade is not None and open_trade.get("_is_multi_leg"):
+        last_idx = len(base) - 1
+        last_bar = base.iloc[last_idx]
+        last_ts = base.index[last_idx]
+        leg_prices, _ = price_legs_now(
+            open_trade["_legs_state"],
+            float(last_bar["close"]),
+            last_ts.to_pydatetime(),
+            sigma=cfg.get("option_vol", 0.20),
+            r=cfg.get("option_rate", 0.04),
+        )
+        exit_dt = last_ts.to_pydatetime()
+        legs_out = build_legs_for_writer(
+            open_trade["_legs_state"], leg_prices, exit_dt,
+        )
+        total_pnl_usd = sum(
+            lg["_sign"] * (xp - lg["entry_price"])
+            * lg["contracts"] * lg["multiplier"]
+            for lg, xp in zip(open_trade["_legs_state"], leg_prices)
+        )
+        open_trade.update({
+            "exit_price": open_trade["entry_price"],  # nominal; real P&L on legs
+            "exit_time": exit_dt,
+            "hold_minutes": (last_ts - open_trade["_entry_ts"]).total_seconds() / 60.0,
+            "pnl_usd": total_pnl_usd,
+            "pnl_pct": 0.0,
+            "exit_reason": "END_OF_RANGE",
+            "exit_result": "WIN" if total_pnl_usd > 0 else
+                           "LOSS" if total_pnl_usd < 0 else "SCRATCH",
+            "slippage_paid": 0.0,
+            "commission": 0.0,
+            "exit_indicators": snapshot_at(base, last_idx),
+            "_legs": legs_out,
+        })
+        trades.append({k: v for k, v in open_trade.items()
+                       if not k.startswith("_") or k == "_legs"})
+        return trades
+
     if open_trade is not None:
         last_idx = len(base) - 1
         last_bar = base.iloc[last_idx]
