@@ -244,7 +244,18 @@ def run_backtest(
                     progress=_progress,
                 )
                 for t in ticker_trades:
-                    bt_writer.record_trade(run_id, strategy_id, t)
+                    # ENH-038: if the trade carries multi-leg data
+                    # (emitted by a strategy that implements place_legs),
+                    # route to the multi-leg writer which also persists
+                    # backtest_trade_legs rows. Single-leg trades continue
+                    # writing a single backtest_trades row via record_trade.
+                    legs = t.get("_legs")
+                    if legs:
+                        bt_writer.record_multi_leg_trade(
+                            run_id, strategy_id, t, legs,
+                        )
+                    else:
+                        bt_writer.record_trade(run_id, strategy_id, t)
                     all_trades.append(t)
                 _progress(f"{ticker}: {len(ticker_trades)} trades")
             except Exception as e:

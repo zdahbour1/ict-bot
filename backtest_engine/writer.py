@@ -234,6 +234,100 @@ def record_trade(run_id: int, strategy_id: int, trade: dict) -> Optional[int]:
         session.close()
 
 
+def record_multi_leg_trade(
+    run_id: int, strategy_id: int,
+    envelope: dict, legs: list[dict],
+) -> Optional[int]:
+    """Insert one backtest_trades row + N backtest_trade_legs rows.
+
+    envelope: dict with trade-level fields (run_id/strategy_id are
+        passed separately). Expected keys: ticker, entry_time, exit_time,
+        signal_type, entry_indicators, exit_indicators, exit_reason,
+        exit_result, hold_minutes, plus pre-aggregated pnl_usd and
+        pnl_pct. The envelope ALSO needs a `symbol` + `direction` +
+        `entry_price` + `exit_price` for back-compat (use the first
+        leg's values — the Backtest UI reads these for the trade row).
+    legs: list of dicts each with:
+        symbol, sec_type, underlying, strike, right, expiry, multiplier,
+        direction, contracts, entry_price, exit_price, entry_time,
+        exit_time, leg_role, pnl_usd.
+    """
+    session = get_session()
+    if session is None:
+        return None
+    try:
+        first = legs[0] if legs else {}
+        envelope = {**envelope}  # copy, don't mutate caller
+        envelope.setdefault("symbol", first.get("symbol"))
+        envelope.setdefault("direction", first.get("direction", "LONG"))
+        envelope.setdefault("contracts", first.get("contracts", 1))
+        envelope.setdefault("entry_price", float(first.get("entry_price", 0)))
+        if "exit_price" not in envelope:
+            envelope["exit_price"] = (float(first.get("exit_price"))
+                                       if first.get("exit_price") is not None else None)
+
+        trade_id = record_trade(run_id, strategy_id, envelope)
+        if trade_id is None:
+            return None
+        # Stamp n_legs + insert each leg
+        session.execute(
+            text("UPDATE backtest_trades SET n_legs = :n WHERE id = :id"),
+            {"n": len(legs), "id": trade_id},
+        )
+        for i, leg in enumerate(legs):
+            per_leg_pnl = leg.get("pnl_usd")
+            if per_leg_pnl is None and leg.get("exit_price") is not None:
+                # Compute per-leg realised P&L if the caller didn't pre-supply
+                sign = 1 if leg.get("direction", "LONG") == "LONG" else -1
+                per_leg_pnl = (
+                    (float(leg["exit_price"]) - float(leg["entry_price"]))
+                    * int(leg["contracts"])
+                    * int(leg.get("multiplier", 100))
+                    * sign
+                )
+            session.execute(
+                text(
+                    'INSERT INTO backtest_trade_legs ('
+                    '  backtest_trade_id, leg_index, leg_role, '
+                    '  sec_type, symbol, underlying, strike, "right", '
+                    '  expiry, multiplier, direction, contracts, '
+                    '  entry_price, exit_price, entry_time, exit_time, pnl_usd'
+                    ') VALUES ('
+                    '  :tid, :idx, :role, '
+                    '  :sec, :sym, :under, :strike, :right, '
+                    '  :exp, :mult, :dir, :qty, '
+                    '  :epx, :xpx, :et, :xt, :pnl'
+                    ')'
+                ),
+                {
+                    "tid": trade_id, "idx": leg.get("leg_index", i),
+                    "role": leg.get("leg_role"),
+                    "sec": leg.get("sec_type", "OPT"),
+                    "sym": leg["symbol"],
+                    "under": leg.get("underlying"),
+                    "strike": leg.get("strike"),
+                    "right": leg.get("right"),
+                    "exp": leg.get("expiry"),
+                    "mult": int(leg.get("multiplier", 100)),
+                    "dir": leg.get("direction", "LONG"),
+                    "qty": int(leg["contracts"]),
+                    "epx": float(leg["entry_price"]),
+                    "xpx": float(leg["exit_price"]) if leg.get("exit_price") is not None else None,
+                    "et": leg.get("entry_time") or envelope.get("entry_time"),
+                    "xt": leg.get("exit_time") or envelope.get("exit_time"),
+                    "pnl": float(per_leg_pnl) if per_leg_pnl is not None else None,
+                },
+            )
+        session.commit()
+        return trade_id
+    except Exception as e:
+        session.rollback()
+        log.error(f"record_multi_leg_trade failed: {e}", exc_info=True)
+        return None
+    finally:
+        session.close()
+
+
 def list_runs(limit: int = 50, strategy_id: Optional[int] = None,
               status: Optional[str] = None) -> list[dict]:
     session = get_session()
