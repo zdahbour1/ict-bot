@@ -74,3 +74,48 @@ class TestReconciliationSymbolCleaning:
         raw = None
         clean = "".join((raw or "").split())
         assert clean == ""
+
+
+class TestReconciliationContractSignNormalization:
+    """Regression tests for the 2026-04-23 ``-4x`` AMZN bug. IB reports
+    naked-short positions with NEGATIVE qty; previous reconciliation
+    code wrote that raw value to ``trade_legs.contracts_entered``,
+    which broke every downstream P&L calc and UI column. Fix: always
+    store positive contracts, derive direction from BOTH position
+    sign and right.
+    """
+
+    @staticmethod
+    def _adopt_fields(qty_raw: int, right: str):
+        """Mirror the inline expression in reconciliation.py::_pass2_adopt."""
+        qty = abs(qty_raw)
+        if qty_raw >= 0:
+            direction = "LONG" if right == "C" else "SHORT"
+        else:
+            direction = "SHORT" if right == "C" else "LONG"
+        return qty, direction
+
+    def test_long_call_stays_long(self):
+        qty, direction = self._adopt_fields(4, "C")
+        assert qty == 4 and direction == "LONG"
+
+    def test_long_put_is_short_bias(self):
+        # Bought a put → bearish trade
+        qty, direction = self._adopt_fields(4, "P")
+        assert qty == 4 and direction == "SHORT"
+
+    def test_naked_short_put_is_long_bias(self):
+        # Sold a put → bullish trade (AMZN regression case)
+        qty, direction = self._adopt_fields(-4, "P")
+        assert qty == 4            # MUST be positive, never -4
+        assert direction == "LONG"
+
+    def test_naked_short_call_is_short_bias(self):
+        # Sold a call → bearish trade
+        qty, direction = self._adopt_fields(-4, "C")
+        assert qty == 4 and direction == "SHORT"
+
+    def test_zero_qty_treated_as_long(self):
+        # Degenerate — shouldn't happen in production but we pick a branch
+        qty, direction = self._adopt_fields(0, "C")
+        assert qty == 0 and direction == "LONG"

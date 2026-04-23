@@ -199,10 +199,23 @@ def _reconcile(client, exit_manager, ib_positions):
         # unpadded form or price lookup silently fails and the trade
         # becomes un-monitorable. Strip ALL whitespace, not just ends.
         sym = "".join((pos.get("symbol") or "").split())
-        qty = int(pos["qty"])  # Preserve sign — negative means naked short on IB
+        qty_raw = int(pos["qty"])
+        # Store POSITIVE contracts; direction column carries the sign.
+        # Writing negative contracts to trade_legs breaks every downstream
+        # P&L calc + UI column (see 2026-04-23 AMZN -4x regression).
+        qty = abs(qty_raw)
         avg_cost = pos.get("avg_cost", 0)
         right = pos.get("right", "C")
-        direction = "SHORT" if right == "P" else "LONG"
+        # Market-bias direction. Depends on BOTH position sign and right,
+        # not just right:
+        #   qty>0 C → bought call  → LONG  (bullish)
+        #   qty>0 P → bought put   → SHORT (bearish)
+        #   qty<0 C → sold  call   → SHORT (bearish, naked)
+        #   qty<0 P → sold  put    → LONG  (bullish, naked)
+        if qty_raw >= 0:
+            direction = "LONG" if right == "C" else "SHORT"
+        else:
+            direction = "SHORT" if right == "C" else "LONG"
 
         log.info(f"[RECONCILE] PASS 2: {ticker} {sym} (conId={con_id}) "
                  f"— on IB but NOT in DB → adopting")
