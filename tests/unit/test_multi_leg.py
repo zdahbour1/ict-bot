@@ -157,6 +157,46 @@ def test_place_multi_leg_order_returns_expected_shape(monkeypatch):
         assert leg["client_id"] == 7
 
 
+def test_entry_legs_not_in_oca_group_on_ib(monkeypatch):
+    """Regression for 2026-04-23 AVGO partial-condor bug.
+
+    The earlier implementation stamped ``order.ocaGroup`` + ``ocaType=1``
+    on every entry leg, which caused IB to cancel all siblings the
+    instant one leg filled — so only 1 of 4 iron-condor legs ever made
+    it into the position. Entry legs must NOT carry an OCA group on
+    the IB-side; the oca_group label in our result dict is just for
+    internal correlation.
+    """
+    import config
+    monkeypatch.setattr(config, "DRY_RUN", False, raising=False)
+    monkeypatch.setattr(config, "IB_ACCOUNT", "", raising=False)
+
+    client = _build_min_client()
+    legs = [
+        {"sec_type": "OPT", "symbol": "SPY260501C00500000",
+         "direction": "SHORT", "contracts": 1, "strike": 500, "right": "C",
+         "expiry": "20260501", "leg_role": "short_call", "underlying": "SPY"},
+        {"sec_type": "OPT", "symbol": "SPY260501C00510000",
+         "direction": "LONG", "contracts": 1, "strike": 510, "right": "C",
+         "expiry": "20260501", "leg_role": "long_call", "underlying": "SPY"},
+    ]
+    client.place_multi_leg_order(legs, order_ref="dn-SPY-260420-01")
+
+    # Inspect every order that was actually handed to IB.
+    assert len(client.ib.placed) == 2
+    for _contract, order in client.ib.placed:
+        oca_group_on_ib = getattr(order, "ocaGroup", "")
+        oca_type_on_ib = getattr(order, "ocaType", 0)
+        assert not oca_group_on_ib, (
+            f"ENTRY order must not have ocaGroup set on IB — was "
+            f"{oca_group_on_ib!r}; that causes cancel-on-fill and "
+            f"breaks multi-leg entries."
+        )
+        assert not oca_type_on_ib, (
+            f"ENTRY order must not set ocaType — was {oca_type_on_ib}"
+        )
+
+
 # ─── 3. insert_multi_leg_trade writes envelope + N legs in one tx ───
 
 def test_insert_multi_leg_trade_writes_envelope_and_legs(monkeypatch):

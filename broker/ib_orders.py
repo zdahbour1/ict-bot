@@ -671,8 +671,15 @@ class IBOrdersMixin:
 
             order = MarketOrder(action, contracts)
             order.orderId = self.ib.client.getReqId()
-            order.ocaGroup = oca_group
-            order.ocaType = 1  # Cancel on fill
+            # NOTE: do NOT stamp ocaGroup/ocaType on ENTRY legs — the
+            # earlier code used ocaType=1 ("cancel on fill") which IB
+            # applied the moment the first leg filled, cancelling the
+            # other 3 legs of an iron condor mid-placement. Caught
+            # 2026-04-23 as the AVGO partial-condor bug (1/4 filled,
+            # resulting in a naked short call). OCA is the right tool
+            # for EXIT coordination (first TP/SL cancels siblings),
+            # not for entry. We keep ``oca_group`` as a correlation
+            # label in the result dict so downstream tracking works.
             order.tif = "DAY"
             if config.IB_ACCOUNT:
                 order.account = config.IB_ACCOUNT

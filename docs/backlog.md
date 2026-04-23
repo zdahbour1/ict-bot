@@ -150,6 +150,18 @@ Remaining: per-strategy P&L summary cards at top of Trades tab (total pnl, win-r
 ### ENH-041: Retire main branch / make profitability-research the default ✅ PARTIAL
 Status: **main fast-forwarded to trunk** 2026-04-22. `origin/main` and `origin/feature/profitability-research` now point at the same commit. Remaining step: user toggles GitHub repo default branch to `main` in Settings, then `feature/profitability-research` can be deleted. One-click on GitHub.
 
+### ENH-043: Threads tab — strategy filter dropdown
+Dashboard Threads view lists every scanner/entry-manager/exit-manager row for every strategy in one big table. With 4 strategies × ~15 tickers that's 60+ rows and it's hard to zero-in on problems for a specific strategy. Add a strategy filter (dropdown populated from distinct strategy_name, same pattern as ENH-040 Trades tab). Multi-select is a nice-to-have; single-select is enough for v1.
+
+### ENH-044: Orphan bracket-order cleanup for closed trades
+Observed today (2026-04-23): IB shows multiple AAPL/MSFT bracket orders in "Transmit" status with no corresponding open DB trade. Some carry a strategy `orderRef`, others are ref-less (legacy). Causes: (a) previous `_atomic_close` cancelled the position but the bracket children were left working; (b) reconciliation's `bracket_restored` path creates fresh brackets but doesn't clean up the prior bracket orphans; (c) orders placed pre-ref-tagging era have no way to attribute. Work:
+1. On trade close, cancel every working order whose `orderRef` matches the closed trade's `client_trade_id`, not just the two stored bracket ids.
+2. Periodic sweep: working SELL/STP orders with no matching open trade AND no matching closed-within-60s trade → cancel them.
+3. Ref-less orphans surfaced in the dashboard as a cleanup queue the user can one-click cancel.
+
+### ENH-045: Ref-less order backfill
+Related to ENH-044. Orders placed before `orderRef` stamping shipped have no provenance in IB. Either (a) stamp-retroactively via `modifyOrder` when reconciliation discovers them (only works for still-working orders), or (b) document them as legacy and rely on the cleanup sweep in ENH-044.
+
 ---
 
 ## HIGH — Important for Reliable Operation
