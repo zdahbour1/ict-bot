@@ -137,6 +137,52 @@ class TestHedgerFlagGating:
             refresh.assert_called_once()
 
 
+class TestThreadStatusHeartbeat:
+    """ENH-049 — the hedger must register as 'delta-hedger' in
+    thread_status on every pass so the Threads dashboard shows it."""
+
+    def test_flag_off_heartbeats_idle(self):
+        from strategy.delta_hedger import DeltaHedger
+        hedger = DeltaHedger(client=MagicMock())
+        with patch("db.settings_cache.get_bool", return_value=False), \
+             patch("strategy.delta_hedger._update_thread_row") as hb:
+            hedger._one_pass()
+        hb.assert_called_once()
+        args = hb.call_args.args
+        assert args[0] == "idle"
+        assert "false" in args[1] or "monitor" in args[1].lower()
+
+    def test_flag_on_no_trades_heartbeats_running(self):
+        from strategy.delta_hedger import DeltaHedger
+        hedger = DeltaHedger(client=MagicMock())
+        with patch("db.settings_cache.get_bool", return_value=True), \
+             patch("strategy.delta_hedger._fetch_open_dn_trades",
+                    return_value=[]), \
+             patch.object(hedger, "_refresh_config"), \
+             patch("strategy.delta_hedger._update_thread_row") as hb:
+            hedger._one_pass()
+        hb.assert_called_once()
+        assert hb.call_args.args[0] == "running"
+
+    def test_flag_on_with_trades_heartbeats_running_with_count(self):
+        from strategy.delta_hedger import DeltaHedger
+        hedger = DeltaHedger(client=MagicMock())
+        fake_trades = [
+            {"trade_id": 1, "ticker": "SPY", "legs": [], "hedge_shares": 0},
+            {"trade_id": 2, "ticker": "QQQ", "legs": [], "hedge_shares": 0},
+        ]
+        with patch("db.settings_cache.get_bool", return_value=True), \
+             patch("strategy.delta_hedger._fetch_open_dn_trades",
+                    return_value=fake_trades), \
+             patch.object(hedger, "_refresh_config"), \
+             patch.object(hedger, "_rebalance_one"), \
+             patch("strategy.delta_hedger._update_thread_row") as hb:
+            hedger._one_pass()
+        hb.assert_called_once()
+        assert hb.call_args.args[0] == "running"
+        assert "2" in hb.call_args.args[1]
+
+
 class TestDTEdays:
     def test_future_expiry(self):
         from strategy.delta_hedger import _dte_days

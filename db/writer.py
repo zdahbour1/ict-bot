@@ -380,6 +380,43 @@ def update_trade_price(trade_id: int, current_price: float, pnl_pct: float,
         raise
 
 
+@_safe_db
+def update_all_leg_prices(trade_id: int, price_by_symbol: dict[str, float]) -> int:
+    """Update current_price on EVERY open leg of a multi-leg trade.
+
+    ``update_trade_price`` only refreshes leg 0. For iron condors,
+    spreads, and hedged positions the other 3 legs were stuck at
+    entry_price, which broke per-leg P&L, the UI leg-drill-down, and
+    the delta-hedger's share-equivalent delta math. This function
+    fixes that by updating each leg whose ``symbol`` is present in the
+    ``price_by_symbol`` dict.
+
+    Returns the number of leg rows updated. Never raises (``_safe_db``).
+    """
+    if not price_by_symbol:
+        return 0
+    from sqlalchemy import text
+    session = get_session()
+    if not session:
+        return 0
+    updated = 0
+    try:
+        for symbol, price in price_by_symbol.items():
+            if price is None:
+                continue
+            res = session.execute(
+                text("UPDATE trade_legs SET current_price=:cp "
+                     "WHERE trade_id=:id AND symbol=:sym "
+                     "  AND leg_status='open'"),
+                {"cp": float(price), "id": int(trade_id), "sym": str(symbol)}
+            )
+            updated += res.rowcount or 0
+        session.commit()
+        return updated
+    finally:
+        session.close()
+
+
 def _sanitize_for_json(obj):
     """Recursively convert datetime objects to ISO strings for JSONB storage."""
     if isinstance(obj, dict):

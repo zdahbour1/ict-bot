@@ -37,6 +37,64 @@ PT = pytz.timezone("America/Los_Angeles")
 from utils.occ_parser import is_expired as _is_expired
 
 
+def _refresh_multi_leg_prices(client, trades: list, batch_prices: dict) -> None:
+    """For every multi-leg open trade, fetch IB quotes for legs 1..N
+    and bulk-update their ``current_price`` on trade_legs. Leg 0 is
+    already handled by the single-leg ``update_trade_price`` call.
+
+    Re-uses the existing batch_prices dict when possible so repeated
+    symbols across trades aren't re-quoted.
+    """
+    # Only multi-leg trades need this treatment.
+    multi = [t for t in trades if int(t.get("n_legs") or 1) > 1
+             and t.get("db_id")]
+    if not multi:
+        return
+    try:
+        from db.connection import get_session
+        from sqlalchemy import text
+        from db.writer import update_all_leg_prices
+        session = get_session()
+        if session is None:
+            return
+        try:
+            # Collect every leg symbol across every multi-leg trade,
+            # dedup, fetch any we don't already have prices for.
+            tid_to_symbols: dict[int, list[str]] = {}
+            all_symbols: set[str] = set()
+            for t in multi:
+                rows = session.execute(text(
+                    "SELECT symbol FROM trade_legs "
+                    "WHERE trade_id=:id AND leg_status='open' "
+                    "  AND leg_index > 0 AND contracts_open > 0"
+                ), {"id": int(t["db_id"])}).fetchall()
+                syms = [r[0] for r in rows if r[0]]
+                if syms:
+                    tid_to_symbols[int(t["db_id"])] = syms
+                    all_symbols.update(syms)
+        finally:
+            session.close()
+
+        missing = [s for s in all_symbols if s not in batch_prices]
+        if missing:
+            try:
+                extra = client.get_option_prices_batch(missing)
+                batch_prices.update(extra or {})
+            except Exception as e:
+                log.debug(f"refresh_multi_leg_prices batch fetch error: {e}")
+
+        for tid, syms in tid_to_symbols.items():
+            price_map = {s: batch_prices.get(s) for s in syms
+                         if batch_prices.get(s) is not None}
+            if price_map:
+                try:
+                    update_all_leg_prices(tid, price_map)
+                except Exception as e:
+                    log.debug(f"update_all_leg_prices tid={tid} failed: {e}")
+    except Exception as e:
+        log.debug(f"_refresh_multi_leg_prices outer error: {e}")
+
+
 class ExitManager:
     """
     Trade monitoring engine. Reads open trades from DB (source of truth).
@@ -275,6 +333,11 @@ class ExitManager:
                         handle_error("exit_manager", "update_trade_price", e,
                                      context={"db_id": trade.get("db_id"),
                                               "ticker": trade.get("ticker")})
+            # Multi-leg trades: also refresh current_price on legs 1..N.
+            # update_trade_price only touches leg 0, so without this the
+            # other legs of an iron condor or spread stay stuck at
+            # entry_price (breaks per-leg P&L + delta-hedge math).
+            _refresh_multi_leg_prices(self.client, trades, batch_prices)
 
         # ── Process each trade ────────────────────────
         for trade in trades:

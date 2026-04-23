@@ -134,6 +134,11 @@ class DeltaHedger:
         self._thread.start()
         log.info(f"[DELTA-HEDGER] started — interval={self.interval_sec}s "
                  f"band={self.band_shares} shares")
+        # Register with the Threads page so the user can see the
+        # hedger is alive and what it's doing.
+        _update_thread_row("idle",
+                           f"started — interval={self.interval_sec}s "
+                           f"band={self.band_shares}")
 
     def stop(self) -> None:
         self._stop.set()
@@ -172,11 +177,19 @@ class DeltaHedger:
 
     def _one_pass(self) -> None:
         if not self._is_enabled():
+            _update_thread_row("idle",
+                               "DN_DELTA_HEDGE_ENABLED is false — monitor only")
             return
         self._refresh_config()
         trades = _fetch_open_dn_trades()
         if not trades:
+            _update_thread_row("running",
+                               f"no open DN trades | interval={self.interval_sec}s "
+                               f"band={self.band_shares}")
             return
+        _update_thread_row("running",
+                           f"rebalancing {len(trades)} DN trade(s) "
+                           f"(band={self.band_shares})")
         for t in trades:
             try:
                 self._rebalance_one(t)
@@ -303,6 +316,16 @@ def _update_trade_hedge_shares(trade_id: int, new_hedge: int) -> None:
             session.close()
     except Exception as e:
         log.warning(f"_update_trade_hedge_shares failed: {e}")
+
+
+def _update_thread_row(status: str, message: str) -> None:
+    """Heartbeat into thread_status so the Threads dashboard shows
+    the hedger is alive. Never raises."""
+    try:
+        from db.writer import update_thread_status
+        update_thread_status("delta-hedger", None, status, message)
+    except Exception:
+        pass
 
 
 def _record_hedge_event(trade_id: int, ticker: str, action: str,
