@@ -12,6 +12,14 @@ reflect actual state, and incorporates the new multi-strategy v2 roadmap
 
 ## CRITICAL — Architecture
 
+> **2026-04-23 audit**: All 6 ARCH items (001-006) confirmed DONE and
+> production-enforced. Full audit in the session transcript; spot-checks:
+> `db/writer.py:472` `FOR UPDATE OF t NOWAIT`, `strategy/exit_executor.py:1-25`
+> single-close-authority header, `broker/ib_client.py:194 LOC` thin facade
+> over `ib_orders.py:1603`, `ib_market_data.py:199`, `ib_positions.py:126`.
+> Only open gap: GitHub Actions CI (tracked as ARCH-004 residual — acceptable
+> technical debt while single-contributor).
+
 ### ARCH-001: Database is the Single Source of Truth
 **Principle**: The PostgreSQL database is the ONLY source of truth for all system state. No process should rely on its in-memory cache for state decisions. Every component reads from the DB. Accuracy is more important than speed — PostgreSQL has its own caching layer.
 
@@ -55,7 +63,9 @@ Status: **Implemented (ib_client split)** — shipped in commit `6d7c32f` (merge
 ### ARCH-004: Automated Regression Test Suite
 **Principle**: Every bug fix and enhancement must have a corresponding test. No code change ships without passing the full regression suite.
 
-Status: **Implemented** — 26 unit test files (~4.5k LOC) under `tests/unit/`; `test_results` + `test_runs` tables persist runs; dashboard Tests tab ("Run Unit" / "Run Concurrency" / "Run Integration") drives the suite. CLAUDE.md mandates running the suite before declaring any task done.
+Status: **Implemented** — 43 unit test files under `tests/unit/` (500 passing as of 2026-04-23), integration tests under `tests/integration/`, `test_results` + `test_runs` tables persist runs; dashboard Tests tab ("Run Unit" / "Run Concurrency" / "Run Integration") drives the suite. CLAUDE.md mandates running the suite before declaring any task done.
+
+**Residual gap (tracked)**: No GitHub Actions CI. Design doc exists in `docs/cloud_deployment.md` but not yet wired. Acceptable while single-contributor + manual discipline holds; ship with the next contributor onboarding.
 
 ---
 
@@ -147,8 +157,12 @@ Today: commissions flow through `trade_closes` but aren't attributed back to a s
 Status: **Strategy filter dropdown shipped** in commit `82848ae`. Populated from distinct strategy_name values in the loaded trade set. Works alongside existing Status / Ticker / Period filters.
 Remaining: per-strategy P&L summary cards at top of Trades tab (total pnl, win-rate, trade count per strategy). Low priority — analytics page already has cross-strategy views.
 
-### ENH-041: Retire main branch / make profitability-research the default ✅ PARTIAL
-Status: **main fast-forwarded to trunk** 2026-04-22. `origin/main` and `origin/feature/profitability-research` now point at the same commit. Remaining step: user toggles GitHub repo default branch to `main` in Settings, then `feature/profitability-research` can be deleted. One-click on GitHub.
+### ENH-041: Retire main branch / make profitability-research the default ✅ SHIPPED (2026-04-23 eve)
+- `main` fast-forwarded to `6371935` (ENH-050 shipped, 500 tests pass)
+- Tag `v2026.04.23-stable` pushed as a recovery point
+- `feature/profitability-research` deleted (local + remote)
+- Only `main` remains. Single trunk going forward.
+User action completed — GitHub default branch is main; no more divergent work tree.
 
 ### ENH-043: Threads tab — strategy filter dropdown
 Dashboard Threads view lists every scanner/entry-manager/exit-manager row for every strategy in one big table. With 4 strategies × ~15 tickers that's 60+ rows and it's hard to zero-in on problems for a specific strategy. Add a strategy filter (dropdown populated from distinct strategy_name, same pattern as ENH-040 Trades tab). Multi-select is a nice-to-have; single-select is enough for v1.
