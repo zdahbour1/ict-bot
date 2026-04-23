@@ -202,7 +202,7 @@ RECONCILIATION_INTERVAL_MIN = _get("RECONCILIATION_INTERVAL_MIN", 2, int)
 # ── Multi-leg entry routing (ENH-046) ────────────────
 # When True, multi-leg strategies (iron condor, spread, hedged) submit
 # the entry as ONE IB Bag/combo order instead of N independent orders.
-# All legs fill atomically at a net price; one combo conId, one bracket
-# on net P&L. Default False keeps the legacy N-order path until we've
-# validated combo fills in paper trading.
-USE_COMBO_ORDERS_FOR_MULTI_LEG = _get("USE_COMBO_ORDERS_FOR_MULTI_LEG", False, bool)
+# All legs fill atomically at a net price; one combo conId per IB order.
+# Default True as of 2026-04-23 (user enabled for paper testing —
+# see ENH-046). Override via env var or settings table to toggle.
+USE_COMBO_ORDERS_FOR_MULTI_LEG = _get("USE_COMBO_ORDERS_FOR_MULTI_LEG", True, bool)

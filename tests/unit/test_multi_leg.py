@@ -375,6 +375,11 @@ def _bypass_gates(monkeypatch, em):
 
 
 def test_trade_entry_manager_routes_to_multi_leg_when_place_legs_returns(monkeypatch):
+    # Pin the legacy (non-combo) path for this test so the routing
+    # assertion is deterministic regardless of today's default flag.
+    import config
+    monkeypatch.setattr(config, "USE_COMBO_ORDERS_FOR_MULTI_LEG", False,
+                         raising=False)
     client = _FakeClientForEM()
     em = _FakeExitManager()
     _bypass_gates(monkeypatch, em)
