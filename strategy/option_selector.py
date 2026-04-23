@@ -2,11 +2,40 @@
 Option Selector
 Decides WHICH option to buy when an ICT signal fires.
 Uses IB real-time data, validates contracts, and places bracket orders.
+
+FOP routing (ENH-034, 2026-04-22): when the ticker row in `tickers`
+has `sec_type='FOP'`, we route to fop_selector.select_liquid_fop_contract
+which applies liquidity gates before picking a contract. See
+docs/fop_live_trading_design.md.
 """
 import logging
 import config
 
 log = logging.getLogger(__name__)
+
+
+def _lookup_ticker_sec_type(ticker: str, strategy_id: int | None) -> str:
+    """Resolve the ticker's sec_type from the DB. Defaults to 'OPT' if
+    lookup fails or the row is missing — preserves equity-option
+    behavior for anything we can't classify."""
+    if not strategy_id:
+        return "OPT"
+    try:
+        from db.connection import get_session
+        from sqlalchemy import text
+        session = get_session()
+        if session is None:
+            return "OPT"
+        row = session.execute(text(
+            "SELECT sec_type FROM tickers "
+            "WHERE symbol = :sym AND strategy_id = :sid AND is_active = TRUE "
+            "LIMIT 1"
+        ), {"sym": ticker, "sid": strategy_id}).fetchone()
+        session.close()
+        return str(row[0]) if row and row[0] else "OPT"
+    except Exception as e:
+        log.debug(f"[{ticker}] sec_type lookup failed: {e} — defaulting to OPT")
+        return "OPT"
 
 # IB order statuses that mean the order FAILED — never create a trade for these
 FAILED_STATUSES = {"Cancelled", "Inactive", "ApiCancelled", "ApiPending", "PendingCancel"}
@@ -139,10 +168,116 @@ def _trigger_orphan_scan_fast_path(client, ticker: str, option_symbol: str,
         )
 
 
+def _select_and_enter_fop(
+    client, ticker: str, direction: str,
+    order_ref: str | None = None,
+    strategy_id: int | None = None,
+) -> dict | None:
+    """FOP entry path (ENH-034). Uses fop_selector to pick a liquid
+    contract; skips the trade entirely if no contract clears the
+    liquidity gates.
+
+    direction: 'LONG' (buys a call) or 'SHORT' (buys a put).
+    """
+    from strategy.fop_selector import select_liquid_fop_contract
+
+    # Underlying price — needed for ATM strike selection. For FOP the
+    # "underlying" is a future (MES, MNQ, ES, NQ, GC, CL). Use the IB
+    # market data feed for the future — reuse get_realtime_equity_price
+    # which hits reqMktData; IB treats futures + stocks the same there.
+    try:
+        underlying_price = float(client.get_realtime_equity_price(ticker))
+    except Exception as e:
+        log.warning(f"[{ticker}] FOP: could not fetch underlying price — {e}")
+        return None
+    if underlying_price <= 0:
+        log.warning(f"[{ticker}] FOP: underlying price unavailable — skipping")
+        return None
+
+    sel = select_liquid_fop_contract(
+        chain_probe=client.fop_chain,
+        quote_probe=client.fop_quote,
+        underlying=ticker, direction=direction,
+        underlying_price=underlying_price,
+    )
+    if sel is None:
+        log.info(f"[{ticker}] FOP: no liquid contract found — SKIPPING trade")
+        return None
+
+    contracts = config.CONTRACTS_PER_TICKER.get(ticker, config.CONTRACTS)
+    tp_price = round(sel.mid_price * (1 + config.PROFIT_TARGET), 2)
+    sl_price = round(sel.mid_price * (1 - config.STOP_LOSS), 2)
+
+    if config.USE_BRACKET_ORDERS:
+        order_result = client.place_bracket_order_fop(
+            {
+                "symbol": sel.symbol, "exchange": sel.exchange,
+                "currency": sel.currency, "multiplier": sel.multiplier,
+                "expiry": sel.expiry, "strike": sel.strike,
+                "right": sel.right, "con_id": sel.con_id,
+            },
+            contracts, "BUY", tp_price, sl_price,
+            order_ref=order_ref,
+        )
+    else:
+        log.warning(f"[{ticker}] FOP: USE_BRACKET_ORDERS=False unsupported for FOP — aborting")
+        return None
+
+    if not isinstance(order_result, dict) or order_result.get("dry_run"):
+        return None
+    status = order_result.get("status", "Unknown")
+    if status in FAILED_STATUSES:
+        log.error(f"[{ticker}] FOP order FAILED (status={status}) — not creating trade")
+        return None
+
+    entry_price = float(order_result.get("fill_price") or sel.mid_price)
+    from datetime import datetime, timezone
+    trade = {
+        "ticker": ticker,
+        "symbol": order_result.get("symbol"),
+        "direction": direction,
+        "contracts": contracts,
+        "entry_price": entry_price,
+        "profit_target": tp_price,
+        "stop_loss": sl_price,
+        "entry_time": datetime.now(timezone.utc),
+        # Structured FOP fields flow through to trade_legs:
+        "sec_type": "FOP",
+        "underlying": ticker,
+        "strike": sel.strike,
+        "right": sel.right,
+        "expiry": sel.expiry,
+        "multiplier": sel.multiplier,
+        "exchange": sel.exchange,
+        "currency": sel.currency,
+    }
+    # Stamp IB ids + pool-slot id (Phase 5 close routing)
+    trade["ib_order_id"] = order_result.get("order_id")
+    trade["ib_perm_id"] = order_result.get("perm_id")
+    trade["ib_con_id"] = order_result.get("con_id")
+    trade["ib_tp_order_id"] = order_result.get("tp_order_id")
+    trade["ib_tp_perm_id"] = order_result.get("tp_perm_id")
+    trade["ib_sl_order_id"] = order_result.get("sl_order_id")
+    trade["ib_sl_perm_id"] = order_result.get("sl_perm_id")
+    trade["ib_client_id"] = order_result.get("client_id")
+    if strategy_id:
+        trade["strategy_id"] = strategy_id
+    log.info(f"[{ticker}] FOP trade opened: {sel.symbol} {sel.expiry} "
+             f"{sel.strike}{sel.right} ({sel.expiry_type}, OI={sel.open_interest}) "
+             f"@ ${entry_price:.2f}  TP=${tp_price:.2f} SL=${sl_price:.2f}")
+    return trade
+
+
 def select_and_enter(client, ticker: str = "QQQ",
-                     order_ref: str | None = None) -> dict | None:
+                     order_ref: str | None = None,
+                     strategy_id: int | None = None) -> dict | None:
     """
     Called when a bullish ICT signal is detected.
+
+    If the ticker's sec_type is 'FOP' (per the tickers table) routes
+    through the liquidity-aware FOP selector (ENH-034). Otherwise the
+    existing equity-option path runs unchanged.
+
     1. Finds the ATM 0DTE call (IB validated)
     2. Gets real-time quote from IB
     3. Places bracket order (market + TP limit + SL stop) or simple market order
@@ -152,6 +287,11 @@ def select_and_enter(client, ticker: str = "QQQ",
     legs' ``orderRef``. Typically generated by the caller via
     ``db.trade_ref.generate_trade_ref(ticker)``.
     """
+    # ENH-034: FOP branch
+    if _lookup_ticker_sec_type(ticker, strategy_id) == "FOP":
+        return _select_and_enter_fop(client, ticker, direction="LONG",
+                                      order_ref=order_ref, strategy_id=strategy_id)
+
     import pytz
     from datetime import datetime
 
@@ -294,12 +434,20 @@ def select_and_enter(client, ticker: str = "QQQ",
 
 
 def select_and_enter_put(client, ticker: str = "QQQ",
-                          order_ref: str | None = None) -> dict | None:
+                          order_ref: str | None = None,
+                          strategy_id: int | None = None) -> dict | None:
     """
     Called when a bearish ICT signal is detected.
     Same as select_and_enter but for puts. See ``select_and_enter``
     for the ``order_ref`` contract.
+
+    ENH-034: FOP tickers route through the liquidity-aware FOP selector.
     """
+    # ENH-034: FOP branch — picks a liquid put
+    if _lookup_ticker_sec_type(ticker, strategy_id) == "FOP":
+        return _select_and_enter_fop(client, ticker, direction="SHORT",
+                                      order_ref=order_ref, strategy_id=strategy_id)
+
     import pytz
     from datetime import datetime
 

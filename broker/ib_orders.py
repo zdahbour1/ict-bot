@@ -133,6 +133,204 @@ class IBOrdersMixin:
             self._ib_place_bracket, option_symbol, contracts, action, tp_price, sl_price, order_ref
         )
 
+    # ── FOP (Futures Options) ─────────────────────────────
+    def place_bracket_order_fop(self, spec: dict, contracts: int,
+                                 action: str, tp_price: float, sl_price: float,
+                                 order_ref: str | None = None) -> dict:
+        """Place a bracket order on a FuturesOption contract (ENH-034).
+
+        `spec` must provide: symbol, exchange, currency, multiplier,
+        expiry (YYYYMMDD), strike, right ('C'|'P'). Optionally `con_id`
+        if already qualified (skips the qualification round-trip).
+
+        Returns same shape as place_bracket_order: symbol / order_id /
+        perm_id / con_id / tp_* / sl_* / status / fill_price / order_ref
+        / client_id. Bot's insert_trade persists the structured fields
+        (sec_type='FOP', expiry, strike, right, multiplier, exchange)
+        via the new trade_legs row.
+        """
+        if config.DRY_RUN:
+            log.info(f"[DRY RUN] FOP Bracket {action}: {contracts}x "
+                     f"{spec.get('symbol')} {spec.get('expiry')} "
+                     f"{spec.get('strike')}{spec.get('right')} "
+                     f"TP=${tp_price:.2f} SL=${sl_price:.2f} ref={order_ref}")
+            return {"dry_run": True, "symbol": spec.get("symbol"),
+                    "order_ref": order_ref, "client_id": None}
+        return self._submit_to_ib(
+            self._ib_place_bracket_fop, spec, contracts, action,
+            tp_price, sl_price, order_ref
+        )
+
+    def _ib_place_bracket_fop(self, spec, contracts, action, tp_price,
+                               sl_price, order_ref):
+        """Runs on IB thread. Builds FuturesOption and submits bracket."""
+        from ib_async import FuturesOption
+        contract = FuturesOption(
+            symbol=spec["symbol"],
+            lastTradeDateOrContractMonth=spec["expiry"],
+            strike=float(spec["strike"]),
+            right=spec["right"],
+            exchange=spec["exchange"],
+            multiplier=str(int(spec["multiplier"])),
+            currency=spec.get("currency", "USD"),
+        )
+        qualified = self.ib.qualifyContracts(contract)
+        if not qualified or not qualified[0] or not qualified[0].conId:
+            raise RuntimeError(
+                f"FOP qualification failed: {spec['symbol']} {spec['expiry']} "
+                f"{spec['strike']}{spec['right']} on {spec['exchange']}"
+            )
+        contract = qualified[0]
+
+        exit_action = "SELL" if action == "BUY" else "BUY"
+        placing_client_id = self.ib.client.clientId
+
+        parent = MarketOrder(action, contracts)
+        parent.orderId = self.ib.client.getReqId()
+        parent.transmit = False
+        if config.IB_ACCOUNT:
+            parent.account = config.IB_ACCOUNT
+        if order_ref:
+            parent.orderRef = order_ref
+
+        tp_order = LimitOrder(exit_action, contracts, tp_price)
+        tp_order.orderId = self.ib.client.getReqId()
+        tp_order.parentId = parent.orderId
+        tp_order.transmit = False
+        if config.IB_ACCOUNT:
+            tp_order.account = config.IB_ACCOUNT
+        if order_ref:
+            tp_order.orderRef = order_ref
+
+        sl_order = StopOrder(exit_action, contracts, sl_price)
+        sl_order.orderId = self.ib.client.getReqId()
+        sl_order.parentId = parent.orderId
+        sl_order.transmit = True
+        if config.IB_ACCOUNT:
+            sl_order.account = config.IB_ACCOUNT
+        if order_ref:
+            sl_order.orderRef = order_ref
+
+        parent_trade = self.ib.placeOrder(contract, parent)
+        tp_trade = self.ib.placeOrder(contract, tp_order)
+        sl_trade = self.ib.placeOrder(contract, sl_order)
+
+        for _ in range(10):
+            self.ib.sleep(0.5)
+            if parent_trade.orderStatus.status == "Filled":
+                break
+        fill_price = parent_trade.orderStatus.avgFillPrice
+        status = parent_trade.orderStatus.status
+        if status != "Filled" and status not in ("Cancelled", "Inactive"):
+            self.ib.sleep(1)
+            if parent_trade.orderStatus.status == "Filled":
+                fill_price = parent_trade.orderStatus.avgFillPrice
+                status = "Filled"
+
+        log.info(f"[IB] FOP BRACKET {action}: {contracts}x {spec['symbol']} "
+                 f"{spec['expiry']} {spec['strike']}{spec['right']} — "
+                 f"parent={parent.orderId} permId={parent_trade.order.permId} "
+                 f"conId={contract.conId} status={status} fill=${fill_price:.2f} "
+                 f"TP={tp_order.orderId}(perm={tp_trade.order.permId}) @ ${tp_price:.2f} "
+                 f"SL={sl_order.orderId}(perm={sl_trade.order.permId}) @ ${sl_price:.2f} "
+                 f"ref={order_ref or '—'}")
+
+        # Reuse the "symbol" key to carry something grep-friendly. We also
+        # populate the structured FOP fields so insert_trade / trade_legs
+        # can persist them as first-class leg data.
+        return {
+            "symbol": (contract.localSymbol or "").strip() or
+                       f"{spec['symbol']}{spec['expiry']}{spec['right']}{int(spec['strike'])}",
+            "contracts": contracts,
+            "order_id": parent.orderId,
+            "perm_id": parent_trade.order.permId,
+            "con_id": contract.conId,
+            "tp_order_id": tp_order.orderId,
+            "tp_perm_id": tp_trade.order.permId,
+            "sl_order_id": sl_order.orderId,
+            "sl_perm_id": sl_trade.order.permId,
+            "status": status,
+            "fill_price": fill_price,
+            "order_ref": order_ref,
+            "client_id": placing_client_id,
+            # Structured FOP fields for DB persistence:
+            "sec_type": "FOP",
+            "underlying": spec["symbol"],
+            "expiry": spec["expiry"],
+            "strike": float(spec["strike"]),
+            "right": spec["right"],
+            "multiplier": int(spec["multiplier"]),
+            "exchange": spec["exchange"],
+            "currency": spec.get("currency", "USD"),
+        }
+
+    # ── FOP chain + quote probes (used by strategy.fop_selector) ─
+    def fop_chain(self, underlying: str, exchange: str) -> list[dict]:
+        """List all listed FOP expiries/strikes/rights for an underlying.
+        Returns one dict per contract with keys: expiry, strike, right, con_id.
+        Empty list on failure (selector then bails gracefully)."""
+        try:
+            return self._submit_to_ib(self._ib_fop_chain, underlying, exchange, timeout=30)
+        except Exception as e:
+            log.warning(f"fop_chain({underlying}) failed: {e}")
+            return []
+
+    def _ib_fop_chain(self, underlying: str, exchange: str) -> list[dict]:
+        from ib_async import FuturesOption
+        spec = FuturesOption(symbol=underlying, exchange=exchange, currency="USD")
+        details = self.ib.reqContractDetails(spec) or []
+        out = []
+        for d in details:
+            c = d.contract
+            out.append({
+                "expiry": getattr(c, "lastTradeDateOrContractMonth", "") or "",
+                "strike": float(getattr(c, "strike", 0) or 0),
+                "right": getattr(c, "right", "") or "",
+                "con_id": getattr(c, "conId", 0),
+                "multiplier": getattr(c, "multiplier", ""),
+                "local_symbol": getattr(c, "localSymbol", ""),
+            })
+        return out
+
+    def fop_quote(self, symbol: str, exchange: str, expiry: str,
+                   strike: float, right: str, multiplier: int) -> dict:
+        """Snapshot market-data probe for a single FOP contract. Returns
+        {bid, ask, volume, open_interest, con_id}. Best-effort — on any
+        IB hiccup returns zeros so the selector rejects the contract."""
+        try:
+            return self._submit_to_ib(self._ib_fop_quote, symbol, exchange,
+                                       expiry, strike, right, multiplier, timeout=15)
+        except Exception as e:
+            log.debug(f"fop_quote {symbol} {expiry} {strike}{right}: {e}")
+            return {"bid": 0, "ask": 0, "volume": 0, "open_interest": 0}
+
+    def _ib_fop_quote(self, symbol, exchange, expiry, strike, right, multiplier):
+        from ib_async import FuturesOption
+        contract = FuturesOption(
+            symbol=symbol, lastTradeDateOrContractMonth=expiry,
+            strike=float(strike), right=right, exchange=exchange,
+            multiplier=str(int(multiplier)), currency="USD",
+        )
+        qualified = self.ib.qualifyContracts(contract)
+        if not qualified or not getattr(qualified[0], "conId", 0):
+            return {"bid": 0, "ask": 0, "volume": 0, "open_interest": 0}
+        c = qualified[0]
+        # Snapshot-ish: subscribe, wait briefly, read ticker, cancel.
+        ticker = self.ib.reqMktData(c, "100,101", snapshot=False, regulatorySnapshot=False)
+        self.ib.sleep(2.0)
+        bid = float(ticker.bid or 0)
+        ask = float(ticker.ask or 0)
+        vol = int(ticker.volume or 0)
+        # Open interest comes on genericTickList 101 → callOpenInterest / putOpenInterest
+        oi = int(getattr(ticker, "callOpenInterest", 0) or
+                 getattr(ticker, "putOpenInterest", 0) or 0)
+        try:
+            self.ib.cancelMktData(c)
+        except Exception:
+            pass
+        return {"bid": bid, "ask": ask, "volume": vol,
+                "open_interest": oi, "con_id": c.conId}
+
     def place_protection_brackets(self, option_symbol: str, contracts: int,
                                    tp_price: float, sl_price: float,
                                    order_ref: str | None = None) -> dict:

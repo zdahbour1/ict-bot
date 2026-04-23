@@ -518,10 +518,14 @@ class TradeEntryManager:
                                  f"{signal.signal_type} {leg} "
                                  f"@ ${signal.entry_price:.2f} "
                                  f"ref={order_ref or '—'}")
+            # Pass strategy_id so the selector can look up ticker sec_type
+            # (ENH-034: FOP branch). select_* tolerate None for backward compat.
             if signal.direction == "SHORT":
-                future = pool.submit(select_and_enter_put, self.client, self.ticker, order_ref)
+                future = pool.submit(select_and_enter_put, self.client,
+                                      self.ticker, order_ref, self.strategy_id)
             else:
-                future = pool.submit(select_and_enter, self.client, self.ticker, order_ref)
+                future = pool.submit(select_and_enter, self.client,
+                                      self.ticker, order_ref, self.strategy_id)
 
             try:
                 return future.result(timeout=60)
