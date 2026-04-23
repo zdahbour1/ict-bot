@@ -450,8 +450,11 @@ SELECT
     t.strategy_id,
     t.ticker,
     t.status,
+    -- Open trades mark-to-market via current_price. Closed legs use
+    -- exit_price. When neither is stamped yet (brand-new leg), fall
+    -- back to entry_price → zero unrealized P&L, never NULL.
     SUM(
-        (COALESCE(l.exit_price, l.current_price, 0) - l.entry_price)
+        (COALESCE(l.exit_price, l.current_price, l.entry_price) - l.entry_price)
         * l.contracts_entered
         * CASE l.direction WHEN 'LONG' THEN 1 ELSE -1 END
         * l.multiplier
@@ -827,11 +830,16 @@ transport, just a new batching wrapper.
 
 ### 6.3 P&L aggregation
 
+Open trades mark-to-market via `current_price` (updated on every exit-manager
+tick). Only when a leg has no current_price yet does the fallback to
+entry_price kick in (zero unrealized P&L). Once a leg closes, exit_price
+takes precedence.
+
 ```sql
--- Per-trade P&L
+-- Per-trade P&L — handles open (unrealized) AND closed (realized) trades
 SELECT t.id,
        SUM(
-         (COALESCE(l.exit_price, 0) - l.entry_price)
+         (COALESCE(l.exit_price, l.current_price, l.entry_price) - l.entry_price)
          * l.contracts
          * CASE l.side WHEN 'BUY' THEN 1 ELSE -1 END
          * l.multiplier

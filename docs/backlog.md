@@ -1,6 +1,6 @@
 # ICT Trading Bot — Backlog
 
-## Last Updated: 2026-04-21 (backlog refresh pass)
+## Last Updated: 2026-04-22 (multi-strategy v2 shipped; open items captured)
 
 Branch: `feature/profitability-research` — HEAD `5d90c6a`.
 
@@ -59,43 +59,81 @@ Status: **Implemented** — 26 unit test files (~4.5k LOC) under `tests/unit/`; 
 
 ---
 
-## CRITICAL — Multi-Strategy Foundation (in progress)
+## Multi-Strategy Foundation — SHIPPED (2026-04-22)
 
-### ENH-030: Multi-strategy v2 architecture
-Spec: `docs/multi_strategy_architecture_v2.md` (commit `c8f5dad`).
-Status: **Design approved, Phase 2 (DB migrations) next.**
+### ENH-030: Multi-strategy v2 architecture ✅
+Spec: `docs/multi_strategy_architecture_v2.md` (design doc approved 2026-04-22, P&L-aggregation note added for open trades).
+Status: **All 6 phases shipped.** Bot running live with 4 active strategies (ICT + ORB + VWAP + delta-neutral).
 
-Six-phase rollout:
-- **Phase 2 — DB foundation**: `db/migrations/007_multi_strategy_v2.sql` — `strategies.is_active`, `trade_legs` table, `trades.ib_client_id`, `trades.n_legs`, backfill. Companion rollback file.
-- **Phase 3 — Settings UI scoping** (see ENH-032).
-- **Phase 4 — Scanner plugin dispatch** (see ENH-024 update).
-- **Phase 5 — Thread-owned close via clientId** (see ARCH-007).
-- **Phase 6 — Multi-leg execution** (see ENH-031). Unblocks ENH-026 delta-neutral.
+Implementation commit map:
+- **Phase 2a** — DB migration (`6e7ed0a`): slim `trades` envelope + `trade_legs` child table, `trades_pre_legs` frozen snapshot, views `v_trades_with_first_leg` + `v_trades_aggregate_pnl`, retired `ACTIVE_STRATEGY` singleton setting.
+- **Phase 2b** — ORM + writer refactor (`3585385`): `Trade` slimmed, new `TradeLeg` model, `insert_trade` writes both tables in one tx.
+- **Phase 2c-1** — strategy/ layer (`6cec13d`, `de4757e`): inline SQL in `strategy/reconciliation.py` retargeted to `trade_legs`.
+- **Phase 2c-2** — dashboard (`2571c6c`, `2247842`, `515c6d5`): routes + analytics views.
+- **Phase 2c-3** — broker orphan cleanup (`1fa664f`).
+- **Phase 3** — Settings UI scoping (`0a1f701`, `f847140`) + Tickers UI scoping (`e22a9d8`, `1873059`).
+- **Phase 4** — Scanner plugin dispatch (`8200dff`, `ac37e43`, `4eb5dc9`, `b7a4c39`): per-strategy per-ticker threads, plugin `class_path` loading, ICT fast-path preserved.
+- **Phase 5** — Thread-owned close (`57ad72c`, `7e5a947`, `fe3900e`, `c522492`): `trades.ib_client_id` stamped at entry, `cancel_order_by_id(preferred_client_id=...)` prefers owner.
+- **Phase 6a** — Multi-leg execution (`b812307`, `3be323a`, `4386409`, `230811b`, `35dae3b`): `LegSpec`, `place_multi_leg_order`, `insert_multi_leg_trade`, delta-neutral plugin skeleton.
+- **Phase 6b** — Close-across-legs (`65dfc96`): `_execute_multi_leg_exit` iterates each leg with the correct closing order (LONG CALL → sell_call, SHORT CALL → buy_call, etc.).
 
-Supersedes `docs/active_strategy_design.md` (singleton `ACTIVE_STRATEGY`). Reactivates + refines `docs/multi_strategy_data_model.md`.
+Follow-up fixes shipped same day:
+- Pool-aware `get_all_working_orders` (`23fd21e`) — stopped spurious bracket restoration.
+- Strategy prefix on `client_trade_id` (`f9c70da`) — refs like `ict-SPY-260422-01`.
+- Per-strategy lock in `get_open_trades_from_db` (`020305a`) — unblocks ORB/VWAP from ICT's ticker slots.
+- `thread_status` CHECK constraint widened (`75d3639`).
+- `v_trades_aggregate_pnl` now marks open trades via `current_price` (migration 009).
 
-### ARCH-007: Stable clientId pool routing
-Spec: `docs/ib_db_correlation.md` §11 + `docs/multi_strategy_architecture_v2.md` §3.4.
-Status: **Proposed, not started.** Part of ENH-030 Phase 5.
+### ARCH-007: Stable clientId pool routing ✅ (Phase 5)
+Spec: `docs/ib_db_correlation.md` §11.
+Status: **Shipped.** `trades.ib_client_id` populated at entry; close flow prefers that pool slot; permId fan-out retained as fallback.
 
-`trades.ib_client_id` is stamped at order placement with the pool slot's clientId. `_atomic_close` reads this column and routes cancel+sell through that specific slot. Falls back to today's permId fan-out (`docs/close_flow_fixes_2026_04_21.md`) when the target clientId isn't currently present in the pool (restart, pool resize).
-
-### ENH-031: Multi-leg trade model (trade_legs table)
+### ENH-031: Multi-leg trade model ✅ (Phase 6a + 6b)
 Spec: `docs/multi_strategy_architecture_v2.md` §2, §6.
-Status: **Design approved, blocked on Phase 2.** Part of ENH-030 Phase 6.
+Status: **Shipped.** `trade_legs` table, `LegSpec` dataclass, `place_multi_leg_order`, `_execute_multi_leg_exit`.
 
-A `trade` row becomes the *logical deal*; its 1..N `trade_legs` rows are the actual IB orders. Accommodates OPT/FOP + STK hedge legs. Single-leg strategies backfilled into one leg and continue working unchanged. New `LegSpec` dataclass + `BaseStrategy.place_legs()` default impl. New `broker/ib_orders.py::place_multi_leg_order()` using OCA grouping. Enables delta-neutral (ENH-026) and similar.
-
-### ENH-032: Settings UI scoped per strategy
+### ENH-032: Settings + Tickers UI scoped per strategy ✅ (Phase 3)
 Spec: `docs/multi_strategy_architecture_v2.md` §5.
-Status: **Design approved.** Part of ENH-030 Phase 3.
+Status: **Shipped.** Strategy dropdown on both Settings and Tickers tabs, inherited-vs-override pills, reset-to-global.
 
-Settings tab gets a strategy dropdown populated from `strategies WHERE is_active AND enabled`. Scoped rows render editable; global rows render greyed with an "inherited" pill. New route `GET /api/settings?strategy_id=<id>`. `db/settings_loader.py::_settings_query` already resolves the chain (strategy > global > env > default) — verify unchanged.
+### ENH-033: Auto-restart on strategy activation — NOT STARTED
+Status: **Deferred polish item.** Today: enabling/disabling a strategy in the UI requires a full bot restart for the scanner spawn loop to pick up the change. Low priority — restart is ~15s.
 
-### ENH-033: Auto-restart on strategy activation
-Status: **Proposed — small polish.**
+---
 
-When a strategy's `is_active` is flipped in the UI, the bot should spawn (or tear down) its per-ticker thread set without requiring a full bot restart. Reuses the boot sequence in `docs/multi_strategy_architecture_v2.md` §3.2.
+## Multi-Strategy — Deferred / Open Items
+
+Tracked here so they don't fall through the cracks. Work when appropriate.
+
+### ENH-034: Live FOP trading path ✅ DESIGN APPROVED, NOT STARTED
+Spec: `docs/fop_live_trading_design.md` (approved by user 2026-04-22).
+Today: FOP works in backtests (`backtest_engine/`), live entry code (`option_selector.py`, `trade_entry_manager.py`) assumes equity options. Need to teach the live path about FOP: CME exchange routing, different multipliers (MES=5, ES=50, etc.), Thursday T-1 quarterly expiry semantics, strike intervals per underlying. Unlocks MES/MNQ/ES/NQ for live scanning across ICT / ORB / VWAP / delta-neutral.
+
+### ENH-035: Production IV detection for DeltaNeutralStrategy.detect()
+Spec: `docs/delta_neutral_strategy.md` (existing) + v2 doc §8 open questions.
+Today: `strategy/delta_neutral_strategy.py` uses a rolling-stddev proxy for IV elevation — rudimentary and doesn't reliably trigger. Production version should consume IB greeks or an external IV feed (e.g. underlying's IV30, VIX structure, or the contract's `modelGreeks.impliedVol` from `reqMktData`).
+
+### ENH-036: Stock-leg close support in multi-leg exit
+Spec: `strategy/exit_executor.py::_close_action_for_leg` (Phase 6b) currently returns None for `sec_type='STK'`.
+Today: option legs close correctly. If a delta-neutral variant uses a stock hedge (4 options + 1 stock = 5 legs), the stock leg is skipped with a WARN and stays open. Add an explicit `close_stock(symbol, qty, direction)` helper on `IBOrdersMixin` and wire it into `_close_action_for_leg`.
+
+### ENH-037: Cross-strategy exposure caps
+Spec: `docs/multi_strategy_architecture_v2.md` §8 open question 7.
+Today: no global limit on concurrent strategies' open positions. Possible to have ICT + ORB + VWAP + delta-neutral all long SPY at once → concentrated risk. Proposed: configurable net-delta or gross-notional cap per underlying, checked in `TradeEntryManager.can_enter()`.
+
+### ENH-038: Delta-neutral backtest support
+Spec: `docs/multi_strategy_architecture_v2.md` §8.
+Today: `backtest_engine/engine.py` is single-leg only. Multi-leg strategies can't be backtested through the existing framework. Requires a multi-leg fill model (per-leg P&L + OCA logic) and schema extension for `backtest_trade_legs`.
+
+### ENH-039: Per-strategy commission accounting
+Spec: v2 doc §8.
+Today: commissions flow through `trade_closes` but aren't attributed back to a strategy in reporting. Nice-to-have for strategy-ranking analytics.
+
+### ENH-040: Trades-tab strategy provenance polish
+Today: strategy name appears as a pill on each trade row (shipped `95924a5`). Next: add a strategy-filter dropdown at the top of the Trades tab (same pattern as Settings / Tickers tabs), and per-strategy P&L summary cards.
+
+### ENH-041: Retire main branch / make profitability-research the default
+Today: `origin/main` is 205 commits behind `origin/feature/profitability-research`. The `main` branch is effectively a stale baseline. Fast-forward main to profitability-research's HEAD and switch GitHub default. One branch, clean slate.
 
 ---
 
