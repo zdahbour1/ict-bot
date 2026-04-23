@@ -136,6 +136,18 @@ CLOSE_MODE_SELL_FIRST = _get("CLOSE_MODE_SELL_FIRST", True, bool)
 # Seconds to wait for IB to auto-cancel brackets after position flattens.
 POST_SELL_BRACKET_TIMEOUT = _get("POST_SELL_BRACKET_TIMEOUT", 5.0, float)
 
+# ── FOP (Futures Options) live selection rules ───────────
+# Liquidity-first gate per docs/fop_live_trading_design.md.
+# If no candidate contract passes these, the FOP scanner SKIPS the
+# trade entirely — better no-trade than a thin trade.
+FOP_MAX_DTE             = _get("FOP_MAX_DTE", 60, int)
+FOP_MIN_OPEN_INTEREST   = _get("FOP_MIN_OPEN_INTEREST", 500, int)
+FOP_MIN_VOLUME          = _get("FOP_MIN_VOLUME", 100, int)
+FOP_MAX_SPREAD_PCT      = _get("FOP_MAX_SPREAD_PCT", 0.15, float)
+# Preference order, comma-separated: quarterly|monthly|weekly|daily
+FOP_EXPIRY_PREF         = _get("FOP_EXPIRY_PREF",
+                                "quarterly,monthly,weekly", str)
+
 # ── Trade Window ──────────────────────────────────────────
 TRADE_WINDOW_START_PT  = _get("TRADE_WINDOW_START_PT", 6, int)
 TRADE_WINDOW_START_MIN = _get("TRADE_WINDOW_START_MIN", 30, int)
