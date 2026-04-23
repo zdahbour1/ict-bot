@@ -300,6 +300,20 @@ Status: **In Progress.** Partially shipped:
 - Probe tools under `tools/` — **shipped**.
 - **Live trading not yet wired** — `fop_live_trading_design.md` is the plan.
 
+### Design docs index (2026-04-24)
+
+Pre-implementation design docs for every future enhancement below:
+
+- **`docs/design_dn_phase_a.md`** — ENH-052 IVR gate + ENH-055 50%/21-DTE exit + ENH-056 earnings/FOMC blackout. **5 days total effort**.
+- **`docs/design_dn_phase_b.md`** — ENH-053 DTE 30-60 + ENH-054 16Δ/5Δ strikes + ENH-057 VIX regime filter. **4 days + backtest recalibration**.
+- **`docs/design_dn_phase_c.md`** — ENH-058 gamma/vega loops + ENH-059 IVR-bucketed sizing. **5 days, gated on 2 weeks of A+B paper validation**.
+- **`docs/design_multi_tenancy_schema.md`** — **FOUNDATIONAL**: users table + `owner_user_id` FK + RLS. Blocks all tenant-aware features. **5-6 days**.
+- **`docs/design_enh_018_auth.md`** — auth + 2FA with multi-tenancy foresight. Phase 1: 2-4 days. Phase 2: 2-3 weeks.
+- **`docs/design_enh_020_cloud_deploy.md`** — per-tenant Fly.io + Neon + Cloudflare stack. Phase 1-2: 3-5 days. Full commercial: 4-8 weeks.
+- **`docs/design_enh_022_profiling.md`** — py-spy + prometheus_client + optional Grafana Cloud. Phase A: 2-3 days.
+- **`docs/design_enh_025_ios_app.md`** — PWA first (days), Capacitor wrap second (1-2 weeks), SwiftUI native deferred.
+- **`docs/design_arch_004_ci.md`** — GitHub Actions unit-test + lint + docker-build pipeline. **Half day**.
+
 ### DN optimization backlog (ENH-052..059) — per `docs/enh_026_dn_research_and_design.md`
 
 Full research + design in `docs/enh_026_dn_research_and_design.md` (1466 words, 2026-04-23 eve). TL;DR: the six biggest missing edges are IV-rank gating, 30-60 DTE window, constant-delta strike selection (16Δ short / 5Δ long), 50% profit-target + 21-DTE hard-exit, earnings/FOMC blackout, and VIX term-structure regime filter.
