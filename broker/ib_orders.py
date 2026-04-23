@@ -13,6 +13,79 @@ import config
 log = logging.getLogger(__name__)
 
 
+def _compute_combo_net_limit(mixin, leg_contracts, action: str,
+                              legs: list) -> float | None:
+    """Compute a limit price for a combo order using each leg's current
+    quote. Returns None when the auto-limit feature is off or when
+    quotes are unavailable (falls back to MarketOrder in the caller).
+
+    For a SPREAD order the IB convention is:
+    - ``action="BUY"``  → caller pays up to ``limit_price`` net debit
+      (positive value means max debit willing to pay; for a net credit
+      spread you'd submit action=SELL instead)
+    - ``action="SELL"`` → caller receives at least ``limit_price`` net
+      credit
+
+    We compute signed net premium = sum(direction * leg_mid) across
+    legs. For iron condors this is typically a net credit (positive
+    for the SELLER). We then widen by a configurable slippage buffer
+    so the order crosses the spread rather than posting at mid.
+
+    Implementation keeps things simple: if ANY leg's quote fails,
+    return None and let the caller fall back to MKT. Better to
+    slip than to miss the entry.
+    """
+    # Read config once; cheap DB call.
+    try:
+        from db.settings_cache import get_bool, get_float
+        auto = get_bool("DN_COMBO_AUTO_LIMIT", default=True)
+        slip_bps = get_float("DN_COMBO_LIMIT_SLIP_BPS", default=200.0)
+    except Exception:
+        auto = True
+        slip_bps = 200.0
+    if not auto:
+        return None
+    # Fetch mid for each leg via the existing single-leg quote path.
+    midprices = []
+    for i, leg, contract in leg_contracts:
+        sym = leg.get("symbol")
+        if not sym:
+            return None
+        try:
+            px = mixin.get_option_price(sym)
+            if not px or px <= 0:
+                return None
+            midprices.append((leg, float(px)))
+        except Exception as e:
+            log.warning(f"[COMBO-LIMIT] quote failed for {sym}: {e} — "
+                        f"falling back to MKT")
+            return None
+    # Signed net premium per share-multiplier. For iron condor the
+    # standard sign convention:
+    #   short leg (SELL) → we receive premium → positive contribution
+    #   long leg  (BUY)  → we pay premium → negative contribution
+    net = 0.0
+    for leg, px in midprices:
+        direction = (leg.get("direction") or "LONG").upper()
+        sign = +1 if direction == "SHORT" else -1
+        net += sign * px
+    # Widen by the slippage buffer so the combo crosses the spread.
+    # Direction of widening depends on order action:
+    #   action="SELL" (taking credit) → accept a LOWER credit → subtract
+    #   action="BUY"  (paying debit)  → accept a HIGHER debit  → add
+    # slip_bps is basis points of |net|; default 200 bps = 2%.
+    buf = abs(net) * (slip_bps / 10_000.0)
+    if action.upper() == "SELL":
+        limit = max(net - buf, 0.05)
+    else:
+        limit = max(abs(net) + buf, 0.05)
+        # BUY a net-credit spread is unusual; use positive debit limit
+    # IB rejects negative limit prices on spreads — clamp to 0.05
+    log.info(f"[COMBO-LIMIT] net_premium=${net:+.2f} action={action} "
+             f"slip={slip_bps:.0f}bps → limit=${limit:.2f}")
+    return round(limit, 2)
+
+
 def _check_not_flex(contract, option_symbol: str):
     """Reject Flex options before order placement. IB rejects these with code 201.
     Flex options have secType='FOP' or tradingClass different from symbol."""
@@ -865,6 +938,15 @@ class IBOrdersMixin:
             bag.comboLegs.append(combo_leg)
 
         qty = int(legs[0].get("contracts") or 1)
+        # IB slippage fix (2026-04-23): when caller hasn't specified a
+        # limit_price AND the auto-limit mode is on, compute a net
+        # mid-price from each leg's quote so the combo fills closer to
+        # fair value instead of blindly MKT. Falls through to MKT if
+        # any leg quote is unavailable or DN_COMBO_AUTO_LIMIT=false.
+        if limit_price is None:
+            limit_price = _compute_combo_net_limit(
+                self, leg_contracts, action, legs
+            )
         if limit_price is not None:
             order = LimitOrder(action, qty, float(limit_price))
         else:

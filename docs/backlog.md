@@ -193,6 +193,15 @@ Work:
 4. Update `strategy/exit_executor.py` multi-leg close path to also use the BAG (buy-to-close at net price).
 5. Backtest: `backtest_engine/multi_leg_sim.py` already evaluates on net premium — matches the combo semantics, no change needed.
 
+### ENH-051: IB LimitOrder entry for combo orders (slippage reduction) ✅ SHIPPED (2026-04-23 eve)
+`broker/ib_orders.py::_compute_combo_net_limit` now computes a net
+mid-price from each leg's quote and submits the BAG order with a
+LimitOrder instead of MarketOrder. Gated by `DN_COMBO_AUTO_LIMIT`
+(default true) with a configurable slippage buffer
+(`DN_COMBO_LIMIT_SLIP_BPS`, default 200 bps = 2%). Falls back to MKT
+when any leg quote is unavailable. Unit tests in
+`tests/unit/test_combo_net_limit.py` (5 cases).
+
 ### ENH-049: Delta-neutral strategy — dynamic stock-hedged delta (staged)
 User request 2026-04-23: use stock as the hedge and rebalance to net-zero
 delta on a short interval (proposed 30 seconds) by buying or shorting

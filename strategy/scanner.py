@@ -116,6 +116,36 @@ class Scanner:
         self._scans_today = 0
         self._last_date = None
 
+    def _load_ticker_spec(self) -> dict | None:
+        """ENH-048 — look up ticker metadata (sec_type / exchange /
+        contract_month) so the live data provider can build the right
+        IB contract. Returns None for plain STK/OPT to preserve legacy
+        behavior on fast paths."""
+        try:
+            from db.connection import get_session
+            from sqlalchemy import text
+            session = get_session()
+            if session is None:
+                return None
+            try:
+                row = session.execute(text(
+                    "SELECT sec_type, exchange, currency "
+                    "FROM tickers "
+                    "WHERE symbol=:s AND strategy_id=:sid AND is_active=true "
+                    "LIMIT 1"
+                ), {"s": self.ticker,
+                    "sid": self.strategy_id}).fetchone()
+            finally:
+                session.close()
+            if not row:
+                return None
+            sec, exch, ccy = row
+            if (sec or "OPT").upper() in ("OPT", "STK"):
+                return None   # legacy path handles these
+            return {"sec_type": sec, "exchange": exch, "currency": ccy or "USD"}
+        except Exception:
+            return None
+
     def _thread_key(self) -> str:
         """Unique scanner thread_status key per (strategy, ticker).
 
@@ -247,8 +277,16 @@ class Scanner:
             return
 
         # ── Fetch and aggregate bars (IB real-time) ──────
+        # ENH-048: look up the ticker's sec_type/exchange/contract_month
+        # so we can route FOP (futures-options like MNQ/MES) correctly.
+        # Without this, the live data provider builds a Stock contract
+        # for everything → futures-options fail with Error 200 and no
+        # bars come back → scanner skips every cycle.
+        ticker_spec = self._load_ticker_spec()
         if hasattr(self.client, '_submit_to_ib'):
-            bars_1m = get_bars_1m_ib(self.client, self.ticker, days_back=5)
+            bars_1m = get_bars_1m_ib(self.client, self.ticker,
+                                       days_back=5,
+                                       spec=ticker_spec)
         else:
             bars_1m = get_bars_1m(self.ticker, days_back=5)
         if bars_1m.empty:

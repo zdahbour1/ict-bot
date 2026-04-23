@@ -98,12 +98,35 @@ export default function ThreadsTab() {
     return () => clearInterval(iv);
   }, []);
 
-  const active = threads.filter(t => ['running', 'scanning', 'idle'].includes(t.status)).length;
-  const staleCount = threads.filter(t => getHealthState(t.updated_at) === 'stale' && t.status !== 'stopped').length;
-  const deadCount = threads.filter(t => getHealthState(t.updated_at) === 'dead' && t.status !== 'stopped').length;
-  const totalErrors = threads.reduce((s, t) => s + t.error_count, 0);
-  const totalScans = threads.reduce((s, t) => s + t.scans_today, 0);
-  const totalTrades = threads.reduce((s, t) => s + t.trades_today, 0);
+  // ENH-043: parse strategy out of thread_name for filtering
+  //   ict scanners:      'scanner-AAPL'          → 'ict'
+  //   orb / vwap / dn:   'scanner-orb-AAPL'      → 'orb' (name includes strategy)
+  //   global threads:    'bot-main' / 'delta-hedger' / 'reconciliation' / 'exit_manager' / 'entry-manager'
+  const parseStrategyFromThreadName = (name: string): string | null => {
+    if (name === 'delta-hedger') return 'delta_neutral';
+    if (!name.startsWith('scanner-')) return null;  // global thread
+    const parts = name.split('-');
+    // 'scanner-AAPL' → parts=[scanner, AAPL] (length 2) → ict
+    if (parts.length === 2) return 'ict';
+    // 'scanner-orb-AAPL' or 'scanner-vwap_revert-AAPL' or 'scanner-delta_neutral-AAPL'
+    return parts[1];
+  };
+  const [strategyFilter, setStrategyFilter] = useState<string>('');
+  const distinctStrategies = useMemo(
+    () => [...new Set(threads.map(t => parseStrategyFromThreadName(t.thread_name)).filter(Boolean))].sort() as string[],
+    [threads]
+  );
+  const filteredThreads = useMemo(() => {
+    if (!strategyFilter) return threads;
+    return threads.filter(t => parseStrategyFromThreadName(t.thread_name) === strategyFilter);
+  }, [threads, strategyFilter]);
+
+  const active = filteredThreads.filter(t => ['running', 'scanning', 'idle'].includes(t.status)).length;
+  const staleCount = filteredThreads.filter(t => getHealthState(t.updated_at) === 'stale' && t.status !== 'stopped').length;
+  const deadCount = filteredThreads.filter(t => getHealthState(t.updated_at) === 'dead' && t.status !== 'stopped').length;
+  const totalErrors = filteredThreads.reduce((s, t) => s + t.error_count, 0);
+  const totalScans = filteredThreads.reduce((s, t) => s + t.scans_today, 0);
+  const totalTrades = filteredThreads.reduce((s, t) => s + t.trades_today, 0);
 
   const showErrors = async (ticker: string, threadName: string) => {
     setErrorPopup({ ticker, threadName });
@@ -259,7 +282,7 @@ export default function ThreadsTab() {
   ], []);
 
   const table = useReactTable({
-    data: threads,
+    data: filteredThreads,
     columns,
     state: { sorting },
     onSortingChange: setSorting,
@@ -286,6 +309,18 @@ export default function ThreadsTab() {
           <button onClick={refetch} className="px-3 py-1.5 text-sm bg-[#21262d] border border-[#30363d] text-gray-400 rounded-md hover:text-white">
             Refresh
           </button>
+          {/* ENH-043 strategy filter */}
+          <select
+            value={strategyFilter}
+            onChange={e => setStrategyFilter(e.target.value)}
+            className="px-3 py-1.5 text-sm bg-[#21262d] border border-[#30363d] text-gray-300 rounded-md hover:text-white cursor-pointer"
+            title="Filter threads by strategy"
+          >
+            <option value="">All strategies</option>
+            {distinctStrategies.map(s => (
+              <option key={s} value={s}>{s}</option>
+            ))}
+          </select>
           <button onClick={triggerReconcile} disabled={reconciling}
             className={`px-3 py-1.5 text-sm border rounded-md ${reconciling ? 'bg-green-500/20 border-green-500/30 text-green-400' : 'bg-[#21262d] border-[#30363d] text-gray-400 hover:text-white'}`}>
             {reconciling ? 'Reconciling...' : 'Reconcile Now'}

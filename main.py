@@ -147,6 +147,15 @@ def main():
 
     exit_manager.start()
 
+    # Register the IB client in a process-level singleton so strategies
+    # that need a live quote (e.g. ENH-035 ATM-IV lookup for DN) can
+    # reach it without plumbing through every call.
+    try:
+        from broker.ib_singleton import set_client
+        set_client(client)
+    except Exception:
+        pass
+
     # ── Delta-hedger (ENH-049) — monitors DN trades for delta drift
     # and rebalances via stock orders. Gated by the
     # DN_DELTA_HEDGE_ENABLED setting (default false). Always spawned;

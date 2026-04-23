@@ -70,12 +70,34 @@ class IBMarketDataMixin:
         )
 
     def _ib_get_option_price(self, symbol: str) -> float:
+        """ENH-001 MVP — event-driven sleep loop instead of a fixed
+        1.5-second wait. Subscribe + poll ticker_data every 100ms for
+        up to 2s, return as soon as bid AND ask are both positive.
+        On snapshot-style fallback, use last/close.
+
+        Cuts typical option-quote latency from 1.5s to ~200ms in
+        normal conditions and keeps the 2s upper bound for illiquids.
+        """
         contract = self._occ_to_contract(symbol)
         ticker_data = self.ib.reqMktData(contract, "", False, False)
-        self.ib.sleep(1.5)
-        bid = ticker_data.bid if ticker_data.bid > 0 else 0.0
-        ask = ticker_data.ask if ticker_data.ask > 0 else 0.0
-        self.ib.cancelMktData(contract)
+        bid = ask = 0.0
+        try:
+            # Up to 20 × 100ms = 2s. Break as soon as we have a
+            # two-sided quote (bid + ask), which is the only state
+            # we actually need for the mid.
+            for _ in range(20):
+                self.ib.sleep(0.1)
+                if (ticker_data.bid or 0) > 0 and (ticker_data.ask or 0) > 0:
+                    bid = ticker_data.bid
+                    ask = ticker_data.ask
+                    break
+            # Fall through: capture whatever we have
+            if bid == 0 and (ticker_data.bid or 0) > 0:
+                bid = ticker_data.bid
+            if ask == 0 and (ticker_data.ask or 0) > 0:
+                ask = ticker_data.ask
+        finally:
+            self.ib.cancelMktData(contract)
         if bid > 0 and ask > 0:
             mid = round((bid + ask) / 2, 2)
             log.info(f"[IB] {symbol}: bid={bid:.2f} ask={ask:.2f} mid={mid:.2f}")

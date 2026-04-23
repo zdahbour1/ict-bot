@@ -461,6 +461,22 @@ def _reconcile(client, exit_manager, ib_positions):
     except Exception as e:
         log.warning(f"[RECONCILE] PASS 4 bracket-status refresh error: {e}")
 
+    # ══════════════════════════════════════════════════════════
+    # PASS 5: Duplicate / unreferenced bracket cleanup (ENH-044)
+    # ══════════════════════════════════════════════════════════
+    # Finds any working SELL option order whose orderId isn't
+    # referenced by ib_tp_order_id / ib_sl_order_id on any open leg.
+    # Porting cleanup_orphan_brackets.py's logic into the recurring
+    # reconcile cycle so stale duplicates get auto-cancelled instead
+    # of accumulating (today we saw 95 stale SLs build up).
+    pass5_cancelled = 0
+    try:
+        from db.settings_cache import get_bool
+        if get_bool("RECONCILE_AUTO_CANCEL_DUP_BRACKETS", default=True):
+            pass5_cancelled = _pass5_cancel_unreferenced_brackets(client)
+    except Exception as e:
+        log.warning(f"[RECONCILE] PASS 5 duplicate cleanup error: {e}")
+
     # ── Summary ──
     total_ib = len(ib_by_con_id)
     total_db = len(db_open_trades)
@@ -622,6 +638,98 @@ def _restore_brackets_for(session, client, trade_id: int, ticker: str, symbol: s
                "tp_price": tp_price, "sl_price": sl_price,
                "oca_group": result.get("oca_group")},
     )
+
+
+def _pass5_cancel_unreferenced_brackets(client) -> int:
+    """ENH-044 — cancel working SELL option orders that no open leg
+    references. Porting cleanup_orphan_brackets.py's aggressive mode
+    into the bot's recurring reconcile cycle so duplicate brackets
+    don't accumulate between manual runs.
+
+    Only cancels orders where:
+      - status is Submitted / PreSubmitted / PendingSubmit
+      - action == 'SELL' (brackets; we never auto-cancel BUYs here)
+      - secType in ('OPT','FOP')
+      - orderId is NOT in {ib_tp_order_id,ib_sl_order_id} across all
+        open legs, AND is NOT a recent (<1hr) entry ib_order_id
+
+    Returns the number of orders cancelled.
+    """
+    ACTIVE = {"Submitted", "PreSubmitted", "PendingSubmit"}
+    try:
+        working = client.get_all_working_orders()
+    except Exception as e:
+        log.warning(f"[RECONCILE] PASS 5 get_all_working_orders: {e}")
+        return 0
+
+    # Build tracked sets from the DB
+    from db.connection import get_session
+    session = get_session()
+    if session is None:
+        return 0
+    try:
+        rows = session.execute(text(
+            "SELECT l.ib_tp_order_id, l.ib_sl_order_id "
+            "FROM trades t JOIN trade_legs l ON l.trade_id=t.id "
+            "WHERE t.status='open' AND l.leg_status='open' AND l.contracts_open>0"
+        )).fetchall()
+        tracked_brackets: set[int] = set()
+        for tp, sl in rows:
+            if tp:
+                tracked_brackets.add(int(tp))
+            if sl:
+                tracked_brackets.add(int(sl))
+        ent_rows = session.execute(text(
+            "SELECT ib_order_id FROM trade_legs "
+            "WHERE ib_order_id IS NOT NULL "
+            "  AND entry_time > NOW() - INTERVAL '1 hour'"
+        )).fetchall()
+        tracked_entries: set[int] = {int(r[0]) for r in ent_rows if r[0]}
+    finally:
+        session.close()
+
+    orphans = []
+    for o in working:
+        try:
+            status = o.get("status")
+            if status not in ACTIVE:
+                continue
+            if o.get("action") != "SELL":
+                continue
+            if o.get("secType") not in ("OPT", "FOP"):
+                continue
+            oid = int(o.get("orderId") or 0)
+            if oid in tracked_brackets or oid in tracked_entries:
+                continue
+            orphans.append(o)
+        except Exception:
+            continue
+
+    if not orphans:
+        return 0
+    log.warning(f"[RECONCILE] PASS 5: found {len(orphans)} unreferenced "
+                f"bracket(s) — cancelling")
+    cancelled = 0
+    for o in orphans:
+        oid = int(o.get("orderId") or 0)
+        try:
+            if hasattr(client, "cancel_order_by_id"):
+                client.cancel_order_by_id(oid)
+                cancelled += 1
+        except Exception as e:
+            log.warning(f"[RECONCILE] PASS 5 cancel orderId={oid}: {e}")
+    try:
+        from strategy.audit import log_trade_action
+        log_trade_action(
+            None, "pass5_dup_bracket_cleanup", "reconciliation",
+            f"Cancelled {cancelled}/{len(orphans)} unreferenced "
+            f"bracket orders",
+            level="warn",
+            extra={"cancelled": cancelled, "found": len(orphans)},
+        )
+    except Exception:
+        pass
+    return cancelled
 
 
 def _get_db_open_con_ids() -> set:

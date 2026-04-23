@@ -477,6 +477,32 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
   const [auditTrade, setAuditTrade] = useState<{ id: number; ticker: string } | null>(null);
   const [detailsTrade, setDetailsTrade] = useState<Trade | null>(null);
   // ENH-047: track which multi-leg trades are expanded to show legs.
+  // ENH-040 per-strategy summary cards
+  const [strategySummary, setStrategySummary] = useState<any[] | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const p = periodFilter || 'today';
+        const res = await fetch(`/api/trades/strategy-summary?period=${p}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled) setStrategySummary(data.strategies || []);
+      } catch {}
+    })();
+    return () => { cancelled = true; };
+  }, [periodFilter, trades]);
+
+  // ENH-010 compact density toggle — persisted in localStorage
+  const [compact, setCompact] = useState<boolean>(() => {
+    try { return localStorage.getItem('tradeTable.compact') === 'true'; }
+    catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('tradeTable.compact', String(compact)); }
+    catch {}
+  }, [compact]);
+
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
   const toggleExpanded = (tid: number) => {
     setExpandedIds(prev => {
@@ -763,6 +789,11 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
           Export Excel
         </button>
         {lastUpdated && <span className="text-xs text-gray-500">Updated: {lastUpdated.toLocaleTimeString()}</span>}
+        <button onClick={() => setCompact(!compact)}
+          title="Toggle compact row height (ENH-010)"
+          className={`px-2 py-1.5 text-xs border rounded-md ${compact ? 'bg-blue-500/20 border-blue-500/30 text-blue-400' : 'bg-[#21262d] border-[#30363d] text-gray-400'} hover:text-white`}>
+          {compact ? 'Compact' : 'Normal'}
+        </button>
         <select value={periodFilter} onChange={e => setPeriodFilter(e.target.value)}
           className="px-2 py-1.5 text-sm bg-[#21262d] border border-[#30363d] text-gray-300 rounded-md">
           <option value="today">Today</option>
@@ -789,6 +820,44 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
         </select>
       </div>
 
+      {/* ENH-040 Per-strategy P&L summary cards */}
+      {strategySummary && strategySummary.length > 0 && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+          {strategySummary.map(s => {
+            const palette: Record<string, string> = {
+              ict: 'border-blue-500/30 bg-blue-500/5',
+              orb: 'border-purple-500/30 bg-purple-500/5',
+              vwap_revert: 'border-amber-500/30 bg-amber-500/5',
+              delta_neutral: 'border-emerald-500/30 bg-emerald-500/5',
+            };
+            const cls = palette[s.strategy] || 'border-[#30363d] bg-[#161b22]';
+            const pnlColor = s.net_pnl > 0 ? 'text-green-400'
+              : s.net_pnl < 0 ? 'text-red-400' : 'text-gray-400';
+            return (
+              <div key={s.strategy}
+                onClick={() => setStrategyFilter(strategyFilter === s.strategy ? '' : s.strategy)}
+                className={`rounded-lg border ${cls} p-3 cursor-pointer hover:brightness-125 ${strategyFilter === s.strategy ? 'ring-2 ring-blue-500/50' : ''}`}
+                title={s.display_name}>
+                <div className="flex items-baseline justify-between mb-1">
+                  <span className="text-xs font-mono text-gray-400">{s.strategy}</span>
+                  <span className="text-[10px] text-gray-600">
+                    {s.trade_count} trade{s.trade_count === 1 ? '' : 's'}
+                    {s.open_count > 0 && <span className="text-blue-400 ml-1">· {s.open_count} open</span>}
+                  </span>
+                </div>
+                <div className={`text-xl font-semibold ${pnlColor}`}>
+                  {s.net_pnl >= 0 ? '+' : ''}${s.net_pnl.toFixed(2)}
+                </div>
+                <div className="text-[10px] text-gray-500 mt-1">
+                  P&L ${s.total_pnl.toFixed(2)} − comm ${s.total_commission.toFixed(2)} ·
+                  win {s.win_rate.toFixed(0)}% ({s.wins}/{s.wins + s.losses})
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       {/* Table */}
       <div className="bg-[#161b22] border border-[#30363d] rounded-lg overflow-x-auto">
         <table className="w-full text-sm">
@@ -814,7 +883,7 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
                 <>
                   <tr key={row.id} className={`hover:bg-[#1c2128] ${t.status === 'closed' ? 'opacity-60' : ''}`}>
                     {row.getVisibleCells().map(cell => (
-                      <td key={cell.id} className="px-3 py-2.5 border-b border-[#21262d] whitespace-nowrap">
+                      <td key={cell.id} className={`${compact ? 'px-2 py-1 text-xs' : 'px-3 py-2.5'} border-b border-[#21262d] whitespace-nowrap`}>
                         {flexRender(cell.column.columnDef.cell, cell.getContext())}
                       </td>
                     ))}

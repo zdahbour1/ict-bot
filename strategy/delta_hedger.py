@@ -129,6 +129,11 @@ class DeltaHedger:
         # row only on transitions (avoid spamming 2 rows every 30s).
         self._last_enabled: Optional[bool] = None
         self._last_trade_count: int = -1
+        # ENH-049 Stage 3: price at the last rebalance check per ticker.
+        # When the underlying moves by more than a configurable fraction
+        # since the last check, we skip the 30s sleep and rebalance
+        # immediately. Cheap event-driven trigger on top of the timer.
+        self._last_price_by_ticker: dict[str, float] = {}
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -158,11 +163,63 @@ class DeltaHedger:
                 self._one_pass()
             except Exception as e:
                 log.error(f"[DELTA-HEDGER] pass error: {e}", exc_info=True)
-            # Sleep in small steps so stop() is responsive
-            for _ in range(int(self.interval_sec * 2)):
+            # ENH-049 Stage 3: event-driven trigger.
+            # Instead of a flat 30-sec sleep, check every second for a
+            # large underlying move on any open DN ticker. If any
+            # ticker moves by more than DN_EVENT_TRIGGER_BPS basis
+            # points, break out of the sleep and rebalance now.
+            # Falls back to the normal interval_sec timer when nothing
+            # triggers.
+            total_sleep_steps = int(self.interval_sec * 2)
+            for _ in range(total_sleep_steps):
                 if self._stop.is_set():
                     break
+                if self._event_trigger_fired():
+                    break
                 time.sleep(0.5)
+
+    def _event_trigger_fired(self) -> bool:
+        """Poll last-known prices for open DN tickers; return True when
+        any move exceeds the threshold. Updates the cache as a
+        side-effect."""
+        try:
+            from db.settings_cache import get_bool, get_float
+            if not get_bool("DN_EVENT_DRIVEN_HEDGE", default=False):
+                return False
+            threshold_bps = get_float("DN_EVENT_TRIGGER_BPS",
+                                       default=30.0)  # 30 bps = 0.30%
+        except Exception:
+            return False
+        try:
+            trades = _fetch_open_dn_trades()
+        except Exception:
+            return False
+        if not trades:
+            return False
+        for t in trades:
+            ticker = t.get("ticker")
+            if not ticker:
+                continue
+            try:
+                px = float(self.client.get_realtime_equity_price(ticker))
+            except Exception:
+                continue
+            prev = self._last_price_by_ticker.get(ticker)
+            self._last_price_by_ticker[ticker] = px
+            if prev is None or prev <= 0:
+                continue
+            move_bps = abs(px - prev) / prev * 10_000.0
+            if move_bps >= threshold_bps:
+                log.info(f"[DELTA-HEDGER] event-trigger: {ticker} moved "
+                         f"{move_bps:.0f}bps ({prev:.2f} → {px:.2f}) — "
+                         f"firing early rebalance")
+                _sys_log("info",
+                         f"Event-driven trigger: {ticker} moved "
+                         f"{move_bps:.0f}bps (threshold {threshold_bps:.0f}bps)",
+                         {"ticker": ticker, "prev": prev, "now": px,
+                          "move_bps": round(move_bps, 1)})
+                return True
+        return False
 
     def _is_enabled(self) -> bool:
         """Read the DN_DELTA_HEDGE_ENABLED flag from the settings cache."""

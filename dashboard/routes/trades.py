@@ -234,6 +234,81 @@ def get_trade_audit(trade_id: int):
         session.close()
 
 
+@router.get("/trades/strategy-summary")
+def strategy_summary(period: str = "today"):
+    """Per-strategy aggregate P&L cards (ENH-039 + ENH-040).
+
+    Returns one row per strategy with: trade_count, wins, losses,
+    win_rate, total_pnl_usd, total_commission, net_pnl (pnl − commission),
+    avg_trade_pnl. Period: today | week | month | all.
+    """
+    session = get_session()
+    if not session:
+        raise HTTPException(503, "Database not available")
+    try:
+        from sqlalchemy import text
+        where_period = ""
+        if period == "today":
+            where_period = "AND t.entry_time::date = CURRENT_DATE"
+        elif period == "week":
+            where_period = "AND t.entry_time > NOW() - INTERVAL '7 days'"
+        elif period == "month":
+            where_period = "AND t.entry_time > NOW() - INTERVAL '30 days'"
+        rows = session.execute(text(f"""
+          SELECT s.name AS strategy,
+                 s.display_name,
+                 COUNT(t.id) AS trade_count,
+                 COUNT(*) FILTER (WHERE t.exit_result='WIN')  AS wins,
+                 COUNT(*) FILTER (WHERE t.exit_result='LOSS') AS losses,
+                 COUNT(*) FILTER (WHERE t.status='open')      AS open_count,
+                 COALESCE(SUM(t.pnl_usd), 0)                  AS total_pnl,
+                 -- ENH-039: per-strategy commission accounting.
+                 -- trade_legs.commission has the per-leg fill cost when
+                 -- populated; fall back to 0 so missing values don't NULL
+                 -- the whole sum.
+                 COALESCE(SUM(
+                   CASE WHEN EXISTS (
+                     SELECT 1 FROM information_schema.columns
+                     WHERE table_name='trade_legs' AND column_name='commission'
+                   ) THEN (SELECT COALESCE(SUM(l.commission),0)
+                            FROM trade_legs l WHERE l.trade_id=t.id)
+                   ELSE 0
+                   END), 0)                                    AS total_commission
+            FROM strategies s
+            LEFT JOIN trades t
+              ON t.strategy_id = s.strategy_id
+              {where_period}
+           WHERE s.enabled = true
+           GROUP BY s.name, s.display_name
+           ORDER BY s.name
+        """)).fetchall()
+
+        result = []
+        for r in rows:
+            tc = int(r[2] or 0)
+            wins = int(r[3] or 0)
+            losses = int(r[4] or 0)
+            pnl = float(r[6] or 0)
+            comm = float(r[7] or 0)
+            closed_total = wins + losses
+            result.append({
+                "strategy": r[0],
+                "display_name": r[1],
+                "trade_count": tc,
+                "wins": wins,
+                "losses": losses,
+                "open_count": int(r[5] or 0),
+                "win_rate": round(wins / closed_total * 100, 1) if closed_total else 0.0,
+                "total_pnl": round(pnl, 2),
+                "total_commission": round(comm, 2),
+                "net_pnl": round(pnl - comm, 2),
+                "avg_trade_pnl": round(pnl / tc, 2) if tc else 0.0,
+            })
+        return {"period": period, "strategies": result}
+    finally:
+        session.close()
+
+
 @router.get("/trades/{trade_id}/legs")
 def get_trade_legs(trade_id: int):
     """Return every leg of a trade, ordered by leg_index.

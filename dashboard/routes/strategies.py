@@ -169,10 +169,30 @@ def _toggle_enabled(strategy_id: int, new_value: bool) -> dict:
         ), {"val": new_value, "sid": strategy_id})
         session.commit()
 
+        # ENH-033 — trigger a bot bounce so scanners re-spawn against
+        # the new enabled-strategy set without user having to manually
+        # stop/start. Best-effort; failure is logged but not raised.
+        restart_triggered = False
+        try:
+            from db.settings_cache import get_bool
+            if get_bool("AUTO_RESTART_ON_STRATEGY_TOGGLE", default=True):
+                import httpx, os
+                sidecar = os.getenv("BOT_SIDECAR_URL",
+                                    "http://host.docker.internal:9000")
+                with httpx.Client(timeout=3.0) as c:
+                    c.post(f"{sidecar}/stop")
+                    c.post(f"{sidecar}/start")
+                restart_triggered = True
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                f"auto-restart after strategy toggle failed: {e}")
+
         return {
             "strategy_id": strategy_id,
             "name": name,
             "enabled": new_value,
+            "restart_triggered": restart_triggered,
         }
     finally:
         session.close()

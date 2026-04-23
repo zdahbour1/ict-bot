@@ -168,6 +168,27 @@ class TradeEntryManager:
         if ticker_has_open or self._entry_pending:
             return False, "already in trade"
 
+        # ENH-037: cross-strategy exposure cap per underlying.
+        # With 4 strategies running concurrently, all could pile into
+        # SPY simultaneously — unbounded concentration. Cap the total
+        # open trades (any strategy) on the same ticker at
+        # MAX_CONCURRENT_PER_UNDERLYING (default 2, configurable).
+        try:
+            from db.settings_cache import get_int
+            cap = get_int("MAX_CONCURRENT_PER_UNDERLYING", default=2)
+        except Exception:
+            cap = 2
+        if cap > 0:
+            same_underlying = sum(
+                1 for t in self.exit_manager.open_trades
+                if t.get("ticker") == self.ticker
+            )
+            if same_underlying >= cap:
+                return False, (
+                    f"cross-strategy cap hit ({same_underlying}/{cap} "
+                    f"open on {self.ticker})"
+                )
+
         # Daily trade limit
         if self._trades_today >= MAX_TRADES_PER_DAY:
             return False, f"daily limit ({MAX_TRADES_PER_DAY}) reached"

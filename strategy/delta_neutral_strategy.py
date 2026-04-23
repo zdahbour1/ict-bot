@@ -137,13 +137,27 @@ class DeltaNeutralStrategy(BaseStrategy):
         if self._has_open_trade:
             return []
 
-        # IV proxy: rolling std of pct-change, annualized. Cheap and
-        # good-enough to exercise the plumbing.
+        # ENH-035 — production IV: compute implied vol from ATM option
+        # chain bid/ask midpoints when available, fall back to the
+        # legacy rolling-std pct-change proxy when we don't have an
+        # option client to quote. ATM IV tracks real vol much more
+        # closely than historical realized vol so the entry gate is
+        # meaningful rather than "volatile stock" = elevated.
+        iv_proxy = 0.0
+        iv_source = "proxy"
         try:
-            closes = bars_1m["close"].astype(float).tail(60)
-            iv_proxy = float(closes.pct_change().dropna().std() * (252 * 390) ** 0.5)
+            iv_proxy = self._compute_atm_iv(bars_1m, ticker)
+            if iv_proxy > 0:
+                iv_source = "bs_implied"
         except Exception:
-            return []
+            pass
+        if iv_proxy <= 0:
+            try:
+                closes = bars_1m["close"].astype(float).tail(60)
+                iv_proxy = float(closes.pct_change().dropna().std()
+                                  * (252 * 390) ** 0.5)
+            except Exception:
+                return []
         if iv_proxy < self.iv_threshold:
             return []
 
@@ -170,6 +184,7 @@ class DeltaNeutralStrategy(BaseStrategy):
             confidence=min(1.0, iv_proxy / max(self.iv_threshold, 1e-6)),
             details={
                 "iv_proxy": iv_proxy,
+                "iv_source": iv_source,
                 "current_price": current_price,
                 "strike_interval": self.strike_interval,
                 "wing_width": self.wing_width,
@@ -178,6 +193,61 @@ class DeltaNeutralStrategy(BaseStrategy):
         )
         self.alerts_today += 1
         return [sig]
+
+    def _compute_atm_iv(self, bars_1m, ticker: str) -> float:
+        """ENH-035 — compute ATM implied vol from live option quotes.
+
+        Tries two strategies before giving up (returns 0.0 on every
+        failure path so caller falls back to the rolling-std proxy):
+
+        1. If an IB client is reachable at module scope, fetch the
+           ATM call & put mid prices, back out Black-Scholes implied
+           vol from each, average.
+        2. Otherwise 0.0.
+
+        Keeps the strategy pure-functional by doing lazy imports —
+        the IB client gets plumbed in via the broker singleton only
+        if the deployment has one, otherwise we stay in backtest-safe
+        mode.
+        """
+        try:
+            from backtest_engine.option_pricer import implied_vol
+        except Exception:
+            return 0.0
+        try:
+            from broker.ib_singleton import get_client
+            client = get_client()
+        except Exception:
+            return 0.0
+        if client is None:
+            return 0.0
+        try:
+            current = float(bars_1m["close"].iloc[-1])
+        except Exception:
+            return 0.0
+        from datetime import date, datetime, timedelta, timezone
+        # Pick next Friday ≥ 1 DTE as the expiry we quote against.
+        expiry_str = self.default_expiry or _next_expiry_yyyymmdd()
+        try:
+            exp_date = datetime.strptime(expiry_str, "%Y%m%d").date()
+            dte = max((exp_date - date.today()).days, 1)
+            T = dte / 365.0
+        except Exception:
+            return 0.0
+        atm = _round_to_interval(current, self.strike_interval)
+        ivs = []
+        for right in ("C", "P"):
+            try:
+                sym = _format_occ(ticker, expiry_str, right, atm)
+                px = float(client.get_option_price(sym))
+                if px <= 0:
+                    continue
+                iv = implied_vol(px, current, atm, T, r=0.04, right=right)
+                if iv and 0.02 < iv < 3.0:   # sanity-bound
+                    ivs.append(iv)
+            except Exception:
+                continue
+        return float(sum(ivs) / len(ivs)) if ivs else 0.0
 
     # ── Multi-leg execution spec (Phase 6) ────────────────────
     def place_legs(self, signal: Signal) -> List[LegSpec]:
