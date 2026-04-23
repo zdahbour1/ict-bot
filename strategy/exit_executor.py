@@ -490,10 +490,15 @@ def _close_action_for_leg(leg: dict) -> tuple[str, str] | None:
     direction='SHORT' + right='P' → buy_put
     """
     sec_type = (leg.get("sec_type") or "OPT").upper()
-    if sec_type == "STK":
-        return None  # stock hedge legs need a separate path (TODO)
-    right = (leg.get("right") or "").upper()
     direction = (leg.get("direction") or "").upper()
+    # ENH-036: stock hedge legs (e.g. delta-neutral's stock overlay).
+    if sec_type == "STK":
+        if direction == "LONG":
+            return ("sell_stock", "sell-to-close long stock hedge")
+        if direction == "SHORT":
+            return ("buy_stock", "buy-to-close short stock hedge")
+        return None
+    right = (leg.get("right") or "").upper()
     if direction == "LONG":
         if right == "C": return ("sell_call", "sell-to-close long call")
         if right == "P": return ("sell_put",  "sell-to-close long put")

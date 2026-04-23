@@ -369,6 +369,7 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [tickerFilter, setTickerFilter] = useState<string>('');
+  const [strategyFilter, setStrategyFilter] = useState<string>('');
   const [periodFilter, setPeriodFilter] = useState<string>('today');
   const [refreshing, setRefreshing] = useState(false);
   const [auditTrade, setAuditTrade] = useState<{ id: number; ticker: string } | null>(null);
@@ -398,10 +399,15 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
 
     if (statusFilter) result = result.filter(t => t.status === statusFilter);
     if (tickerFilter) result = result.filter(t => t.ticker === tickerFilter);
+    if (strategyFilter) result = result.filter(t => (t as any).strategy_name === strategyFilter);
     return result;
-  }, [trades, statusFilter, tickerFilter, periodFilter]);
+  }, [trades, statusFilter, tickerFilter, strategyFilter, periodFilter]);
 
   const tickers = useMemo(() => [...new Set(trades.map(t => t.ticker))].sort(), [trades]);
+  const strategyNames = useMemo(
+    () => [...new Set(trades.map(t => (t as any).strategy_name).filter(Boolean))].sort(),
+    [trades]
+  );
 
   const columns = useMemo(() => [
     col.accessor('status', {
@@ -645,6 +651,11 @@ export default function TradeTable({ trades, onRefresh, lastUpdated }: { trades:
           className="px-2 py-1.5 text-sm bg-[#21262d] border border-[#30363d] text-gray-300 rounded-md">
           <option value="">All tickers</option>
           {tickers.map(t => <option key={t} value={t}>{t}</option>)}
+        </select>
+        <select value={strategyFilter} onChange={e => setStrategyFilter(e.target.value)}
+          className="px-2 py-1.5 text-sm bg-[#21262d] border border-[#30363d] text-gray-300 rounded-md">
+          <option value="">All strategies</option>
+          {strategyNames.map(s => <option key={s} value={s}>{s}</option>)}
         </select>
       </div>
 

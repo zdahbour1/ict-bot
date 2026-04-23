@@ -45,6 +45,49 @@ class IBOrdersMixin:
     def sell_put(self, option_symbol: str, contracts: int) -> object:
         return self._place_order(option_symbol, contracts, "SELL", "put")
 
+    # Stock close helpers (ENH-036) — used by multi-leg exit flow when a
+    # delta-neutral trade uses a stock hedge leg. MKT order, same
+    # fill-wait + result-dict contract as _place_order.
+    def sell_stock(self, ticker_symbol: str, shares: int,
+                    exchange: str = "SMART") -> object:
+        return self._submit_to_ib(self._ib_place_stock_order,
+                                   ticker_symbol, shares, "SELL", exchange)
+
+    def buy_stock(self, ticker_symbol: str, shares: int,
+                   exchange: str = "SMART") -> object:
+        return self._submit_to_ib(self._ib_place_stock_order,
+                                   ticker_symbol, shares, "BUY", exchange)
+
+    def _ib_place_stock_order(self, ticker_symbol, shares, action, exchange):
+        """Runs on IB thread. Places a stock MKT order (for hedge-leg
+        entry + close). Minimal — no bracket, no stop — caller already
+        manages the position via the options legs."""
+        from ib_async import Stock
+        contract = Stock(ticker_symbol, exchange, "USD")
+        qualified = self.ib.qualifyContracts(contract)
+        if not qualified or not qualified[0].conId:
+            raise RuntimeError(f"STK qualification failed for {ticker_symbol}")
+        contract = qualified[0]
+        order = MarketOrder(action, shares)
+        if config.IB_ACCOUNT:
+            order.account = config.IB_ACCOUNT
+        trade = self.ib.placeOrder(contract, order)
+        for _ in range(10):
+            self.ib.sleep(0.5)
+            if trade.orderStatus.status == "Filled":
+                break
+        fill_price = trade.orderStatus.avgFillPrice
+        status = trade.orderStatus.status
+        log.info(f"[IB] STK {action}: {shares}x {ticker_symbol} — "
+                 f"orderId={trade.order.orderId} permId={trade.order.permId} "
+                 f"conId={contract.conId} status={status} fill=${fill_price:.2f}")
+        return {
+            "symbol": ticker_symbol, "contracts": shares,
+            "order_id": trade.order.orderId,
+            "perm_id": trade.order.permId, "con_id": contract.conId,
+            "status": status, "fill_price": fill_price,
+        }
+
     def _place_order(self, option_symbol: str, contracts: int,
                      action: str, desc: str) -> object:
         if config.DRY_RUN:

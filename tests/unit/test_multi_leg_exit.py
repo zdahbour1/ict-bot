@@ -45,10 +45,18 @@ class TestCloseActionForLeg:
         leg = {"sec_type": "FOP", "direction": "SHORT", "right": "P"}
         assert _close_action_for_leg(leg) == ("buy_put", "buy-to-close short put")
 
-    def test_stock_leg_returns_none(self):
+    def test_stock_leg_long_sells_to_close(self):
+        """ENH-036: stock hedge legs now close via sell_stock / buy_stock."""
         from strategy.exit_executor import _close_action_for_leg
         leg = {"sec_type": "STK", "direction": "LONG", "right": None}
-        assert _close_action_for_leg(leg) is None
+        assert _close_action_for_leg(leg) == ("sell_stock",
+                                               "sell-to-close long stock hedge")
+
+    def test_stock_leg_short_buys_to_close(self):
+        from strategy.exit_executor import _close_action_for_leg
+        leg = {"sec_type": "STK", "direction": "SHORT", "right": None}
+        assert _close_action_for_leg(leg) == ("buy_stock",
+                                               "buy-to-close short stock hedge")
 
     def test_bad_shape_returns_none(self):
         from strategy.exit_executor import _close_action_for_leg
@@ -153,7 +161,9 @@ class TestExecuteMultiLegExit:
         client.buy_call.assert_not_called()
         client.sell_put.assert_not_called()
 
-    def test_stock_leg_is_skipped_with_warn(self):
+    def test_stock_leg_closes_via_sell_stock(self):
+        """ENH-036: hedge stock leg is now closed via sell_stock (long)
+        or buy_stock (short) instead of being skipped."""
         from strategy.exit_executor import _execute_multi_leg_exit
         legs = [
             {"leg_id": 1, "leg_index": 0, "leg_role": "short_call",
@@ -169,13 +179,9 @@ class TestExecuteMultiLegExit:
         trade = {"ticker": "SPY", "db_id": 99, "n_legs": 2}
         with patch("strategy.exit_executor._fetch_open_legs", return_value=legs):
             _execute_multi_leg_exit(client, trade, reason="TEST")
-        # Option leg closed; stock leg skipped (not yet supported)
-        client.buy_call.assert_called_once()
-        # No generic "close stock" method called
-        assert not any(
-            name in ("sell_stock", "close_stock")
-            for name in [c[0] for c in client.mock_calls]
-        )
+        # Option leg closed AND stock leg closed.
+        client.buy_call.assert_called_once_with("SPY260515C00450000", 1)
+        client.sell_stock.assert_called_once_with("SPY", 100)
 
     def test_missing_db_id_aborts(self):
         from strategy.exit_executor import _execute_multi_leg_exit
