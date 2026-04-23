@@ -183,6 +183,74 @@ class TestThreadStatusHeartbeat:
         assert "2" in hb.call_args.args[1]
 
 
+class TestSystemLogIntegration:
+    """The hedger must emit to system_log (component='delta-hedger')
+    so the Threads page log viewer can surface its events."""
+
+    def test_flag_transition_emits_system_log(self):
+        """Flipping DN_DELTA_HEDGE_ENABLED false→true should write
+        one row to system_log; no-change passes should not spam."""
+        from strategy.delta_hedger import DeltaHedger
+        hedger = DeltaHedger(client=MagicMock())
+        # Seed with 'False' as the last-known state.
+        hedger._last_enabled = False
+        with patch("db.settings_cache.get_bool", return_value=True), \
+             patch("strategy.delta_hedger._fetch_open_dn_trades",
+                    return_value=[]), \
+             patch.object(hedger, "_refresh_config"), \
+             patch("strategy.delta_hedger._sys_log") as sl, \
+             patch("strategy.delta_hedger._update_thread_row"):
+            hedger._one_pass()
+        # Expect one transition log ("false → true"). Trade-count
+        # change from -1 → 0 also logs, so 2 total is the floor.
+        assert sl.call_count >= 1
+        first_call = sl.call_args_list[0]
+        assert "flipped" in first_call.args[1].lower() or \
+               first_call.args[1].lower().startswith("dn_delta_hedge")
+
+    def test_no_transition_no_system_log_spam(self):
+        """When the flag stays the same and trades stay empty,
+        subsequent passes shouldn't emit any sys_log rows."""
+        from strategy.delta_hedger import DeltaHedger
+        hedger = DeltaHedger(client=MagicMock())
+        hedger._last_enabled = False
+        with patch("db.settings_cache.get_bool", return_value=False), \
+             patch("strategy.delta_hedger._sys_log") as sl, \
+             patch("strategy.delta_hedger._update_thread_row"):
+            hedger._one_pass()
+            hedger._one_pass()
+            hedger._one_pass()
+        assert sl.call_count == 0, (
+            "Disabled flag + no trades should not emit log rows — "
+            f"got {sl.call_count}"
+        )
+
+    def test_rebalance_plan_emits_system_log(self):
+        """A rebalance decision (BUY/SELL) must log to system_log."""
+        from strategy.delta_hedger import DeltaHedger
+        hedger = DeltaHedger(client=MagicMock())
+        hedger._last_enabled = True
+        hedger.client.get_realtime_equity_price = MagicMock(return_value=500.0)
+        hedger.client.buy_stock = MagicMock(return_value={"fill_price": 500.1, "order_id": 1})
+        hedger.client.sell_stock = MagicMock(return_value={"fill_price": 500.0, "order_id": 2})
+        fake_trade = {
+            "trade_id": 1, "ticker": "SPY",
+            "hedge_shares": 0,
+            "legs": [{"leg_role": "short_call", "sec_type": "OPT",
+                       "symbol": "X", "strike": 500, "right": "C",
+                       "expiry": "20260515", "multiplier": 100,
+                       "direction": "SHORT", "contracts_open": 1}] * 4,
+        }
+        with patch("strategy.delta_hedger._sys_log") as sl, \
+             patch("strategy.delta_hedger.compute_trade_net_delta",
+                    return_value=100.0), \
+             patch("strategy.delta_hedger._update_trade_hedge_shares"), \
+             patch("strategy.delta_hedger._record_hedge_event"):
+            hedger._rebalance_one(fake_trade)
+        # At minimum: one "planning" log + one "filled" log
+        assert sl.call_count >= 2
+
+
 class TestDTEdays:
     def test_future_expiry(self):
         from strategy.delta_hedger import _dte_days

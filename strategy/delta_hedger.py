@@ -125,6 +125,10 @@ class DeltaHedger:
         self.band_shares = band_shares or _DEFAULT_BAND_SHARES
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        # Remember the last-known flag state so we emit a system_log
+        # row only on transitions (avoid spamming 2 rows every 30s).
+        self._last_enabled: Optional[bool] = None
+        self._last_trade_count: int = -1
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -134,11 +138,14 @@ class DeltaHedger:
         self._thread.start()
         log.info(f"[DELTA-HEDGER] started — interval={self.interval_sec}s "
                  f"band={self.band_shares} shares")
-        # Register with the Threads page so the user can see the
-        # hedger is alive and what it's doing.
         _update_thread_row("idle",
                            f"started — interval={self.interval_sec}s "
                            f"band={self.band_shares}")
+        _sys_log("info",
+                 f"Delta-hedger thread started "
+                 f"(interval={self.interval_sec}s, band={self.band_shares})",
+                 {"interval_sec": self.interval_sec,
+                  "band_shares": self.band_shares})
 
     def stop(self) -> None:
         self._stop.set()
@@ -176,12 +183,29 @@ class DeltaHedger:
             pass
 
     def _one_pass(self) -> None:
-        if not self._is_enabled():
+        enabled = self._is_enabled()
+        # Log only the flag-transition, not every heartbeat.
+        if enabled != self._last_enabled:
+            if self._last_enabled is not None:
+                _sys_log("info",
+                         f"DN_DELTA_HEDGE_ENABLED flipped "
+                         f"{self._last_enabled} → {enabled}",
+                         {"enabled": enabled})
+            self._last_enabled = enabled
+        if not enabled:
             _update_thread_row("idle",
                                "DN_DELTA_HEDGE_ENABLED is false — monitor only")
             return
         self._refresh_config()
         trades = _fetch_open_dn_trades()
+        # Log trade-count transitions only (0→N or N→0 or N→M).
+        if len(trades) != self._last_trade_count:
+            _sys_log("info",
+                     f"Open DN trade count: {self._last_trade_count} → "
+                     f"{len(trades)}",
+                     {"count": len(trades),
+                      "trade_ids": [t.get("trade_id") for t in trades]})
+            self._last_trade_count = len(trades)
         if not trades:
             _update_thread_row("running",
                                f"no open DN trades | interval={self.interval_sec}s "
@@ -196,6 +220,12 @@ class DeltaHedger:
             except Exception as e:
                 log.warning(
                     f"[DELTA-HEDGER] trade_id={t.get('trade_id')} skip: {e}")
+                _sys_log("error",
+                         f"Rebalance skip trade_id={t.get('trade_id')} "
+                         f"ticker={t.get('ticker')}: {type(e).__name__}: {e}",
+                         {"trade_id": t.get("trade_id"),
+                          "ticker": t.get("ticker"),
+                          "error": str(e)[:300]})
 
     def _rebalance_one(self, trade: dict) -> None:
         ticker = trade["ticker"]
@@ -221,6 +251,14 @@ class DeltaHedger:
         if action_plan is None:
             return
         action, shares = action_plan
+        _sys_log("info",
+                 f"{ticker} tid={trade_id}: planning {action} {shares}x "
+                 f"(net_delta={net_delta:+.1f}, hedge={current_hedge:+d}, "
+                 f"band=±{self.band_shares})",
+                 {"ticker": ticker, "trade_id": trade_id,
+                  "net_delta": round(net_delta, 2),
+                  "current_hedge": current_hedge,
+                  "action": action, "shares": shares})
         # Place the hedge order
         try:
             method = (self.client.buy_stock if action == "BUY"
@@ -232,6 +270,11 @@ class DeltaHedger:
             log.error(f"[DELTA-HEDGER] {ticker} {action} {shares} failed: {e}")
             _record_hedge_event(trade_id, ticker, action, shares, 0.0,
                                 None, net_delta, error=str(e)[:200])
+            _sys_log("error",
+                     f"{ticker} tid={trade_id}: {action} {shares}x FAILED "
+                     f"({type(e).__name__}: {e})",
+                     {"ticker": ticker, "trade_id": trade_id,
+                      "error": str(e)[:300]})
             return
         # Update envelope + audit record
         signed_delta = shares if action == "BUY" else -shares
@@ -241,6 +284,14 @@ class DeltaHedger:
                             order_id, net_delta)
         log.info(f"[DELTA-HEDGER] {ticker} {action} {shares}x "
                  f"fill=${fill_price:.2f} → hedge_shares={new_hedge:+d}")
+        _sys_log("info",
+                 f"{ticker} tid={trade_id}: {action} {shares}x "
+                 f"fill=${fill_price:.2f} → hedge_shares={new_hedge:+d}",
+                 {"ticker": ticker, "trade_id": trade_id,
+                  "action": action, "shares": shares,
+                  "fill_price": fill_price,
+                  "new_hedge_shares": new_hedge,
+                  "order_id": order_id})
 
 
 # ── DB helpers ───────────────────────────────────────────────────
@@ -324,6 +375,17 @@ def _update_thread_row(status: str, message: str) -> None:
     try:
         from db.writer import update_thread_status
         update_thread_status("delta-hedger", None, status, message)
+    except Exception:
+        pass
+
+
+def _sys_log(level: str, message: str, details: dict | None = None) -> None:
+    """Write to the ``system_log`` table under component='delta-hedger'
+    so the Threads page log viewer (which filters by component) can
+    surface our events. Never raises."""
+    try:
+        from db.writer import add_system_log
+        add_system_log("delta-hedger", level, message, details or {})
     except Exception:
         pass
 
