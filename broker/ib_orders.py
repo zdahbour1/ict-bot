@@ -923,6 +923,30 @@ class IBOrdersMixin:
             "ib_client_id": placing_client_id,
         }
 
+    def place_combo_close_order(self, legs: list[dict],
+                                  order_ref: str | None = None,
+                                  limit_price: float | None = None) -> dict:
+        """Close a previously-opened combo position by submitting the
+        REVERSE Bag. Every leg's action is flipped (BUY ↔ SELL) so the
+        combined order nets out the position in one IB order.
+
+        Uses the same result dict shape as ``place_combo_order`` so the
+        exit path can call either side symmetrically.
+        """
+        reversed_legs: list[dict] = []
+        for leg in legs:
+            d = dict(leg)
+            dir_ = (d.get("direction") or "LONG").upper()
+            d["direction"] = "SHORT" if dir_ == "LONG" else "LONG"
+            reversed_legs.append(d)
+        # IB accepts the Bag "BUY" convention whether it's a net-credit
+        # or net-debit close; the comboLegs' per-leg actions carry the
+        # real sign. We keep outer action=BUY for consistency.
+        return self.place_combo_order(
+            reversed_legs, order_ref=order_ref,
+            action="BUY", limit_price=limit_price,
+        )
+
     # ── Bracket SL modification ───────────────────────────────
     def update_bracket_sl(self, sl_order_id: int, new_sl_price: float) -> bool:
         """Update the stop loss leg of a bracket order."""

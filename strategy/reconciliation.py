@@ -325,11 +325,16 @@ def _reconcile(client, exit_manager, ib_positions):
         if session is not None:
             # Phase 2c: symbol, ib_tp_perm_id, ib_sl_perm_id all live on
             # trade_legs now; read via the flattened view.
+            # ENH-046: also pull n_legs — multi-leg defined-risk trades
+            # (iron condor, spread) don't want per-leg bracket restoration.
             rows = session.execute(text(
-                "SELECT id, ticker, symbol, ib_tp_perm_id, ib_sl_perm_id "
-                "FROM v_trades_with_first_leg WHERE status='open'"
+                "SELECT t.id, t.ticker, l.symbol, l.ib_tp_perm_id, "
+                "       l.ib_sl_perm_id, COALESCE(t.n_legs, 1) "
+                "FROM trades t "
+                "JOIN trade_legs l ON l.trade_id = t.id AND l.leg_index = 0 "
+                "WHERE t.status='open'"
             )).fetchall()
-            for tid, tkr, sym, tp_pid, sl_pid in rows:
+            for tid, tkr, sym, tp_pid, sl_pid, n_legs in rows:
                 tp_status = None
                 tp_price = None
                 tp_order_id = None
@@ -370,6 +375,15 @@ def _reconcile(client, exit_manager, ib_positions):
                     "tpp": tp_price, "slp": sl_price,
                     "tpo": tp_order_id, "slo": sl_order_id,
                     "id": tid})
+
+                # ENH-046: Multi-leg defined-risk trades (iron condors,
+                # spreads, hedged) have their max loss capped by the
+                # structure itself — per-leg SL brackets trigger
+                # prematurely and are not how these positions are meant
+                # to be protected. Skip the restore path for n_legs > 1;
+                # risk is handled at the combo / trade-level instead.
+                if int(n_legs or 1) > 1:
+                    continue
 
                 # Unprotected detection — both TP AND SL gone.
                 tp_bad = tp_status is None or tp_status in _TERMINAL_BAD or tp_status == "MISSING"

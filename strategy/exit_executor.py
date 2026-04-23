@@ -548,6 +548,64 @@ def _execute_multi_leg_exit(client, trade: dict, reason: str) -> float | None:
                    f"n_legs={len(legs)} "
                    f"legs=[{', '.join(l.get('leg_role') or l.get('symbol','?') for l in legs)}]")
 
+    # ENH-046 Phase 2: prefer closing the combo with ONE reversed-Bag
+    # order when the flag is on. Falls back to per-leg closes below
+    # on any exception so this is a safe upgrade.
+    import config as _cfg
+    use_combo = bool(getattr(_cfg, "USE_COMBO_ORDERS_FOR_MULTI_LEG", False))
+    if use_combo and hasattr(client, "place_combo_close_order"):
+        # Shape the legs the way the broker method expects (flat dicts
+        # with direction + contracts + symbol + leg metadata).
+        combo_legs = [{
+            "sec_type": l.get("sec_type") or "OPT",
+            "symbol": l["symbol"],
+            "direction": l.get("direction") or "LONG",
+            "contracts": int(l.get("contracts_open") or 0),
+            "strike": l.get("strike"),
+            "right": l.get("right"),
+            "expiry": l.get("expiry"),
+            "multiplier": l.get("multiplier", 100),
+            "exchange": l.get("exchange", "SMART"),
+            "currency": l.get("currency", "USD"),
+            "leg_role": l.get("leg_role"),
+            "underlying": l.get("underlying") or ticker,
+        } for l in legs if int(l.get("contracts_open") or 0) > 0]
+        if combo_legs:
+            try:
+                close_ref = (trade.get("client_trade_id") or "") + "-close"
+                result = client.place_combo_close_order(
+                    combo_legs, order_ref=close_ref, limit_price=None,
+                )
+                if result and result.get("all_filled"):
+                    _trace(ticker,
+                           f"MULTI-LEG EXIT: combo close SUCCESS — "
+                           f"ONE IB order (orderId={result.get('combo_order_id')}) "
+                           f"closed all {len(combo_legs)} legs at "
+                           f"net={result.get('net_fill_price'):+.2f}")
+                    # Still best-effort cancel any stale brackets on legs.
+                    for leg in legs:
+                        for pid_key in ("ib_tp_perm_id", "ib_sl_perm_id"):
+                            pid = leg.get(pid_key)
+                            if not pid:
+                                continue
+                            try:
+                                if hasattr(client, "cancel_order_by_perm_id"):
+                                    client.cancel_order_by_perm_id(int(pid))
+                            except Exception:
+                                pass
+                    return None
+                else:
+                    _trace(ticker,
+                           f"MULTI-LEG EXIT: combo close partial/failed "
+                           f"(status={result.get('legs') and result['legs'][0].get('status')}) "
+                           f"— falling back to per-leg closes",
+                           "warn")
+            except Exception as e:
+                _trace(ticker,
+                       f"MULTI-LEG EXIT: combo close raised {type(e).__name__}: "
+                       f"{e} — falling back to per-leg closes",
+                       "warn")
+
     preferred_cid = trade.get("ib_client_id")
     sent = 0
     skipped = 0
