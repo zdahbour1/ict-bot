@@ -300,6 +300,24 @@ Status: **In Progress.** Partially shipped:
 - Probe tools under `tools/` — **shipped**.
 - **Live trading not yet wired** — `fop_live_trading_design.md` is the plan.
 
+### DN optimization backlog (ENH-052..059) — per `docs/enh_026_dn_research_and_design.md`
+
+Full research + design in `docs/enh_026_dn_research_and_design.md` (1466 words, 2026-04-23 eve). TL;DR: the six biggest missing edges are IV-rank gating, 30-60 DTE window, constant-delta strike selection (16Δ short / 5Δ long), 50% profit-target + 21-DTE hard-exit, earnings/FOMC blackout, and VIX term-structure regime filter.
+
+- **ENH-052** — IV-rank gate (252-day IVR from ENH-035 IV; require IVR ≥ 30 tunable). **Phase A, highest priority.**
+- **ENH-053** — DTE selection 30-60 (currently next-Friday ≤ 7). Phase B.
+- **ENH-054** — Constant-delta strike selector (16Δ/5Δ) replacing fixed-dollar wings. Phase B.
+- **ENH-055** — 50% profit-target exit + 21-DTE hard-exit. **Phase A.**
+- **ENH-056** — Earnings + FOMC/CPI blackout filter. **Phase A.**
+- **ENH-057** — VIX / VIX3M term-structure regime filter (backwardation → pause entries). Phase B.
+- **ENH-058** — Gamma + vega independent loops (roll triggers, vega caps). Phase C.
+- **ENH-059** — IVR-bucketed position sizing (risk-parity-lite). Phase C.
+
+Deviation from Bejar-Garcia: he is silent on profit targets and DTE; design overrides with projectfinance's 50% / 21-DTE rule (backed by 71k-trade sample). Hedge cadence (30s / 0.30%) already aligns via ENH-049.
+
+### ENH-026: Delta-Neutral Strategy (Iron Condor) ✅ SHIPPED in skeleton; OPTIMIZATION TRACKED BY ENH-052..059
+Shipped as `strategy/delta_neutral_strategy.py` (Phase 6). Core mechanics verified tonight. Profit optimization deferred to ENH-052..059 per research in `docs/enh_026_dn_research_and_design.md`.
+
 ### ENH-050: Combo per-leg fill-price fallback ✅ SHIPPED (2026-04-23 eve)
 Four-stage recovery in ``broker/ib_orders.py::_ib_place_combo``:
 exec fills → ib.executions() stream → post-fill quote → proportional
