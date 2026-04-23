@@ -440,6 +440,24 @@ function LegsPanel({ tradeId }: { tradeId: number }) {
                 </td>
                 <td className="py-1 pr-3 text-right">
                   {l.entry_price != null ? `$${l.entry_price.toFixed(2)}` : '—'}
+                  {l.price_source && l.price_source !== 'exec' && l.price_source !== 'mkt_single' && (
+                    <span
+                      title={
+                        l.price_source === 'quote'
+                          ? 'ESTIMATE — mid-quote used after IB did not report per-leg fill price'
+                          : l.price_source === 'proportional'
+                          ? 'ESTIMATE — proportional split of combo net_fill_price (last-resort fallback)'
+                          : `price_source=${l.price_source}`
+                      }
+                      className={`ml-1 px-1 py-0.5 rounded text-[9px] font-mono uppercase ${
+                        l.price_source === 'quote'
+                          ? 'bg-amber-500/20 text-amber-400'
+                          : 'bg-red-500/20 text-red-400'
+                      }`}
+                    >
+                      est
+                    </span>
+                  )}
                 </td>
                 <td className="py-1 pr-3 text-right">
                   {closePx != null ? `$${closePx.toFixed(2)}` : '—'}

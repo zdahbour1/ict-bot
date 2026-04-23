@@ -286,7 +286,18 @@ Status: **In Progress.** Partially shipped:
 - Probe tools under `tools/` — **shipped**.
 - **Live trading not yet wired** — `fop_live_trading_design.md` is the plan.
 
-### ENH-007: Option Rolling Logic
+### ENH-050: Combo per-leg fill-price fallback ✅ SHIPPED (2026-04-23 eve)
+Four-stage recovery in ``broker/ib_orders.py::_ib_place_combo``:
+exec fills → ib.executions() stream → post-fill quote → proportional
+split. Every leg tagged with ``price_source`` (exec / quote /
+proportional) persisted to ``trade_legs.price_source`` and surfaced
+in the drill-down UI as an ``est`` badge on non-exec prices.
+Companion one-shot ``scripts/backfill_combo_fill_prices.py`` repairs
+existing ``entry_price=0`` rows. Design doc:
+``docs/enh_050_combo_leg_fill_price.md``. Tests:
+``tests/unit/test_combo_fill_price_recovery.py`` (5 cases).
+
+### ENH-007: Option Rolling Logic — LOW PRIORITY (user 2026-04-23)
 Spec: `docs/close_flow_fixes_2026_04_21.md` (same-strike guard + roll-loop fix).
 Status: **Shipped.** Close step uses `execute_exit()` (BUG-035). Same-strike guard prevents roll-loop churn (commit `a1f23df`). Stale-cache false-positive in POST-SELL bracket verify fixed (commit `949c7da`). Roll trigger threshold config in settings table (BUG-043).
 

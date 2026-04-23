@@ -983,20 +983,79 @@ class IBOrdersMixin:
         status = ib_trade.orderStatus.status
         filled = (status == "Filled")
 
-        # Surface per-leg rows so downstream persistence doesn't change.
-        # All legs share the ONE combo order's orderId; per-leg fill
-        # prices come from ib_trade.fills if IB breaks them out, else
-        # zero.
-        leg_fill_prices: dict[int, float] = {}
+        # ── ENH-050 — per-leg fill-price recovery chain ─────────
+        # IB doesn't always break out per-leg prices on combo fills.
+        # Three-stage fallback so every leg gets a sensible price and
+        # a ``price_source`` tag for visibility:
+        #   1) ib_trade.fills   → price_source='exec'
+        #   2) ib.executions()  → price_source='exec'  (broader view)
+        #   3) live quote mid   → price_source='quote'
+        #   4) proportional     → price_source='proportional'
+        leg_fill_prices: dict[int, tuple[float, str]] = {}
+        leg_con_ids = {int(c.conId): (i, leg) for i, leg, c in leg_contracts}
+
+        # Stage 1: primary — ib_trade.fills
         for fill in getattr(ib_trade, "fills", []) or []:
-            # fill.contract is a leg-level contract; match by conId
             c_id = getattr(fill.contract, "conId", None)
-            if c_id is not None:
-                leg_fill_prices[int(c_id)] = float(fill.execution.avgPrice)
+            if c_id is None:
+                continue
+            c_id = int(c_id)
+            if c_id in leg_con_ids and c_id not in leg_fill_prices:
+                px = float(fill.execution.avgPrice or 0.0)
+                if px > 0:
+                    leg_fill_prices[c_id] = (px, "exec")
+
+        # Stage 2: executions stream — richer than fills when Bag routing
+        # produced split-leg executions on different venues.
+        if any(cid not in leg_fill_prices for cid in leg_con_ids):
+            try:
+                for exec_row in (self.ib.executions() or []):
+                    try:
+                        if exec_row.execution.orderId != ib_trade.order.orderId:
+                            continue
+                        c_id = int(getattr(exec_row.contract, "conId", 0) or 0)
+                        if c_id in leg_con_ids and c_id not in leg_fill_prices:
+                            px = float(exec_row.execution.avgPrice or 0.0)
+                            if px > 0:
+                                leg_fill_prices[c_id] = (px, "exec")
+                    except Exception:
+                        continue
+            except Exception as e:
+                log.debug(f"[COMBO] executions() fallback failed: {e}")
+
+        # Stage 3: post-fill mid quote for any leg still missing.
+        for c_id, (i, leg) in leg_con_ids.items():
+            if c_id in leg_fill_prices:
+                continue
+            sym = leg.get("symbol")
+            if not sym:
+                continue
+            try:
+                mid = self.get_option_price(sym)
+                if mid and mid > 0:
+                    leg_fill_prices[c_id] = (float(mid), "quote")
+            except Exception as e:
+                log.debug(f"[COMBO] quote fallback for {sym}: {e}")
+
+        # Stage 4: proportional split of the combo net_fill.
+        # Only runs if we know the net and some legs are still missing.
+        if abs(net_fill) > 0.0 and any(cid not in leg_fill_prices for cid in leg_con_ids):
+            missing = [cid for cid in leg_con_ids if cid not in leg_fill_prices]
+            share = abs(net_fill) / len(leg_con_ids)   # equal-weight
+            for c_id in missing:
+                leg_fill_prices[c_id] = (round(share, 4), "proportional")
+            log.warning(f"[COMBO] {len(missing)} leg(s) got proportional "
+                        f"fallback price ${share:.4f}")
 
         legs_result = []
         for i, leg, c in leg_contracts:
-            per_leg_px = leg_fill_prices.get(int(c.conId), 0.0)
+            # Unwrap (price, source) tuple or default to 0.0 / None
+            _entry = leg_fill_prices.get(int(c.conId))
+            if _entry is None:
+                per_leg_px = 0.0
+                leg_price_source = None
+            else:
+                per_leg_px, leg_price_source = _entry
             legs_result.append({
                 "leg_index": i,
                 "symbol": leg.get("symbol"),
@@ -1012,6 +1071,9 @@ class IBOrdersMixin:
                 "client_id": placing_client_id,
                 "order_ref": order_ref,
                 "combo": True,
+                # ENH-050 — tag how we arrived at the fill price so the
+                # UI + audit trail can flag non-actual prices.
+                "price_source": leg_price_source,
                 # Instrument metadata so trade_legs gets strike/right/expiry
                 # (see combo-path fix for the multi-leg path above).
                 "strike": leg.get("strike"),

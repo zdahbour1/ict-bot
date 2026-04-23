@@ -148,6 +148,10 @@ class TradeLeg(Base):
     exit_time = Column(DateTime(timezone=True))
     leg_status = Column(String(10), nullable=False, default="open")
 
+    # ENH-050 — which source supplied entry_price for this leg:
+    #   'exec' | 'quote' | 'proportional' | 'mkt_single' | NULL
+    price_source = Column(String(20))
+
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
     updated_at = Column(DateTime(timezone=True), nullable=False,
                          default=utcnow, onupdate=utcnow)

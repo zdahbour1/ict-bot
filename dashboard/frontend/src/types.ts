@@ -90,6 +90,10 @@ export interface TradeLeg {
   exit_time: string | null;
   leg_status: string;
   pnl_usd: number | null;
+  // ENH-050 — 'exec' means IB reported the real fill price; 'quote'
+  // is a post-fill mid-quote estimate; 'proportional' is a last-resort
+  // split of the combo net. UI shows a badge for non-'exec' values.
+  price_source: string | null;
 }
 
 export interface TradeLegsResponse {

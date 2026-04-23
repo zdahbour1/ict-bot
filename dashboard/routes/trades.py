@@ -136,6 +136,9 @@ def _leg_to_dict(l) -> dict:
         "exit_time": l.exit_time.isoformat() if l.exit_time else None,
         "leg_status": l.leg_status,
         "pnl_usd": per_leg_pnl,
+        # ENH-050: where the entry price came from — 'exec' is real,
+        # anything else is an estimate. UI shows a badge.
+        "price_source": getattr(l, "price_source", None),
     }
 
 

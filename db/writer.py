@@ -269,6 +269,10 @@ def insert_multi_leg_trade(trade_envelope: dict, legs_result: dict,
             right_val = leg.get("right") or leg.get("option_right")
             if right_val is not None:
                 leg_kwargs["right"] = right_val
+            # ENH-050 price provenance — 'exec' / 'quote' / 'proportional'
+            # / NULL. UI surfaces a badge when != 'exec'.
+            if leg.get("price_source") is not None:
+                leg_kwargs["price_source"] = leg["price_source"]
 
             session.add(TradeLeg(**leg_kwargs))
 
