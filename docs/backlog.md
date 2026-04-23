@@ -162,6 +162,40 @@ Observed today (2026-04-23): IB shows multiple AAPL/MSFT bracket orders in "Tran
 ### ENH-045: Ref-less order backfill
 Related to ENH-044. Orders placed before `orderRef` stamping shipped have no provenance in IB. Either (a) stamp-retroactively via `modifyOrder` when reconciliation discovers them (only works for still-working orders), or (b) document them as legacy and rely on the cleanup sweep in ENH-044.
 
+### ENH-046: Submit multi-leg entries as BAG/combo orders (single order, single bracket)
+Today `place_multi_leg_order` submits N independent `MarketOrder`s — 4 separate orders in TWS for an iron condor. Problems observed 2026-04-23:
+- Partial-fill risk on entry (solved at entry-level via the OCA fix, but still fragile)
+- N separate SL brackets = N separate random-fire risks
+- Per-leg SL on a short wing of an iron condor is semantically wrong — max loss for an iron condor is `wing_width × contracts × multiplier − net_credit`, not a per-leg stop
+- TWS shows 4 unrelated orders instead of one strategy
+
+Proposed fix: use IB's **BAG** (combo) contract with `comboLegs`, submit as one net-credit/net-debit order:
+```python
+bag = Contract(secType="BAG", symbol=underlying, currency="USD", exchange="SMART")
+bag.comboLegs = [
+    ComboLeg(conId=short_call.conId, ratio=1, action="SELL", exchange="SMART"),
+    ComboLeg(conId=long_call.conId,  ratio=1, action="BUY",  exchange="SMART"),
+    ComboLeg(conId=short_put.conId,  ratio=1, action="SELL", exchange="SMART"),
+    ComboLeg(conId=long_put.conId,   ratio=1, action="BUY",  exchange="SMART"),
+]
+order = LimitOrder("BUY", qty, limit_price=net_debit_or_credit)
+```
+Benefits:
+- One order in TWS UI (expands to 4 legs)
+- All-or-nothing fill (no partial condor)
+- One bracket (TP on net price, SL on net price) — proper iron-condor risk accounting
+- Cleaner `trades` envelope ↔ IB order mapping (1:1)
+
+Work:
+1. Build bag contract in `broker/ib_orders.py` — new `place_combo_order(legs, net_price, tp_net, sl_net)` method.
+2. Update `TradeEntryManager._enter_multi_leg` to route here when the strategy declares it's a defined-risk spread.
+3. Update `trade_legs` persistence — store the combo conId, individual leg conIds, but only one bracket per envelope.
+4. Update `strategy/exit_executor.py` multi-leg close path to also use the BAG (buy-to-close at net price).
+5. Backtest: `backtest_engine/multi_leg_sim.py` already evaluates on net premium — matches the combo semantics, no change needed.
+
+### ENH-047: Trades page — per-leg drill-down for multi-leg trades
+`dashboard/frontend/src/components/TradeTable.tsx` renders every trade as one row. Multi-leg trades (n_legs > 1) should render with an expand caret that reveals each leg row (symbol, direction, strike, right, contracts, entry/exit fill, per-leg P&L). Ask the API to surface `/api/trades/{id}/legs` (new endpoint reading from `trade_legs`) so the table can lazy-load the legs on expand.
+
 ---
 
 ## HIGH — Important for Reliable Operation

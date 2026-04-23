@@ -588,19 +588,31 @@ def _restore_brackets_for(session, client, trade_id: int, ticker: str, symbol: s
 
 
 def _get_db_open_con_ids() -> set:
-    """Get set of ib_con_id values for all open trades in DB."""
+    """Get the set of ALL ib_con_id values covered by open DB trades —
+    across every leg of every open trade.
+
+    The prior query joined only ``leg_index = 0`` which missed legs 1-3
+    of any multi-leg trade. Reconciliation then saw those legs as
+    orphan IB positions and re-adopted them as fresh single-leg ICT
+    trades, creating duplicate DB rows AND duplicate SL brackets on
+    the same contract (2026-04-23 COIN + MSFT regression). Must include
+    every leg with contracts_open > 0 so an adopted DN iron condor
+    doesn't get torn back apart.
+    """
     try:
         from db.connection import get_session
         from sqlalchemy import text
         session = get_session()
         if not session:
             return set()
-        # Phase 2c: ib_con_id now lives on trade_legs.
         rows = session.execute(
             text(
                 "SELECT l.ib_con_id FROM trades t "
-                "JOIN trade_legs l ON l.trade_id = t.id AND l.leg_index = 0 "
-                "WHERE t.status='open' AND l.ib_con_id IS NOT NULL"
+                "JOIN trade_legs l ON l.trade_id = t.id "
+                "WHERE t.status='open' "
+                "  AND l.leg_status='open' "
+                "  AND l.contracts_open > 0 "
+                "  AND l.ib_con_id IS NOT NULL"
             )
         ).fetchall()
         session.close()
