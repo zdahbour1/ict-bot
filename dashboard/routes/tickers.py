@@ -18,6 +18,7 @@ router = APIRouter(tags=["tickers"])
 class TickerCreate(BaseModel):
     symbol: str
     strategy_id: int
+    sec_type: str = "OPT"
     name: Optional[str] = None
     contracts: int = 2
     notes: Optional[str] = None
@@ -37,9 +38,55 @@ def _ticker_to_dict(t: Ticker) -> dict:
         "id": t.id, "symbol": t.symbol, "name": t.name,
         "is_active": t.is_active, "contracts": t.contracts, "notes": t.notes,
         "strategy_id": t.strategy_id,
+        "sec_type": getattr(t, "sec_type", "OPT"),
         "created_at": t.created_at.isoformat() if t.created_at else None,
         "updated_at": t.updated_at.isoformat() if t.updated_at else None,
     }
+
+
+@router.get("/strategies/{strategy_id}/supported-ticker-types")
+def list_supported_ticker_types(strategy_id: int):
+    """Return the list of instrument types this strategy can trade,
+    pulled from strategy_supported_ticker_types. The Tickers tab uses
+    this to populate the sec_type dropdown when adding a ticker."""
+    session = get_session()
+    if not session:
+        raise HTTPException(503, "Database not available")
+    try:
+        from sqlalchemy import text
+        rows = session.execute(text(
+            "SELECT sec_type, notes FROM strategy_supported_ticker_types "
+            "WHERE strategy_id = :sid ORDER BY sec_type"
+        ), {"sid": strategy_id}).fetchall()
+        session.close()
+        return {
+            "strategy_id": strategy_id,
+            "sec_types": [{"sec_type": r[0], "notes": r[1]} for r in rows],
+        }
+    finally:
+        session.close()
+
+
+def _validate_ticker_type_for_strategy(session, strategy_id: int, sec_type: str):
+    """Raise HTTPException(400) if the strategy doesn't support this sec_type.
+    Pure DB lookup — no ORM coupling, called from create_ticker."""
+    from sqlalchemy import text
+    row = session.execute(text(
+        "SELECT 1 FROM strategy_supported_ticker_types "
+        "WHERE strategy_id = :sid AND sec_type = :st LIMIT 1"
+    ), {"sid": strategy_id, "st": sec_type}).fetchone()
+    if row is None:
+        # Also look up supported types for a helpful error message.
+        supported = session.execute(text(
+            "SELECT sec_type FROM strategy_supported_ticker_types "
+            "WHERE strategy_id = :sid ORDER BY sec_type"
+        ), {"sid": strategy_id}).fetchall()
+        allowed = ", ".join(r[0] for r in supported) or "(none configured)"
+        raise HTTPException(
+            400,
+            f"Strategy {strategy_id} does not support sec_type='{sec_type}'. "
+            f"Supported: {allowed}. See strategy_supported_ticker_types table."
+        )
 
 
 @router.get("/tickers")
@@ -82,6 +129,10 @@ def create_ticker(req: TickerCreate):
     if not session:
         raise HTTPException(503, "Database not available")
     try:
+        # ENH-042: Validate sec_type is allowed for this strategy.
+        sec_type = (req.sec_type or "OPT").upper()
+        _validate_ticker_type_for_strategy(session, req.strategy_id, sec_type)
+
         existing = session.query(Ticker).filter(
             Ticker.symbol == req.symbol.upper(),
             Ticker.strategy_id == req.strategy_id,
@@ -94,6 +145,7 @@ def create_ticker(req: TickerCreate):
         ticker = Ticker(
             symbol=req.symbol.upper(),
             strategy_id=req.strategy_id,
+            sec_type=sec_type,
             name=req.name,
             contracts=req.contracts,
             notes=req.notes,

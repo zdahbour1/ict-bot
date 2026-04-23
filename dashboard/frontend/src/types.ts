@@ -71,6 +71,9 @@ export interface Ticker {
   is_active: boolean;
   contracts: number;
   notes: string | null;
+  // Instrument type — constrained per strategy via
+  // strategy_supported_ticker_types (ENH-042).
+  sec_type: string;
   // Multi-strategy v2: tickers are scoped per strategy (NOT NULL FK).
   strategy_id: number;
   created_at: string;

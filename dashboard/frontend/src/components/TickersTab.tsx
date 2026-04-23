@@ -46,6 +46,29 @@ export default function TickersTab() {
   const [newSymbol, setNewSymbol] = useState('');
   const [newName, setNewName] = useState('');
   const [newContracts, setNewContracts] = useState(2);
+  const [newSecType, setNewSecType] = useState<string>('OPT');
+
+  // ENH-042: supported sec_types per strategy drive the Add-Ticker
+  // dropdown. Refetched when the strategy scope changes.
+  const supportedTypesEndpoint = selectedStrategyId !== null
+    ? `/strategies/${selectedStrategyId}/supported-ticker-types`
+    : null;
+  const { data: supportedData } = useApi<{
+    sec_types: { sec_type: string; notes: string | null }[];
+  }>(supportedTypesEndpoint || '', 60000);
+  const supportedTypes = supportedTypesEndpoint
+    ? (supportedData?.sec_types || [])
+    : [];
+
+  // Keep newSecType valid for the current strategy. If the list loads
+  // and our current choice isn't supported, snap to the first allowed.
+  useEffect(() => {
+    if (supportedTypes.length === 0) return;
+    if (!supportedTypes.find(t => t.sec_type === newSecType)) {
+      setNewSecType(supportedTypes[0].sec_type);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [supportedTypes]);
 
   const selectedStrategy = enabledStrategies.find(s => s.strategy_id === selectedStrategyId);
 
@@ -61,14 +84,19 @@ export default function TickersTab() {
 
   const handleAdd = async () => {
     if (!newSymbol.trim() || selectedStrategyId === null) return;
-    await apiPost('/tickers', {
-      symbol: newSymbol.trim(),
-      name: newName.trim() || null,
-      contracts: newContracts,
-      strategy_id: selectedStrategyId,
-    });
-    setNewSymbol(''); setNewName(''); setNewContracts(2); setShowAdd(false);
-    refetch();
+    try {
+      await apiPost('/tickers', {
+        symbol: newSymbol.trim(),
+        name: newName.trim() || null,
+        contracts: newContracts,
+        strategy_id: selectedStrategyId,
+        sec_type: newSecType,
+      });
+      setNewSymbol(''); setNewName(''); setNewContracts(2); setShowAdd(false);
+      refetch();
+    } catch (e: any) {
+      alert(`Failed to add ticker: ${e?.message ?? e}`);
+    }
   };
 
   const handleDelete = async (t: Ticker) => {
@@ -93,6 +121,24 @@ export default function TickersTab() {
     }),
     col.accessor('symbol', { header: 'Symbol', cell: info => <strong>{info.getValue()}</strong> }),
     col.accessor('name', { header: 'Name', cell: info => <span className="text-gray-400">{info.getValue() || '-'}</span> }),
+    col.accessor('sec_type' as any, {
+      header: 'Type',
+      cell: info => {
+        const st = info.getValue() as string | undefined;
+        const palette: Record<string, string> = {
+          OPT: 'bg-blue-500/20 text-blue-400',
+          FOP: 'bg-amber-500/20 text-amber-400',
+          STK: 'bg-emerald-500/20 text-emerald-400',
+          FUT: 'bg-purple-500/20 text-purple-400',
+        };
+        const cls = palette[st || 'OPT'] || 'bg-gray-700 text-gray-400';
+        return (
+          <span className={`px-1.5 py-0.5 rounded text-[10px] font-mono ${cls}`}>
+            {st || 'OPT'}
+          </span>
+        );
+      },
+    }),
     col.accessor('contracts', { header: 'Contracts' }),
     col.accessor('notes', { header: 'Notes', cell: info => <span className="text-xs text-gray-500 max-w-32 truncate block">{info.getValue() || '-'}</span> }),
     col.accessor('created_at', {
@@ -187,6 +233,17 @@ export default function TickersTab() {
             <label className="text-xs text-gray-500 block mb-1">Contracts</label>
             <input type="number" value={newContracts} onChange={e => setNewContracts(Number(e.target.value))}
               className="px-2 py-1 bg-[#21262d] border border-[#30363d] text-gray-200 rounded text-sm w-16" min={1} />
+          </div>
+          <div>
+            <label className="text-xs text-gray-500 block mb-1">Type</label>
+            <select value={newSecType} onChange={e => setNewSecType(e.target.value)}
+              className="px-2 py-1 bg-[#21262d] border border-[#30363d] text-gray-200 rounded text-sm w-20"
+              title={supportedTypes.find(t => t.sec_type === newSecType)?.notes || ''}>
+              {supportedTypes.length === 0 && <option value="OPT">OPT</option>}
+              {supportedTypes.map(t => (
+                <option key={t.sec_type} value={t.sec_type}>{t.sec_type}</option>
+              ))}
+            </select>
           </div>
           <span className="text-xs text-gray-500 pb-1">
             → <span className="text-gray-300 font-mono">{selectedStrategy?.name ?? '(none)'}</span>
