@@ -6,7 +6,7 @@ invalidation, and strategy-scoped vs global resolution.
 from __future__ import annotations
 
 import time
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import pytest
 
@@ -80,6 +80,42 @@ class TestSettingsCache:
             settings_cache.invalidate()
             settings_cache.get_bool("K")
         assert call_count["n"] == 2
+
+    def test_global_lookup_falls_back_to_strategy_scoped(self):
+        """Regression for 2026-04-23 delta-hedger bug: DN_DELTA_HEDGE_ENABLED
+        was seeded at strategy_id=91. A caller querying with
+        strategy_id=None was getting None → default False → hedger
+        silently disabled even when user flipped the toggle. Fix: when
+        global lookup misses, try any-strategy-scoped row."""
+        from db import settings_cache
+
+        # Simulate: global returns None, then scoped-fallback returns 'true'
+        call_log = []
+
+        def fake_exec(sql_obj, params):
+            sql = str(sql_obj)
+            call_log.append(sql)
+            result = MagicMock()
+            if "strategy_id IS NULL" in sql:
+                result.fetchone.return_value = None  # no global row
+            elif "IS NOT NULL" in sql:
+                result.fetchone.return_value = ("true",)  # scoped row
+            else:
+                result.fetchone.return_value = None
+            return result
+
+        session = MagicMock()
+        session.execute.side_effect = fake_exec
+        settings_cache.invalidate()
+        with patch("db.connection.get_session", return_value=session):
+            val = settings_cache.get_bool("DN_DELTA_HEDGE_ENABLED",
+                                           default=False)
+        assert val is True, (
+            "global-strategy fallback must find scoped row"
+        )
+        # Both queries should have been issued
+        assert any("IS NULL" in s for s in call_log)
+        assert any("IS NOT NULL" in s for s in call_log)
 
     def test_strategy_scoped_key_separate_from_global(self):
         """A global (strategy_id=None) and scoped (strategy_id=91) lookup

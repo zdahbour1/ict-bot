@@ -31,7 +31,22 @@ _LOCK = threading.Lock()
 
 
 def _fetch_raw(key: str, strategy_id: Optional[int]) -> Optional[str]:
-    """One DB hit — looks up settings.value by (key, strategy_id)."""
+    """One DB hit — looks up settings.value by (key, strategy_id).
+
+    Resolution order for a bot-wide/global caller (strategy_id=None):
+      1. Global row (strategy_id IS NULL)
+      2. ANY strategy-scoped row with that key — picks the lowest
+         strategy_id for determinism.
+
+    The fallback at step 2 means a caller that doesn't know the
+    strategy_id can still read a key that exists only at strategy
+    scope (e.g. DN_* flags seeded at strategy_id=91). Without it
+    those keys were invisible to bot-wide consumers and defaulted
+    silently, which masked the delta-hedger's enable flag being on.
+
+    For strategy-scoped callers (strategy_id given), the standard
+    prefer-scoped-then-global order applies.
+    """
     try:
         from db.connection import get_session
         from sqlalchemy import text
@@ -44,6 +59,14 @@ def _fetch_raw(key: str, strategy_id: Optional[int]) -> Optional[str]:
                     "SELECT value FROM settings "
                     "WHERE key=:k AND strategy_id IS NULL"
                 ), {"k": key}).fetchone()
+                if row is None:
+                    # Fall back to any strategy-scoped row if the key
+                    # only exists under a specific strategy.
+                    row = session.execute(text(
+                        "SELECT value FROM settings "
+                        "WHERE key=:k AND strategy_id IS NOT NULL "
+                        "ORDER BY strategy_id LIMIT 1"
+                    ), {"k": key}).fetchone()
             else:
                 # Prefer strategy-scoped; fall back to global.
                 row = session.execute(text(

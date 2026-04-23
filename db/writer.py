@@ -684,6 +684,11 @@ def update_thread_status(thread_name: str, ticker: str = None, status: str = "id
                 existing.alerts_today = alerts_today
             if error_count is not None:
                 existing.error_count = error_count
+            # Force updated_at to tick every heartbeat so the Threads
+            # page timestamp visibly advances even when no other field
+            # changes. Without this, SQLAlchemy sees a clean row and
+            # skips the UPDATE → the UI appears frozen.
+            existing.updated_at = datetime.now(timezone.utc)
         else:
             row = ThreadStatus(
                 thread_name=thread_name,
