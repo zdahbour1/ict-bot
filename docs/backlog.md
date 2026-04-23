@@ -105,17 +105,27 @@ Status: **Deferred polish item.** Today: enabling/disabling a strategy in the UI
 
 Tracked here so they don't fall through the cracks. Work when appropriate.
 
-### ENH-034: Live FOP trading path ✅ DESIGN APPROVED, NOT STARTED
-Spec: `docs/fop_live_trading_design.md` (approved by user 2026-04-22).
-Today: FOP works in backtests (`backtest_engine/`), live entry code (`option_selector.py`, `trade_entry_manager.py`) assumes equity options. Need to teach the live path about FOP: CME exchange routing, different multipliers (MES=5, ES=50, etc.), Thursday T-1 quarterly expiry semantics, strike intervals per underlying. Unlocks MES/MNQ/ES/NQ for live scanning across ICT / ORB / VWAP / delta-neutral.
+### ENH-034: Live FOP trading path ✅ SHIPPED (2026-04-22)
+Spec: `docs/fop_live_trading_design.md`.
+Status: **Shipped** in commits `c49585f` (selector + 26 tests) + `a2fa962` (broker methods + option_selector routing).
+Implementation:
+- `strategy/fop_selector.py` — liquidity-aware contract picker (quarterly > monthly > weekly preference, hard-rejects on OI/volume/spread).
+- `broker/ib_orders.py::place_bracket_order_fop` — places bracket on FuturesOption contract.
+- `broker/ib_orders.py::fop_chain` / `fop_quote` — IB probes the selector injects.
+- `strategy/option_selector.py` — FOP branch at top of `select_and_enter` / `select_and_enter_put`, sec_type lookup from `tickers` table.
+- Config knobs: `FOP_MAX_DTE`, `FOP_MIN_OPEN_INTEREST`, `FOP_MIN_VOLUME`, `FOP_MAX_SPREAD_PCT`, `FOP_EXPIRY_PREF`.
+Activation: takes effect on next bot restart + requires adding a ticker row with `sec_type='FOP'` on an enabled strategy (via Tickers tab). Until then behavior unchanged.
+Remaining FOP follow-ups (not blocking live use):
+- FOP roll logic (currently picks OCC-style symbol; FOP roll needs FuturesOption-aware roll path).
+- `USE_BRACKET_ORDERS=False` path unsupported for FOP (aborts with warning — bracket is production default).
 
 ### ENH-035: Production IV detection for DeltaNeutralStrategy.detect()
 Spec: `docs/delta_neutral_strategy.md` (existing) + v2 doc §8 open questions.
 Today: `strategy/delta_neutral_strategy.py` uses a rolling-stddev proxy for IV elevation — rudimentary and doesn't reliably trigger. Production version should consume IB greeks or an external IV feed (e.g. underlying's IV30, VIX structure, or the contract's `modelGreeks.impliedVol` from `reqMktData`).
 
-### ENH-036: Stock-leg close support in multi-leg exit
-Spec: `strategy/exit_executor.py::_close_action_for_leg` (Phase 6b) currently returns None for `sec_type='STK'`.
-Today: option legs close correctly. If a delta-neutral variant uses a stock hedge (4 options + 1 stock = 5 legs), the stock leg is skipped with a WARN and stays open. Add an explicit `close_stock(symbol, qty, direction)` helper on `IBOrdersMixin` and wire it into `_close_action_for_leg`.
+### ENH-036: Stock-leg close support in multi-leg exit ✅ SHIPPED (2026-04-22)
+Status: **Shipped** in commit `82848ae`.
+`broker/ib_orders.py::sell_stock` / `buy_stock` helpers added. `_close_action_for_leg` now maps STK LONG → sell_stock, STK SHORT → buy_stock. Delta-neutral trades with a stock hedge now close the hedge alongside the options.
 
 ### ENH-037: Cross-strategy exposure caps
 Spec: `docs/multi_strategy_architecture_v2.md` §8 open question 7.
@@ -129,11 +139,12 @@ Today: `backtest_engine/engine.py` is single-leg only. Multi-leg strategies can'
 Spec: v2 doc §8.
 Today: commissions flow through `trade_closes` but aren't attributed back to a strategy in reporting. Nice-to-have for strategy-ranking analytics.
 
-### ENH-040: Trades-tab strategy provenance polish
-Today: strategy name appears as a pill on each trade row (shipped `95924a5`). Next: add a strategy-filter dropdown at the top of the Trades tab (same pattern as Settings / Tickers tabs), and per-strategy P&L summary cards.
+### ENH-040: Trades-tab strategy provenance polish ✅ PARTIAL (strategy filter shipped)
+Status: **Strategy filter dropdown shipped** in commit `82848ae`. Populated from distinct strategy_name values in the loaded trade set. Works alongside existing Status / Ticker / Period filters.
+Remaining: per-strategy P&L summary cards at top of Trades tab (total pnl, win-rate, trade count per strategy). Low priority — analytics page already has cross-strategy views.
 
-### ENH-041: Retire main branch / make profitability-research the default
-Today: `origin/main` is 205 commits behind `origin/feature/profitability-research`. The `main` branch is effectively a stale baseline. Fast-forward main to profitability-research's HEAD and switch GitHub default. One branch, clean slate.
+### ENH-041: Retire main branch / make profitability-research the default ✅ PARTIAL
+Status: **main fast-forwarded to trunk** 2026-04-22. `origin/main` and `origin/feature/profitability-research` now point at the same commit. Remaining step: user toggles GitHub repo default branch to `main` in Settings, then `feature/profitability-research` can be deleted. One-click on GitHub.
 
 ---
 
