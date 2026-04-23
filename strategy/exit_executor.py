@@ -549,10 +549,22 @@ def _execute_multi_leg_exit(client, trade: dict, reason: str) -> float | None:
                    f"legs=[{', '.join(l.get('leg_role') or l.get('symbol','?') for l in legs)}]")
 
     # ENH-046 Phase 2: prefer closing the combo with ONE reversed-Bag
-    # order when the flag is on. Falls back to per-leg closes below
-    # on any exception so this is a safe upgrade.
+    # order when the flag is on (read from DB settings so the user can
+    # flip it at runtime from the dashboard). Falls back to per-leg
+    # closes on any exception so this is a safe upgrade.
     import config as _cfg
-    use_combo = bool(getattr(_cfg, "USE_COMBO_ORDERS_FOR_MULTI_LEG", False))
+    try:
+        from db.settings_cache import get_bool
+        use_combo = get_bool(
+            "USE_COMBO_ORDERS_FOR_MULTI_LEG",
+            default=bool(getattr(_cfg,
+                                  "USE_COMBO_ORDERS_FOR_MULTI_LEG",
+                                  False)),
+        )
+    except Exception:
+        use_combo = bool(getattr(_cfg,
+                                  "USE_COMBO_ORDERS_FOR_MULTI_LEG",
+                                  False))
     if use_combo and hasattr(client, "place_combo_close_order"):
         # Shape the legs the way the broker method expects (flat dicts
         # with direction + contracts + symbol + leg metadata).

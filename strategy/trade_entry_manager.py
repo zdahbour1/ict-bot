@@ -417,13 +417,21 @@ class TradeEntryManager:
                              f"multi-leg x{len(legs)} ref={order_ref or '—'}")
 
         # ENH-046: opt into IB BAG/combo orders for defined-risk spreads.
-        # When ``config.USE_COMBO_ORDERS_FOR_MULTI_LEG`` is True (or the
-        # strategy's settings flip the flag), route to the combo path —
-        # ONE IB order fills all legs atomically at a net price. Default
-        # keeps the legacy N-independent-orders path so today's live
-        # behavior is unchanged without an explicit opt-in.
-        use_combo = bool(getattr(config, "USE_COMBO_ORDERS_FOR_MULTI_LEG",
-                                  False))
+        # Read the toggle from the DB settings table so it can be flipped
+        # at runtime from the dashboard without a bot restart. Falls
+        # back to the ``config`` default when the DB row is absent.
+        try:
+            from db.settings_cache import get_bool
+            use_combo = get_bool(
+                "USE_COMBO_ORDERS_FOR_MULTI_LEG",
+                default=bool(getattr(config,
+                                      "USE_COMBO_ORDERS_FOR_MULTI_LEG",
+                                      False)),
+            )
+        except Exception:
+            use_combo = bool(getattr(config,
+                                      "USE_COMBO_ORDERS_FOR_MULTI_LEG",
+                                      False))
         self._entry_pending = True
         try:
             if use_combo and hasattr(self.client, "place_combo_order"):
