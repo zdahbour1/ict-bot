@@ -106,32 +106,49 @@ class IBOrdersMixin:
     """Order placement + management methods. Mixed into IBClient."""
 
     # ── Single-leg Order Placement ────────────────────────────
-    def buy_call(self, option_symbol: str, contracts: int) -> object:
-        return self._place_order(option_symbol, contracts, "BUY", "call")
+    # Every single-leg entry now accepts order_ref so the IB Order Ref
+    # column (TWS Activity tab) carries the strategy-TICKER-YYMMDD-NN
+    # tag. Without this, pre-2026-04-24 single-leg trades showed blank
+    # Order Ref in IB even though we had the ref in our DB.
+    def buy_call(self, option_symbol: str, contracts: int,
+                  order_ref: str | None = None) -> object:
+        return self._place_order(option_symbol, contracts, "BUY", "call",
+                                   order_ref=order_ref)
 
-    def buy_put(self, option_symbol: str, contracts: int) -> object:
-        return self._place_order(option_symbol, contracts, "BUY", "put")
+    def buy_put(self, option_symbol: str, contracts: int,
+                 order_ref: str | None = None) -> object:
+        return self._place_order(option_symbol, contracts, "BUY", "put",
+                                   order_ref=order_ref)
 
-    def sell_call(self, option_symbol: str, contracts: int) -> object:
-        return self._place_order(option_symbol, contracts, "SELL", "call")
+    def sell_call(self, option_symbol: str, contracts: int,
+                   order_ref: str | None = None) -> object:
+        return self._place_order(option_symbol, contracts, "SELL", "call",
+                                   order_ref=order_ref)
 
-    def sell_put(self, option_symbol: str, contracts: int) -> object:
-        return self._place_order(option_symbol, contracts, "SELL", "put")
+    def sell_put(self, option_symbol: str, contracts: int,
+                  order_ref: str | None = None) -> object:
+        return self._place_order(option_symbol, contracts, "SELL", "put",
+                                   order_ref=order_ref)
 
     # Stock close helpers (ENH-036) — used by multi-leg exit flow when a
     # delta-neutral trade uses a stock hedge leg. MKT order, same
     # fill-wait + result-dict contract as _place_order.
     def sell_stock(self, ticker_symbol: str, shares: int,
-                    exchange: str = "SMART") -> object:
+                    exchange: str = "SMART",
+                    order_ref: str | None = None) -> object:
         return self._submit_to_ib(self._ib_place_stock_order,
-                                   ticker_symbol, shares, "SELL", exchange)
+                                   ticker_symbol, shares, "SELL", exchange,
+                                   order_ref)
 
     def buy_stock(self, ticker_symbol: str, shares: int,
-                   exchange: str = "SMART") -> object:
+                   exchange: str = "SMART",
+                   order_ref: str | None = None) -> object:
         return self._submit_to_ib(self._ib_place_stock_order,
-                                   ticker_symbol, shares, "BUY", exchange)
+                                   ticker_symbol, shares, "BUY", exchange,
+                                   order_ref)
 
-    def _ib_place_stock_order(self, ticker_symbol, shares, action, exchange):
+    def _ib_place_stock_order(self, ticker_symbol, shares, action, exchange,
+                               order_ref: str | None = None):
         """Runs on IB thread. Places a stock MKT order (for hedge-leg
         entry + close). Minimal — no bracket, no stop — caller already
         manages the position via the options legs."""
@@ -144,6 +161,8 @@ class IBOrdersMixin:
         order = MarketOrder(action, shares)
         if config.IB_ACCOUNT:
             order.account = config.IB_ACCOUNT
+        if order_ref:
+            order.orderRef = order_ref
         trade = self.ib.placeOrder(contract, order)
         for _ in range(10):
             self.ib.sleep(0.5)
@@ -162,15 +181,19 @@ class IBOrdersMixin:
         }
 
     def _place_order(self, option_symbol: str, contracts: int,
-                     action: str, desc: str) -> object:
+                     action: str, desc: str,
+                     order_ref: str | None = None) -> object:
         if config.DRY_RUN:
-            log.info(f"[DRY RUN] IB {action} {desc.upper()}: {contracts}x {option_symbol}")
+            log.info(f"[DRY RUN] IB {action} {desc.upper()}: {contracts}x "
+                     f"{option_symbol} ref={order_ref}")
             return {"dry_run": True, "symbol": option_symbol}
         return self._submit_to_ib(
-            self._ib_place_order, option_symbol, contracts, action, desc
+            self._ib_place_order, option_symbol, contracts, action, desc,
+            order_ref
         )
 
-    def _ib_place_order(self, option_symbol, contracts, action, desc):
+    def _ib_place_order(self, option_symbol, contracts, action, desc,
+                        order_ref: str | None = None):
         """Place order with contract validation and fill confirmation."""
         contract = self._occ_to_contract(option_symbol)
         if not contract or not contract.conId:
@@ -181,6 +204,8 @@ class IBOrdersMixin:
         order = MarketOrder(action, contracts)
         if config.IB_ACCOUNT:
             order.account = config.IB_ACCOUNT
+        if order_ref:
+            order.orderRef = order_ref
         trade = self.ib.placeOrder(contract, order)
 
         # Wait for fill (up to 5 seconds)

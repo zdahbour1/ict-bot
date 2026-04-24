@@ -349,13 +349,16 @@ def close_position_on_ib(client, trade: dict, max_qty: int) -> bool:
         log.warning(f"[{ticker}] CLOSE STEP 5: Reducing sell {abs(requested)} → {sell_qty} "
                     f"(IB only shows {abs(max_qty)} contracts)")
 
+    # Use the trade's entry ref + '-close' suffix so the IB Order Ref
+    # column on the close order traces back to the same strategy entry.
+    close_ref = ((trade.get("client_trade_id") or "") + "-close") or None
     try:
         if direction == "SHORT":
-            client.sell_put(symbol, sell_qty)
+            client.sell_put(symbol, sell_qty, order_ref=close_ref)
         else:
-            client.sell_call(symbol, sell_qty)
+            client.sell_call(symbol, sell_qty, order_ref=close_ref)
         log.info(f"[{ticker}] CLOSE STEP 5 RESULT: Sell order sent — "
-                 f"{sell_qty}x {symbol} ({direction})")
+                 f"{sell_qty}x {symbol} ({direction}) ref={close_ref}")
         return True
     except Exception as e:
         log.error(f"[{ticker}] CLOSE STEP 5: FAILED to send sell: {e}")

@@ -316,11 +316,14 @@ class DeltaHedger:
                   "net_delta": round(net_delta, 2),
                   "current_hedge": current_hedge,
                   "action": action, "shares": shares})
-        # Place the hedge order
+        # Place the hedge order. Stamp IB Order Ref with the parent
+        # trade's ref + '-hedge' so the hedge is traceable to its DN
+        # trade in TWS Activity tab.
+        hedge_ref = f"hedge-{ticker}-tid{trade_id}"
         try:
             method = (self.client.buy_stock if action == "BUY"
                       else self.client.sell_stock)
-            result = method(ticker, shares)
+            result = method(ticker, shares, order_ref=hedge_ref)
             fill_price = (result or {}).get("fill_price") or 0.0
             order_id = (result or {}).get("order_id")
         except Exception as e:

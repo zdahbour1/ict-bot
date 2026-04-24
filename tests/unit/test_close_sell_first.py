@@ -77,7 +77,8 @@ class TestSellFirstMode:
         with patch("config.CLOSE_MODE_SELL_FIRST", True):
             execute_exit(client, trade, reason="TEST")
 
-        client.sell_call.assert_called_once_with("AAPL260430C00180000", 2)
+        client.sell_call.assert_called_once_with(
+            "AAPL260430C00180000", 2, order_ref="-close")
         client.sell_put.assert_not_called()
 
     def test_happy_path_short_fires_sell_put(self):
@@ -91,7 +92,8 @@ class TestSellFirstMode:
         with patch("config.CLOSE_MODE_SELL_FIRST", True):
             execute_exit(client, trade, reason="TEST")
 
-        client.sell_put.assert_called_once_with("AAPL260430P00180000", 2)
+        client.sell_put.assert_called_once_with(
+            "AAPL260430P00180000", 2, order_ref="-close")
         client.sell_call.assert_not_called()
 
     def test_sell_never_blocked_by_stale_bracket(self):

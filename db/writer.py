@@ -529,12 +529,27 @@ def finalize_close(session, trade_id: int, exit_price: float, result: str,
         safe_enrichment = _sanitize_for_json(exit_enrichment or {})
 
         # Update the leg (instrument-level state)
+        # Leg 0 gets the canonical exit_price + contracts_closed=entry qty.
         session.execute(
             text("UPDATE trade_legs SET exit_price=:ep, current_price=:ep, "
                  "contracts_open=0, contracts_closed=:cc, "
                  "leg_status='closed', exit_time=NOW() "
                  "WHERE trade_id=:id AND leg_index=0"),
             {"ep": exit_price, "cc": contracts, "id": trade_id}
+        )
+        # Legs 1..N of multi-leg trades (iron condor, spread, hedged) — when
+        # the envelope transitions to closed, every leg must also close.
+        # Before this, legs 1-3 stayed contracts_open=1 forever → the UI
+        # showed ghost-open positions on closed trades, miscalculating
+        # open_count + P&L. 2026-04-24 regression.
+        session.execute(
+            text("UPDATE trade_legs SET "
+                 "  contracts_closed = contracts_entered, "
+                 "  contracts_open = 0, "
+                 "  leg_status = 'closed', "
+                 "  exit_time = COALESCE(exit_time, NOW()) "
+                 "WHERE trade_id=:id AND leg_index > 0 AND leg_status = 'open'"),
+            {"id": trade_id}
         )
         # Update the envelope (lifecycle + aggregated P&L cache)
         session.execute(

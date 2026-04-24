@@ -574,12 +574,17 @@ class ExitManager:
             # and a count. If the client exposes a more neutral helper,
             # prefer that; until then these two branches cover
             # everything the bot ever trades today.
+            # Tag the recovery buy with the entry's ref + '-recov'
+            # suffix so IB Order Ref traces it back.
+            recov_ref = ((trade.get("client_trade_id") or "") + "-recov") or None
             if direction == "LONG":
                 # long calls — close a short in calls by buying calls
-                fill = self.client.buy_call(symbol, to_buy)
+                fill = self.client.buy_call(symbol, to_buy,
+                                              order_ref=recov_ref)
             else:
                 # long puts (ICT bearish) — close a short in puts by buying puts
-                fill = self.client.buy_put(symbol, to_buy)
+                fill = self.client.buy_put(symbol, to_buy,
+                                             order_ref=recov_ref)
             log.warning(f"[{ticker}] RECOVERY BUY submitted for {to_buy}x {symbol}. "
                         f"Fill response: {fill}")
             log_trade_action(

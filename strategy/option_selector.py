@@ -326,7 +326,8 @@ def select_and_enter(client, ticker: str = "QQQ",
             order_ref=order_ref,
         )
     else:
-        order_result = client.buy_call(option_symbol, contracts)
+        order_result = client.buy_call(option_symbol, contracts,
+                                         order_ref=order_ref)
 
     # ── Verify order result ─────────────────────────────────
     if order_result is None:
@@ -478,7 +479,8 @@ def select_and_enter_put(client, ticker: str = "QQQ",
             order_ref=order_ref,
         )
     else:
-        order_result = client.buy_put(option_symbol, contracts)
+        order_result = client.buy_put(option_symbol, contracts,
+                                        order_ref=order_ref)
 
     # ── Verify order result ─────────────────────────────────
     if order_result is None:
