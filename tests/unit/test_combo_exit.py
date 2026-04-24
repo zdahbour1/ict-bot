@@ -101,9 +101,10 @@ class TestPlaceComboCloseOrder:
         monkeypatch.setattr(config, "IB_ACCOUNT", "", raising=False)
 
         client = _build_min_client()
+        # ENH-064: explicit limit_price — no MKT fallback on quote fail.
         result = client.place_combo_close_order(
             _iron_condor_open_legs(), order_ref="x-close",
-            limit_price=None,
+            limit_price=1.0,
         )
 
         assert result["all_filled"] is True
@@ -122,8 +123,13 @@ class TestPlaceComboCloseOrder:
         monkeypatch.setattr(config, "DRY_RUN", False, raising=False)
 
         client = _build_min_client()
+        # ENH-064: explicit limit_price is required now that
+        # _ib_place_combo refuses to silently fall back to MKT when
+        # leg quotes fail.
         client.place_combo_close_order(
-            _iron_condor_open_legs(), order_ref="dn-SPY-260515-01-close",
+            _iron_condor_open_legs(),
+            order_ref="dn-SPY-260515-01-close",
+            limit_price=1.0,
         )
         _, order = client.ib.placed[0]
         assert order.orderRef == "dn-SPY-260515-01-close"

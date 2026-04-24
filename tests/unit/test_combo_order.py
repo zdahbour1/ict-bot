@@ -166,17 +166,25 @@ class TestComboOrderPlacement:
         assert getattr(order, "lmtPrice", None) == pytest.approx(2.50)
         assert order.orderType in ("LMT", "LIMIT")
 
-    def test_market_order_when_no_limit_price(self, monkeypatch):
+    def test_raises_when_no_limit_and_quotes_fail(self, monkeypatch):
+        """ENH-064 regression: when caller passes limit_price=None and
+        the auto-limit computation fails (e.g., leg quote timeout),
+        _ib_place_combo must RAISE rather than silently fall back to a
+        MarketOrder. MKT BAG combos on spread legs frequently park
+        unfilled on IB's smart-router and cause the 'stuck orders'
+        state the user hit 2026-04-24."""
         import config
         monkeypatch.setattr(config, "DRY_RUN", False, raising=False)
         monkeypatch.setattr(config, "IB_ACCOUNT", "", raising=False)
 
         client = _build_min_client()
-        client.place_combo_order(_iron_condor_legs()[:2], order_ref="x",
-                                  action="SELL", limit_price=None)
-
-        _, order = client.ib.placed[0]
-        assert order.orderType in ("MKT", "MARKET")
+        import pytest
+        with pytest.raises(RuntimeError, match="combo limit"):
+            client.place_combo_order(_iron_condor_legs()[:2],
+                                       order_ref="x",
+                                       action="SELL", limit_price=None)
+        # placeOrder must not be called
+        assert client.ib.placed == []
 
     def test_dry_run_returns_stub_without_hitting_ib(self, monkeypatch):
         import config

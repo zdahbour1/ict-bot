@@ -46,19 +46,25 @@ def _compute_combo_net_limit(mixin, leg_contracts, action: str,
     if not auto:
         return None
     # Fetch mid for each leg via the existing single-leg quote path.
+    # ENH-064 — use priority=True so the IB dispatcher prioritizes
+    # entry-blocking quotes over background scanner polling. Without
+    # this, 15 tickers × 3 strategies all running detect() flood the
+    # shared queue and combo leg quotes time out at 30s — the entry
+    # then falls back to MKT and the combo parks unfilled in TWS.
     midprices = []
     for i, leg, contract in leg_contracts:
         sym = leg.get("symbol")
         if not sym:
             return None
         try:
-            px = mixin.get_option_price(sym)
+            px = mixin.get_option_price(sym, priority=True)
             if not px or px <= 0:
                 return None
             midprices.append((leg, float(px)))
         except Exception as e:
             log.warning(f"[COMBO-LIMIT] quote failed for {sym}: {e} — "
-                        f"falling back to MKT")
+                        f"aborting combo (no MKT fallback; stuck-order "
+                        f"protection active)")
             return None
     # Signed net premium per share-multiplier. For iron condor the
     # standard sign convention:
@@ -979,16 +985,31 @@ class IBOrdersMixin:
         # IB slippage fix (2026-04-23): when caller hasn't specified a
         # limit_price AND the auto-limit mode is on, compute a net
         # mid-price from each leg's quote so the combo fills closer to
-        # fair value instead of blindly MKT. Falls through to MKT if
-        # any leg quote is unavailable or DN_COMBO_AUTO_LIMIT=false.
+        # fair value instead of blindly MKT.
+        #
+        # ENH-064 (2026-04-24): NEVER fall back to MarketOrder for BAG
+        # combos when quote acquisition fails. Observed behavior: when
+        # any leg quote times out (_ib_get_option_price 30s ceiling),
+        # the old code sent BUY MKT. Smart-router on 4-leg spreads
+        # can't find a crossable net → order parks in PendingSubmit
+        # 0/1 indefinitely. User saw this on AMD/GOOG zdn_weekly
+        # entries. Fail loudly so the entry-manager's new orphan-
+        # cleanup (ENH-062) can tear down any stray parent and move
+        # on instead of leaving the user with stuck orders.
         if limit_price is None:
             limit_price = _compute_combo_net_limit(
                 self, leg_contracts, action, legs
             )
-        if limit_price is not None:
-            order = LimitOrder(action, qty, float(limit_price))
-        else:
-            order = MarketOrder(action, qty)
+        if limit_price is None:
+            raise RuntimeError(
+                f"combo limit acquisition failed for "
+                f"{underlying} ({len(legs)} legs) — refusing to submit "
+                f"BAG as MarketOrder (would park in PendingSubmit and "
+                f"never fill). Set DN_COMBO_AUTO_LIMIT=false to opt "
+                f"back into MKT combos, or investigate leg-quote "
+                f"timeouts in the bot log."
+            )
+        order = LimitOrder(action, qty, float(limit_price))
         order.orderId = self.ib.client.getReqId()
         order.tif = "DAY"
         if config.IB_ACCOUNT:

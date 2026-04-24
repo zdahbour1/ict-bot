@@ -21,7 +21,7 @@ class _FakeMixin:
     def __init__(self, mid_by_symbol: dict[str, float]):
         self._mids = mid_by_symbol
 
-    def get_option_price(self, symbol: str) -> float:
+    def get_option_price(self, symbol: str, priority: bool = False) -> float:
         return self._mids.get(symbol, 0.0)
 
 
@@ -93,6 +93,73 @@ class TestCreditIronCondorBuy:
         }
         limit = _run(_FakeMixin(mids), legs, action="BUY")
         assert limit is not None and limit < 0
+
+
+class TestNoMktFallbackOnQuoteFail:
+    """ENH-064 — when leg quotes fail, _ib_place_combo must raise
+    rather than silently fall back to MarketOrder. MKT BAG combos
+    on 4-leg spreads park in PendingSubmit and never fill, which is
+    the 'stuck orders' state the user hit 2026-04-24."""
+
+    def test_place_combo_raises_when_limit_acquisition_fails(self):
+        """With auto-limit on but every quote returning 0, the combo
+        placement must abort, not send MKT."""
+        import broker.ib_orders as ibo
+
+        # Stub the leg-quote path to force quote failures
+        def _compute_that_fails(*a, **kw):
+            return None
+
+        legs = [
+            _leg("SPY260501C00500000", "SHORT", 500.0, "C"),
+            _leg("SPY260501C00510000", "LONG",  510.0, "C"),
+            _leg("SPY260501P00490000", "SHORT", 490.0, "P"),
+            _leg("SPY260501P00480000", "LONG",  480.0, "P"),
+        ]
+
+        # Minimal fake mixin with the IB placeOrder plumbing we don't
+        # want to actually run.  The important thing is that the code
+        # raises BEFORE ib.placeOrder is invoked.
+        placed = []
+
+        class _FakeIB:
+            def __init__(self):
+                self.client = SimpleNamespace(clientId=1,
+                                                getReqId=lambda: 1)
+            def placeOrder(self, c, o):
+                placed.append((c, o))
+                return SimpleNamespace(
+                    orderStatus=SimpleNamespace(
+                        status="Filled", avgFillPrice=1.0),
+                    order=o, fills=[])
+            def sleep(self, _s): return None
+            def qualifyContracts(self, c):
+                c.conId = 111; return [c]
+            def executions(self): return []
+
+        class _Fake(ibo.IBOrdersMixin):
+            def __init__(self):
+                self.ib = _FakeIB()
+                self._pool = None
+            def _submit_to_ib(self, fn, *a, **kw):
+                kw.pop("timeout", None); kw.pop("priority", None)
+                return fn(*a, **kw)
+            def _build_leg_contract(self, leg):
+                return SimpleNamespace(conId=222,
+                                        secType="OPT",
+                                        symbol=leg["symbol"][:3],
+                                        tradingClass=leg["symbol"][:3])
+            def get_option_price(self, sym, priority=False):
+                return 0.0   # force quote failure
+
+        client = _Fake()
+        import pytest
+        with patch("broker.ib_orders._compute_combo_net_limit",
+                   new=_compute_that_fails):
+            with pytest.raises(RuntimeError, match="combo limit"):
+                client._ib_place_combo(legs, "zdn_w-SPY-1", "BUY", None)
+
+        assert placed == [], "Must not call placeOrder when quotes fail"
 
 
 class TestDebitVerticalBuy:

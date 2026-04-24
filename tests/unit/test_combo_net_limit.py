@@ -39,7 +39,7 @@ class _MockMixin:
     """Stand-in for IBClient — only method used is get_option_price."""
     def __init__(self, prices):
         self._prices = prices
-    def get_option_price(self, symbol):
+    def get_option_price(self, symbol, priority=False):
         return self._prices.get(symbol, 0.0)
 
 
