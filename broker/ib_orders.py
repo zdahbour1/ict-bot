@@ -69,20 +69,33 @@ def _compute_combo_net_limit(mixin, leg_contracts, action: str,
         direction = (leg.get("direction") or "LONG").upper()
         sign = +1 if direction == "SHORT" else -1
         net += sign * px
-    # Widen by the slippage buffer so the combo crosses the spread.
-    # Direction of widening depends on order action:
-    #   action="SELL" (taking credit) → accept a LOWER credit → subtract
-    #   action="BUY"  (paying debit)  → accept a HIGHER debit  → add
+    # ENH-063 (2026-04-24) — IB BAG limit sign convention:
+    #   For action=BUY, limit > 0 means "pay up to limit debit"; limit
+    #   < 0 means "accept at least -limit credit". For action=SELL the
+    #   reverse holds. An iron condor/butterfly is normally a CREDIT
+    #   spread (net > 0 with our short=+/long=- sign convention).
+    #   The old code sent abs(net)+buf as a BUY limit — positive, i.e.
+    #   "I'll pay up to $X debit" — which on a credit combo is
+    #   extremely off-fair and triggers IB's "price cap" protection,
+    #   leaving the order stuck unfilled. Fix: keep the sign.
+    #
+    # Signed net → signed buy-side debit:
+    #   debit_to_pay = -net
+    #     net = +4.42 credit    → debit_to_pay = -4.42 (i.e. receive $4.42)
+    #     net = -2.00 debit     → debit_to_pay = +2.00 (i.e. pay $2.00)
+    # Widen toward worse-for-us so the combo crosses the spread:
+    #   BUY:  increase debit_to_pay by buf
+    #   SELL: decrease net (credit received) by buf
     # slip_bps is basis points of |net|; default 200 bps = 2%.
     buf = abs(net) * (slip_bps / 10_000.0)
     if action.upper() == "SELL":
-        limit = max(net - buf, 0.05)
+        # SELL the combo: we want to receive at least (net - buf)
+        limit = net - buf
     else:
-        limit = max(abs(net) + buf, 0.05)
-        # BUY a net-credit spread is unusual; use positive debit limit
-    # IB rejects negative limit prices on spreads — clamp to 0.05
+        # BUY the combo: we're willing to pay up to (-net + buf)
+        limit = -net + buf
     log.info(f"[COMBO-LIMIT] net_premium=${net:+.2f} action={action} "
-             f"slip={slip_bps:.0f}bps → limit=${limit:.2f}")
+             f"slip={slip_bps:.0f}bps → signed limit=${limit:+.2f}")
     return round(limit, 2)
 
 

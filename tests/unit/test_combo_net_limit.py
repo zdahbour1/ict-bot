@@ -44,12 +44,10 @@ class _MockMixin:
 
 
 class TestComboNetLimit:
-    def test_classic_credit_condor_returns_positive_net_credit(self):
-        """Iron condor at the body:
-          short_call + short_put = credits (we receive)
-          long_call  + long_put  = debits  (we pay)
-        Net should be a positive credit. Submit as SELL with a
-        buffer-reduced limit."""
+    def test_classic_credit_condor_sell_returns_positive_credit(self):
+        """Iron condor at the body, action=SELL (close a credit):
+          SELL limit > 0 = min credit we'll accept when selling.
+        Net = +3.40 credit, buffer 2% → limit ≈ +3.33."""
         from broker.ib_orders import _compute_combo_net_limit
         legs = _condor()
         prices = {"X500C": 2.50, "X510C": 0.80,   # calls
@@ -60,11 +58,30 @@ class TestComboNetLimit:
             limit = _compute_combo_net_limit(
                 mixin, _leg_contracts(legs), action="SELL", legs=legs,
             )
-        # Net premium = +2.50 -0.80 +2.30 -0.60 = +3.40
-        # Buffer = 3.40 * 0.02 = 0.068 → rounded
-        # SELL limit = 3.40 - 0.068 = ~3.33
         assert limit is not None
         assert 3.30 <= limit <= 3.36, f"unexpected limit {limit}"
+
+    def test_credit_condor_buy_submits_negative_signed_limit(self):
+        """ENH-063 regression: same credit condor, action=BUY (open).
+        IB BAG convention: signed limit < 0 = credit we'll accept.
+        Old code sent +abs(net) and triggered IB's price-cap popup.
+        Fixed code must send -(net) + buf ≈ -3.33."""
+        from broker.ib_orders import _compute_combo_net_limit
+        legs = _condor()
+        prices = {"X500C": 2.50, "X510C": 0.80,
+                   "X500P": 2.30, "X490P": 0.60}
+        mixin = _MockMixin(prices)
+        with patch("db.settings_cache.get_bool", return_value=True), \
+             patch("db.settings_cache.get_float", return_value=200.0):
+            limit = _compute_combo_net_limit(
+                mixin, _leg_contracts(legs), action="BUY", legs=legs,
+            )
+        assert limit is not None
+        # Net = +3.40; BUY limit = -3.40 + 0.068 ≈ -3.33
+        assert -3.40 <= limit <= -3.30, (
+            f"BUY of credit combo must submit NEGATIVE signed limit "
+            f"(IB price-cap protection triggers otherwise). Got {limit!r}"
+        )
 
     def test_auto_limit_disabled_returns_none(self):
         from broker.ib_orders import _compute_combo_net_limit
@@ -116,10 +133,12 @@ class TestComboNetLimit:
             f"wider slip should lower SELL limit — tight={tight}, wide={wide}"
         )
 
-    def test_never_returns_negative_limit(self):
-        """IB rejects negative limit prices on spreads; we clamp."""
+    def test_debit_structure_buy_submits_positive_limit(self):
+        """All-long straddle (net debit): BUY limit must be POSITIVE
+        = max debit we'll pay. ENH-063: the old code over-clamped
+        every negative value to +0.05; the signed version now
+        correctly returns a positive number without needing a clamp."""
         from broker.ib_orders import _compute_combo_net_limit
-        # Contrived: all long debits → net would be negative without clamp
         legs = [
             {"symbol": "A", "direction": "LONG", "contracts": 1,
              "strike": 100, "right": "C", "expiry": "20260515"},
@@ -131,8 +150,11 @@ class TestComboNetLimit:
         with patch("db.settings_cache.get_bool", return_value=True), \
              patch("db.settings_cache.get_float", return_value=500.0):
             limit = _compute_combo_net_limit(
-                mixin, _leg_contracts(legs), action="SELL", legs=legs,
+                mixin, _leg_contracts(legs), action="BUY", legs=legs,
             )
-        assert limit is not None and limit >= 0.05, (
-            f"clamp must enforce >= 0.05, got {limit}"
+        # Net = -1.50 -1.50 = -3.00 (pure debit).
+        # BUY limit = -(-3.00) + (3.00 * 0.05) = +3.15
+        assert limit is not None and limit > 0, (
+            f"debit BUY must submit positive limit, got {limit!r}"
         )
+        assert 3.10 <= limit <= 3.20
