@@ -194,3 +194,61 @@ Full report: `docs/backtest_report_2026-04-23.md`.
    for longer-history backtest (ENH-060)?
 4. Tier-based variant routing — which tier gets which variant as
    default, and is it configurable per-ticker?
+
+---
+
+## ENH-060 1-year IB daily-bar backtest (2025-04-23 → 2026-04-23)
+
+Quick results on 8 tickers × 5 variants:
+
+| Variant | Trades | Net P&L | Win% | Max DD | Note |
+|---------|--------|---------|------|--------|------|
+| v1_baseline | 8  | +$3,822  | 75%  | -$16 | Matches 60-day directionally |
+| v2_hold_day | 8  | +$3,231  | 88%  | -$26 | ⚠️ Contradicts 60-day result! |
+| v3_phaseB | 8  | +$24,099 | 100% | 0    | ⚠️ SUSPICIOUS (see D24) |
+| v4_filtered | 8  | +$28,722 | 100% | 0    | ⚠️ SUSPICIOUS |
+| v5_hedged | 8  | +$69,614 | 100% | 0    | ⚠️ HIGHLY SUSPICIOUS |
+
+### D24 — Daily-bar bias is real and contaminates ENH-060
+
+**Do not trust the 1y numbers for V3-V5.** Daily bars smooth away
+the intraday stop-outs that kill condor trades in real markets.
+A position that would have hit -$500 at 11 AM and been stopped out
+in 5m bars may "recover" by 4 PM and show a positive daily close.
+The simulator sees only the daily close and thinks the trade was
+a winner.
+
+- V1/V2 (weekly expiries, fast turnover) are less affected — their
+  exits happen at EOD anyway, so daily-close equivalent is valid.
+- V3-V5 (45 DTE, intraday hedging, profit targets) are HEAVILY
+  contaminated.
+
+**Evidence**: 100% win rate + $0 drawdown on 8 trades is impossible
+in real iron-condor trading. The 60-day 5m backtest (docs/backtest_
+report_2026-04-23.md) showed 73% win rate + $2,865 DD on V5 which
+is within historical expectation.
+
+### D25 — Plan to fix ENH-060 properly
+
+The long-history run needs intraday granularity. IB's
+`reqHistoricalData` for 1+ year at 5m has hard data limits
+(~30 days per request, would need chained requests). Two options:
+
+1. **Chain 5m daily requests** — fetch 30 days at a time, paginate
+   back. Slow but accurate. ~15-30 minutes per ticker. Queue as
+   follow-up work.
+2. **Accept daily fidelity as a coarser signal** — use the 1y
+   numbers only for directional ordering, not absolute P&L. Cross-
+   validate against the 60-day 5m study.
+
+For now: **report says "60-day 5m is ground truth. 1y daily is
+direction-only."** The live paper test tomorrow resolves the
+question decisively.
+
+### D26 — V2 1y-daily shows +88% win rate contradicting 60-day
+
+Another symptom of daily-bar bias. In 60-day 5m, V2 lost $29k and
+hit 37% win rate. The 1y daily says +88% win rate. **Trust the
+5m result** — V2 mechanics force EOD close, and on daily bars the
+EOD exit is the bar's own close which happens to be profitable
+more often in smoothed daily data. Reinforces D17 to kill V2.

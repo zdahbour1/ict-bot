@@ -126,15 +126,17 @@ def main():
     ib.disconnect()
     log.info(f"IB disconnected. Cached {len(bars_cache)} tickers.")
 
-    # Patch data_provider.fetch_multi_timeframe to return our cache
-    import backtest_engine.data_provider as dp
-    orig = dp.fetch_multi_timeframe
+    # Monkey-patch the reference inside dn_variants_engine directly —
+    # the module imported fetch_multi_timeframe at load time so
+    # patching data_provider doesn't affect it.
+    import backtest_engine.dn_variants_engine as dne
+    orig = dne.fetch_multi_timeframe
     def _patched(ticker, *, base_interval="5m", start=None, end=None):
         df = bars_cache.get(ticker)
         if df is None:
             return {"base": None, "1h": None, "4h": None}
         return {"base": df, "1h": df, "4h": df}
-    dp.fetch_multi_timeframe = _patched
+    dne.fetch_multi_timeframe = _patched
 
     end_d = date.today()
     start_d = end_d - timedelta(days=args.years * 365)
@@ -158,7 +160,7 @@ def main():
                 log.error(f"  {t}/{v.name}: {e}", exc_info=True)
 
     # Restore
-    dp.fetch_multi_timeframe = orig
+    dne.fetch_multi_timeframe = orig
 
     # Write outputs
     out_dir = Path("data"); out_dir.mkdir(exist_ok=True)
