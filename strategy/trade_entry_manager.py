@@ -55,6 +55,80 @@ def _update_entry_thread(stage: str, ticker: str, detail: str = "") -> None:
         pass
 
 
+def _cleanup_orphan_combo_by_ref(client, ticker: str,
+                                  order_ref: str | None) -> int:
+    """Cancel any working BAG/combo BUY order tagged with ``order_ref``.
+
+    Called from the multi-leg entry path when the place-order call
+    raises (TimeoutError, IB error, etc.). Without this, a combo
+    parent in ``PendingSubmit`` stays alive in TWS, may fill later,
+    and creates a phantom position with no DB trade.
+
+    Best-effort: never raises. Returns the number of orders cancelled.
+    The caller has already decided the entry is dead — we're just
+    cleaning up the IB side.
+    """
+    if not order_ref:
+        return 0
+    ACTIVE = {"Submitted", "PreSubmitted", "PendingSubmit", "ApiPending"}
+    try:
+        working = client.get_all_working_orders()
+    except Exception as e:
+        try:
+            from db.writer import add_system_log
+            add_system_log("entry-manager", "warn",
+                           f"[{ticker}] orphan-combo cleanup: "
+                           f"get_all_working_orders failed: {e}")
+        except Exception:
+            pass
+        return 0
+    cancelled = 0
+    for o in working or []:
+        try:
+            if o.get("status") not in ACTIVE:
+                continue
+            if o.get("action") != "BUY":
+                continue
+            # Match by orderRef first; fall back to BAG secType +
+            # ticker so we still catch combos whose ref got stripped.
+            ref = (o.get("orderRef") or "").strip()
+            sec = o.get("secType")
+            is_ours = ref == order_ref
+            if not is_ours:
+                continue
+            oid = int(o.get("orderId") or 0)
+            if not oid:
+                continue
+            try:
+                client.cancel_order_by_id(oid)
+                cancelled += 1
+                try:
+                    from db.writer import add_system_log
+                    add_system_log(
+                        "entry-manager", "warn",
+                        f"[{ticker}] Cancelled orphan combo BUY "
+                        f"orderId={oid} ref={order_ref} secType={sec} "
+                        f"(multi-leg entry failed — preventing "
+                        f"unclaimed fill).",
+                        {"order_id": oid, "order_ref": order_ref,
+                         "sec_type": sec, "ticker": ticker},
+                    )
+                except Exception:
+                    pass
+            except Exception as e:
+                try:
+                    from db.writer import add_system_log
+                    add_system_log(
+                        "entry-manager", "error",
+                        f"[{ticker}] Failed to cancel orphan combo "
+                        f"orderId={oid} ref={order_ref}: {e}")
+                except Exception:
+                    pass
+        except Exception:
+            continue
+    return cancelled
+
+
 class TradeEntryManager:
     """
     Manages trade entry decisions and execution for a single ticker.
@@ -467,10 +541,19 @@ class TradeEntryManager:
         except Exception as e:
             self._entry_pending = False
             self._errors_today += 1
+            # ENH-062 (2026-04-24): before giving up, hunt for any
+            # working BAG/combo parent order tagged with our
+            # ``order_ref`` and cancel it. Otherwise the parent can sit
+            # in PendingSubmit indefinitely, fill later, and leave us
+            # with an orphan position that has no DB trade — exactly
+            # the "brackets without trades" state the user reported.
+            _cleanup_orphan_combo_by_ref(
+                self.client, self.ticker, order_ref)
             handle_error(f"scanner-{self.ticker}", "multi_leg_entry", e,
                          context={"ticker": self.ticker,
                                   "n_legs": len(legs),
-                                  "combo": use_combo},
+                                  "combo": use_combo,
+                                  "order_ref": order_ref},
                          critical=True)
             _update_entry_thread("failed", self.ticker,
                                  f"multi-leg exception: {type(e).__name__}")

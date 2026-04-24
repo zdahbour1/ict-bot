@@ -488,6 +488,27 @@ def _reconcile(client, exit_manager, ib_positions):
     except Exception as e:
         log.warning(f"[RECONCILE] PASS 5 duplicate cleanup error: {e}")
 
+    # ══════════════════════════════════════════════════════════
+    # PASS 6: Stuck-entry BUY combo/BAG cleanup (ENH-062)
+    # ══════════════════════════════════════════════════════════
+    # Finds any working BUY Bag/combo *entry* order whose orderRef
+    # doesn't match an open DB trade's client_trade_id. These are
+    # entries that IB accepted but never filled — they sit in
+    # PendingSubmit/Submitted and can fill later creating orphan
+    # positions. 2026-04-24: user reported AVGO/MSFT/COIN/META combos
+    # stuck like this from multi-leg TimeoutError paths.
+    pass6_cancelled = 0
+    try:
+        from db.settings_cache import get_bool, get_int
+        if get_bool("RECONCILE_AUTO_CANCEL_STUCK_ENTRY_COMBOS",
+                    default=True):
+            min_age_sec = get_int("RECONCILE_STUCK_COMBO_MIN_AGE_SEC",
+                                   default=120) or 120
+            pass6_cancelled = _pass6_cancel_stuck_entry_combos(
+                client, min_age_sec)
+    except Exception as e:
+        log.warning(f"[RECONCILE] PASS 6 stuck-combo cleanup error: {e}")
+
     # ── Summary ──
     total_ib = len(ib_by_con_id)
     total_db = len(db_open_trades)
@@ -776,6 +797,120 @@ def _pass5_cancel_unreferenced_brackets(client) -> int:
         )
     except Exception:
         pass
+    return cancelled
+
+
+def _pass6_cancel_stuck_entry_combos(client, min_age_sec: int) -> int:
+    """ENH-062 (2026-04-24) — cancel working BUY Bag/combo entry
+    orders whose orderRef has no matching open DB trade.
+
+    These arise when the multi-leg entry path times out after IB has
+    already accepted the Bag, leaving the parent in PendingSubmit
+    forever. Without cleanup they may fill minutes/hours later and
+    create an orphan position with no DB envelope.
+
+    Criteria for cancellation:
+      - status in {Submitted, PreSubmitted, PendingSubmit, ApiPending}
+      - action == 'BUY'
+      - secType == 'BAG' (combo) — PASS 5 already handles single-leg
+        SELL brackets; here we go after combo entries specifically
+      - orderRef is non-empty AND does NOT match any open DB trade's
+        client_trade_id
+      - (optional) order age ≥ ``min_age_sec`` to avoid racing with
+        an in-flight fill — 120 s default
+
+    Returns the number of orders cancelled.
+    """
+    from datetime import datetime, timezone
+    ACTIVE = {"Submitted", "PreSubmitted", "PendingSubmit", "ApiPending"}
+    try:
+        working = client.get_all_working_orders()
+    except Exception as e:
+        log.warning(f"[RECONCILE] PASS 6 get_all_working_orders: {e}")
+        return 0
+
+    # Set of live client_trade_ids — any combo with a matching ref is
+    # a real in-progress entry, leave it alone.
+    try:
+        from db.connection import get_session
+        session = get_session()
+        if session is None:
+            return 0
+        try:
+            rows = session.execute(text(
+                "SELECT client_trade_id FROM trades "
+                "WHERE status = 'open' AND client_trade_id IS NOT NULL"
+            )).fetchall()
+            tracked_refs: set[str] = {
+                (r[0] or "").strip() for r in rows if r[0]
+            }
+        finally:
+            session.close()
+    except Exception as e:
+        log.warning(f"[RECONCILE] PASS 6 db query: {e}")
+        return 0
+
+    now_ts = datetime.now(timezone.utc).timestamp()
+    candidates = []
+    for o in working or []:
+        try:
+            if o.get("status") not in ACTIVE:
+                continue
+            if o.get("action") != "BUY":
+                continue
+            if o.get("secType") != "BAG":
+                continue
+            ref = (o.get("orderRef") or "").strip()
+            if not ref:
+                # Untagged combo — can't link. Leave for user/PASS 5.
+                continue
+            if ref in tracked_refs:
+                continue
+            # Age check: avoid racing with fresh submissions.
+            submitted_at = o.get("submittedAt") or o.get("placed_ts")
+            if submitted_at:
+                try:
+                    age = now_ts - float(submitted_at)
+                    if age < min_age_sec:
+                        continue
+                except Exception:
+                    pass
+            candidates.append(o)
+        except Exception:
+            continue
+
+    if not candidates:
+        return 0
+
+    log.warning(f"[RECONCILE] PASS 6: found {len(candidates)} stuck "
+                f"BUY combo entry order(s) — cancelling")
+    cancelled = 0
+    for o in candidates:
+        oid = int(o.get("orderId") or 0)
+        ref = o.get("orderRef") or ""
+        sym = o.get("symbol") or "?"
+        try:
+            if hasattr(client, "cancel_order_by_id"):
+                client.cancel_order_by_id(oid)
+                cancelled += 1
+                log.warning(f"[RECONCILE] PASS 6 cancelled orderId={oid} "
+                            f"ref={ref} symbol={sym}")
+                try:
+                    from strategy.audit import log_trade_action
+                    log_trade_action(
+                        None, "pass6_stuck_combo_cancel",
+                        "reconciliation",
+                        f"Cancelled stuck BUY combo orderId={oid} "
+                        f"ref={ref!r} symbol={sym} — no matching open "
+                        f"DB trade; entry timed out without cleanup.",
+                        level="warn",
+                        extra={"order_id": oid, "order_ref": ref,
+                               "symbol": sym},
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            log.warning(f"[RECONCILE] PASS 6 cancel orderId={oid}: {e}")
     return cancelled
 
 
