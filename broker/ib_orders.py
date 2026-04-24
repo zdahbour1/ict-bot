@@ -1494,6 +1494,10 @@ class IBOrdersMixin:
                 "symbol":    "".join((getattr(contract, "localSymbol", "") or "").split()) if contract else "",
                 "clientId":  getattr(order, "clientId", 0) or 0,
                 "orderRef":  getattr(order, "orderRef", "") or "",
+                # ENH-062: PASS 6 / orphan-combo cleanup filters on
+                # secType to isolate BAG (combo) parents from single-
+                # leg OPT brackets. Must be present on every row.
+                "secType":   getattr(contract, "secType", "") if contract else "",
             })
         return results
 
