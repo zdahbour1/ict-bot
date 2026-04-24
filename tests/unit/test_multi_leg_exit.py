@@ -125,27 +125,34 @@ class TestExecuteMultiLegExit:
              "ib_con_id": 104, "ib_tp_perm_id": None, "ib_sl_perm_id": 1004},
         ]
 
-    def test_sends_one_close_order_per_leg(self):
+    def test_sends_one_close_order_per_leg_in_legacy_mode(self):
+        """ENH-065: per-leg close only fires when operator opts out of
+        combo close via USE_COMBO_ORDERS_FOR_MULTI_LEG=false. Default
+        (combo close) path is covered in test_multi_leg_exit_hardened.py."""
         from strategy.exit_executor import _execute_multi_leg_exit
         client = MagicMock()
         trade = {"ticker": "SPY", "db_id": 42, "n_legs": 4}
         with patch("strategy.exit_executor._fetch_open_legs",
-                   return_value=self._iron_condor_legs()):
+                   return_value=self._iron_condor_legs()), \
+             patch("db.settings_cache.get_bool", return_value=False):
             _execute_multi_leg_exit(client, trade, reason="TEST")
-        # 4 close orders total: 2 buy_call (short calls), 2 sell_put/sell_call
-        # Actually: iron condor = short_call + long_call + short_put + long_put
-        # Close actions: buy_call, sell_call, buy_put, sell_put
+        # Iron condor legacy flatten: buy_call (short calls),
+        # sell_call (long calls), buy_put (short puts), sell_put (long puts)
         client.buy_call.assert_called_once_with("SPY260515C00450000", 2)
         client.sell_call.assert_called_once_with("SPY260515C00460000", 2)
         client.buy_put.assert_called_once_with("SPY260515P00440000", 2)
         client.sell_put.assert_called_once_with("SPY260515P00430000", 2)
 
-    def test_cancels_bracket_perm_ids_per_leg(self):
+    def test_cancels_bracket_perm_ids_per_leg_in_legacy_mode(self):
+        """ENH-065: bracket perm-id cancellation is per-leg only in
+        legacy opt-out mode. Combo close path cancels perm_ids after
+        a successful BAG close (covered in hardened tests)."""
         from strategy.exit_executor import _execute_multi_leg_exit
         client = MagicMock()
         trade = {"ticker": "SPY", "db_id": 42, "n_legs": 4}
         with patch("strategy.exit_executor._fetch_open_legs",
-                   return_value=self._iron_condor_legs()):
+                   return_value=self._iron_condor_legs()), \
+             patch("db.settings_cache.get_bool", return_value=False):
             _execute_multi_leg_exit(client, trade, reason="TEST")
         # Each non-null perm_id should produce a cancel attempt
         expected_perm_ids = sorted({1001, 1002, 1003, 1004})
@@ -161,9 +168,11 @@ class TestExecuteMultiLegExit:
         client.buy_call.assert_not_called()
         client.sell_put.assert_not_called()
 
-    def test_stock_leg_closes_via_sell_stock(self):
-        """ENH-036: hedge stock leg is now closed via sell_stock (long)
-        or buy_stock (short) instead of being skipped."""
+    def test_stock_leg_closes_via_sell_stock_in_legacy_mode(self):
+        """ENH-036 + ENH-065: hedge stock leg closes via sell_stock
+        (long) or buy_stock (short) in the legacy per-leg path. In the
+        default combo-close path (ENH-065), stock flatten is Phase 3
+        responsibility (EnvelopeExitMonitor)."""
         from strategy.exit_executor import _execute_multi_leg_exit
         legs = [
             {"leg_id": 1, "leg_index": 0, "leg_role": "short_call",
@@ -177,7 +186,9 @@ class TestExecuteMultiLegExit:
         ]
         client = MagicMock()
         trade = {"ticker": "SPY", "db_id": 99, "n_legs": 2}
-        with patch("strategy.exit_executor._fetch_open_legs", return_value=legs):
+        with patch("strategy.exit_executor._fetch_open_legs",
+                   return_value=legs), \
+             patch("db.settings_cache.get_bool", return_value=False):
             _execute_multi_leg_exit(client, trade, reason="TEST")
         # Option leg closed AND stock leg closed.
         client.buy_call.assert_called_once_with("SPY260515C00450000", 1)

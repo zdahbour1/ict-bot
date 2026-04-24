@@ -206,8 +206,11 @@ class TestMultiLegExitRoutesToCombo:
         assert not fake_client.sell_call.called
         assert not fake_client.sell_put.called
 
-    def test_falls_back_to_per_leg_if_combo_raises(self, monkeypatch):
-        """Combo path throws → exit still closes via per-leg methods."""
+    def test_does_NOT_fall_back_to_per_leg_on_combo_failure(self, monkeypatch):
+        """ENH-065 (2026-04-24): on combo close failure, the exit MUST
+        escalate a critical alert and leave the trade open for retry.
+        It MUST NOT silently leg-walk — doing so creates transient
+        naked-short windows on defined-risk spreads."""
         import config
         monkeypatch.setattr(config, "USE_COMBO_ORDERS_FOR_MULTI_LEG", True,
                              raising=False)
@@ -216,11 +219,6 @@ class TestMultiLegExitRoutesToCombo:
         fake_client.place_combo_close_order = MagicMock(
             side_effect=RuntimeError("IB combo rejected")
         )
-        # Per-leg methods succeed
-        fake_client.buy_call = MagicMock(return_value={"status": "Filled"})
-        fake_client.sell_call = MagicMock(return_value={"status": "Filled"})
-        fake_client.buy_put = MagicMock(return_value={"status": "Filled"})
-        fake_client.sell_put = MagicMock(return_value={"status": "Filled"})
 
         trade = {
             "db_id": 778, "ticker": "SPY",
@@ -238,11 +236,19 @@ class TestMultiLegExitRoutesToCombo:
         }]
         monkeypatch.setattr(ee, "_fetch_open_legs", lambda _tid: canned_legs)
         monkeypatch.setattr(ee, "_trace", lambda *a, **kw: None)
+        monkeypatch.setattr("time.sleep", lambda _s: None)
 
-        ee._execute_multi_leg_exit(fake_client, trade, "TIME_EXIT")
+        with patch("strategy.error_handler.handle_error") as mock_err:
+            ee._execute_multi_leg_exit(fake_client, trade, "TIME_EXIT")
 
-        # Combo was attempted
-        fake_client.place_combo_close_order.assert_called_once()
-        # Per-leg fall-back also ran. For short_call (SHORT + C) the
-        # close method is buy_call.
-        assert fake_client.buy_call.called
+        # Combo was attempted (with retries)
+        assert fake_client.place_combo_close_order.call_count == 3
+        # Critical: per-leg methods were NOT called
+        fake_client.buy_call.assert_not_called()
+        fake_client.sell_call.assert_not_called()
+        fake_client.buy_put.assert_not_called()
+        fake_client.sell_put.assert_not_called()
+        # A critical alert was fired so the operator can intervene
+        assert mock_err.called
+        _, kwargs = mock_err.call_args
+        assert kwargs.get("critical") is True

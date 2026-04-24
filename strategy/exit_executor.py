@@ -569,8 +569,14 @@ def _execute_multi_leg_exit(client, trade: dict, reason: str) -> float | None:
                                   "USE_COMBO_ORDERS_FOR_MULTI_LEG",
                                   False))
     if use_combo and hasattr(client, "place_combo_close_order"):
-        # Shape the legs the way the broker method expects (flat dicts
-        # with direction + contracts + symbol + leg metadata).
+        # Phase 1 (ENH-065, 2026-04-24): combo-close is AUTHORITATIVE
+        # for multi-leg exits. If it fails, we do NOT silently fall
+        # back to per-leg SELLs — closing an iron condor leg-by-leg
+        # creates transient naked-short windows and is the opposite of
+        # defined-risk. On failure we escalate to a critical alert and
+        # leave the trade open for the next exit cycle / operator.
+        #
+        # Shape the legs the way the broker method expects.
         combo_legs = [{
             "sec_type": l.get("sec_type") or "OPT",
             "symbol": l["symbol"],
@@ -585,19 +591,43 @@ def _execute_multi_leg_exit(client, trade: dict, reason: str) -> float | None:
             "leg_role": l.get("leg_role"),
             "underlying": l.get("underlying") or ticker,
         } for l in legs if int(l.get("contracts_open") or 0) > 0]
+
+        # Skip STK legs here — delta hedge stock flatten is a separate
+        # step (Phase 3 envelope monitor). Don't mix option-combo BAG
+        # with a stock leg; IB doesn't accept that in one order.
+        combo_legs = [l for l in combo_legs
+                       if (l.get("sec_type") or "OPT").upper() == "OPT"]
+
         if combo_legs:
-            try:
-                close_ref = (trade.get("client_trade_id") or "") + "-close"
-                result = client.place_combo_close_order(
-                    combo_legs, order_ref=close_ref, limit_price=None,
-                )
+            close_ref = (trade.get("client_trade_id") or "") + "-close"
+            # Try combo close up to N times (quotes refresh between
+            # attempts → LMT may fill next try). Each attempt goes
+            # through _ib_place_combo which waits up to 10s for fill
+            # before reporting back.
+            import time as _time
+            MAX_ATTEMPTS = 3
+            last_err: Exception | None = None
+            result = None
+            for attempt in range(1, MAX_ATTEMPTS + 1):
+                try:
+                    result = client.place_combo_close_order(
+                        combo_legs, order_ref=close_ref, limit_price=None,
+                    )
+                except Exception as e:
+                    last_err = e
+                    _trace(ticker,
+                           f"MULTI-LEG EXIT: combo close attempt {attempt}"
+                           f"/{MAX_ATTEMPTS} raised {type(e).__name__}: {e}",
+                           "warn")
+                    result = None
                 if result and result.get("all_filled"):
                     _trace(ticker,
-                           f"MULTI-LEG EXIT: combo close SUCCESS — "
-                           f"ONE IB order (orderId={result.get('combo_order_id')}) "
+                           f"MULTI-LEG EXIT: combo close SUCCESS on "
+                           f"attempt {attempt} — ONE IB order "
+                           f"(orderId={result.get('combo_order_id')}) "
                            f"closed all {len(combo_legs)} legs at "
                            f"net={result.get('net_fill_price'):+.2f}")
-                    # Still best-effort cancel any stale brackets on legs.
+                    # Cancel any stale brackets on legs (best-effort).
                     for leg in legs:
                         for pid_key in ("ib_tp_perm_id", "ib_sl_perm_id"):
                             pid = leg.get(pid_key)
@@ -609,17 +639,58 @@ def _execute_multi_leg_exit(client, trade: dict, reason: str) -> float | None:
                             except Exception:
                                 pass
                     return None
-                else:
+                if attempt < MAX_ATTEMPTS:
                     _trace(ticker,
-                           f"MULTI-LEG EXIT: combo close partial/failed "
-                           f"(status={result.get('legs') and result['legs'][0].get('status')}) "
-                           f"— falling back to per-leg closes",
+                           f"MULTI-LEG EXIT: combo close attempt "
+                           f"{attempt} did not fill; retrying in 2s",
                            "warn")
-            except Exception as e:
-                _trace(ticker,
-                       f"MULTI-LEG EXIT: combo close raised {type(e).__name__}: "
-                       f"{e} — falling back to per-leg closes",
-                       "warn")
+                    _time.sleep(2)
+
+            # All retries exhausted. Do NOT leg-walk. Escalate.
+            _trace(ticker,
+                   f"MULTI-LEG EXIT: combo close FAILED after "
+                   f"{MAX_ATTEMPTS} attempts for db_id={trade_id} — "
+                   f"REFUSING to flatten leg-by-leg (would create "
+                   f"transient naked positions on a defined-risk spread). "
+                   f"Trade stays open; operator or next exit cycle "
+                   f"retries.",
+                   "error")
+            from strategy.error_handler import handle_error
+            try:
+                handle_error(
+                    f"exit_executor-{ticker}",
+                    "multi_leg_combo_close_exhausted",
+                    last_err or RuntimeError(
+                        f"combo close did not fill after "
+                        f"{MAX_ATTEMPTS} attempts; trade {trade_id} "
+                        f"left open for retry"),
+                    context={"ticker": ticker, "trade_id": trade_id,
+                             "n_legs": len(combo_legs),
+                             "client_trade_id": close_ref},
+                    critical=True,
+                )
+            except Exception:
+                pass
+            return None
+
+        _trace(ticker,
+               "MULTI-LEG EXIT: no OPT legs with open contracts — "
+               "nothing for combo close to do",
+               "warn")
+        return None
+
+    # use_combo=False path — LEGACY / OPERATOR-ONLY emergency opt-out.
+    # This flattens a defined-risk spread leg-by-leg, which briefly
+    # leaves naked short legs exposed while long legs are unwound.
+    # Enabled only when USE_COMBO_ORDERS_FOR_MULTI_LEG=false. Keep
+    # around strictly for operator recovery when IB BAG routing is
+    # broken for some reason (rare). DO NOT rely on this.
+    _trace(ticker,
+           f"MULTI-LEG EXIT: falling through to LEGACY per-leg close "
+           f"(USE_COMBO_ORDERS_FOR_MULTI_LEG=false). This creates "
+           f"transient naked-short exposure and should only be used "
+           f"as an operator escape hatch.",
+           "warn")
 
     preferred_cid = trade.get("ib_client_id")
     sent = 0
