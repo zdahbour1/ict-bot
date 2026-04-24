@@ -6,12 +6,14 @@ import pytest
 
 class TestVariantRegistry:
     def test_canonical_variants_registered(self):
-        """Original 5 canonical + V5b sweep-winner (ENH-061) = 6 total."""
+        """Original 5 canonical + V5b sweep-winner (ENH-061) + 4 ZDN
+        gamma-scalping variants (2026-04-24) = 10 total."""
         from strategy.delta_neutral_variants import VARIANTS, VARIANT_BY_NAME
-        assert len(VARIANTS) == 6
+        assert len(VARIANTS) == 10
         assert set(VARIANT_BY_NAME.keys()) == {
             "v1_baseline", "v2_hold_day", "v3_phaseB",
             "v4_filtered", "v5_hedged", "v5b_sweep_winner",
+            "zdn_0dte", "zdn_weekly", "zdn_monthly", "zdn_next_month",
         }
 
     def test_v5b_uses_sweep_winning_params(self):

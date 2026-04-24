@@ -59,6 +59,29 @@ class DNVariant:
     # Risk management
     delta_hedge: bool = False     # simulate the stock hedge
     gamma_vega_caps: bool = False # Phase-C gamma+vega band checking
+    stop_loss_pct: float = 0.0    # 0 = disabled; typical 0.25 (close at 25% loss of credit)
+
+    # ── ZDN-series extensions (2026-04-24, ZDN = zero-delta-neutral) ──
+    # Structural:
+    structure: str = "iron_condor"          # or 'iron_butterfly' (shorts both ATM)
+    # Expiry override — when set, bypasses target_dte and selects by
+    # explicit rule. Options:
+    #   'target_dte' (default; uses target_dte window)
+    #   '0dte'       — today's expiry if listed, else nearest weekly
+    #   'weekly'     — next Friday
+    #   'monthly'    — 3rd Friday this month (or next if past)
+    #   'next_month' — 3rd Friday of next calendar month
+    expiry_mode: str = "target_dte"
+    # Time gates (America/New_York). None = no gate.
+    entry_time_et: str | None = None        # e.g., "10:00" = don't enter before 10am ET
+    exit_before_close_min: int = 0          # e.g., 15 = close 15 min before 16:00 ET
+    # Liquidity floor for leg selection. 0 = disabled.
+    min_option_volume: int = 0
+    # Tight delta hedging (per-variant override). When > 0, overrides the
+    # global DN_DELTA_BAND_SHARES from settings for THIS variant's trades.
+    # ZDN uses a tight band (10 shares) for aggressive gamma-scalping.
+    # 0 = use the global setting (current V5/V5b behavior).
+    hedge_delta_band_shares: int = 0
 
 
 # ── Five canonical variants for this backtest round ──
@@ -156,9 +179,80 @@ V5B_SWEEP_WINNER = DNVariant(
 )
 
 
+# ── ZDN-series (zero-delta-neutral gamma-scalping) 2026-04-24 ──
+#
+# User hypothesis: open an ATM iron butterfly after the morning chop
+# settles, then aggressively hedge delta with stock (tight ±10-share
+# band, 30s rebalance). Structure is short call + short put both
+# at-the-money (same strike = classic butterfly). Wings keep the
+# structure defined-risk.
+#
+# Four variants — same logic, different expiry:
+#   ZDN_0DTE       — same-day expiry (0 DTE) — maximum theta, max gamma
+#   ZDN_WEEKLY     — next Friday weekly — balanced
+#   ZDN_MONTHLY    — 3rd Friday this month — slower bleed
+#   ZDN_NEXT_MONTH — 3rd Friday next month — lowest gamma, less hedging
+#
+# All ZDN variants share:
+#   - Entry: 10:00 ET earliest (skip open chop)
+#   - Close: 15 min before market close (3:45 ET)
+#   - TP: 50% of credit, SL: 25% of credit
+#   - Hedge: ±10 shares, every 30s
+#   - Liquidity floor on leg selection
+
+_ZDN_COMMON = dict(
+    structure="iron_butterfly",
+    strike_mode="atm_plus_wing",
+    wing_width_dollars=5.0,           # narrow wings = high theta, high gamma
+    entry_time_et="10:00",
+    exit_before_close_min=15,
+    profit_target_pct=0.50,
+    stop_loss_pct=0.25,
+    delta_hedge=True,
+    hedge_delta_band_shares=10,        # tight — 10 shares ≈ 0.1 delta per contract
+    sizing_mode="flat",
+    base_contracts=1,
+    # Modest IV gate so we only trade when premium is meaningful
+    ivr_min=0.0,
+    regime_filter=False,
+    event_blackout=True,
+    # Liquidity floor: skip contracts with volume < 100 (tunable via settings)
+    min_option_volume=100,
+)
+
+ZDN_0DTE = DNVariant(
+    name="zdn_0dte", label="ZDN-0",
+    **_ZDN_COMMON,
+    expiry_mode="0dte",
+    target_dte=0, min_dte=0, max_dte=1,
+)
+
+ZDN_WEEKLY = DNVariant(
+    name="zdn_weekly", label="ZDN-W",
+    **_ZDN_COMMON,
+    expiry_mode="weekly",
+    target_dte=5, min_dte=1, max_dte=10,
+)
+
+ZDN_MONTHLY = DNVariant(
+    name="zdn_monthly", label="ZDN-M",
+    **_ZDN_COMMON,
+    expiry_mode="monthly",
+    target_dte=20, min_dte=10, max_dte=45,
+)
+
+ZDN_NEXT_MONTH = DNVariant(
+    name="zdn_next_month", label="ZDN-N",
+    **_ZDN_COMMON,
+    expiry_mode="next_month",
+    target_dte=45, min_dte=30, max_dte=60,
+)
+
+
 VARIANTS: list[DNVariant] = [
     V1_BASELINE, V2_HOLD_DAY, V3_PHASEB, V4_FILTERED,
     V5_HEDGED, V5B_SWEEP_WINNER,
+    ZDN_0DTE, ZDN_WEEKLY, ZDN_MONTHLY, ZDN_NEXT_MONTH,
 ]
 
 VARIANT_BY_NAME: dict[str, DNVariant] = {v.name: v for v in VARIANTS}

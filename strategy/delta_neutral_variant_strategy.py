@@ -30,6 +30,7 @@ from strategy.base_strategy import BaseStrategy, LegSpec, Signal, StrategyRegist
 from strategy.delta_neutral_variants import (
     DNVariant, V1_BASELINE, V2_HOLD_DAY, V3_PHASEB,
     V4_FILTERED, V5_HEDGED, V5B_SWEEP_WINNER,
+    ZDN_0DTE, ZDN_WEEKLY, ZDN_MONTHLY, ZDN_NEXT_MONTH,
 )
 from strategy.delta_neutral_strategy import (
     _next_expiry_yyyymmdd, _format_occ, _round_to_interval,
@@ -52,29 +53,98 @@ except Exception:
         return False
 
 
-def _target_dte_expiry(target_dte: int, min_dte: int, max_dte: int) -> str:
-    """Pick a concrete expiry YYYYMMDD at approximately target_dte
-    calendar days. For weekly variants this is the next Friday ≥
-    min_dte. For 45-DTE variants this is the 3rd Friday of the month
-    ~target_dte out, clamped to [min_dte, max_dte].
+def _third_friday(year: int, month: int) -> date:
+    """Return the 3rd Friday of (year, month)."""
+    from datetime import timedelta
+    d = date(year, month, 1)
+    # First Friday
+    while d.weekday() != 4:
+        d += timedelta(days=1)
+    # Advance two more weeks
+    return d + timedelta(days=14)
 
-    Simplification: uses Fridays only (weeklies + monthlies both fall
-    on Fridays for equity options). Production should query the option
-    chain's listed expirations.
+
+def _expiry_for_mode(mode: str, target_dte: int,
+                      min_dte: int, max_dte: int) -> str:
+    """Pick a concrete expiry YYYYMMDD for a given expiry_mode.
+
+    Modes:
+      'target_dte' (default) — Friday nearest target_dte in window.
+      '0dte'       — today if weekday, else nearest weekly Friday.
+      'weekly'     — next Friday.
+      'monthly'    — 3rd Friday of current month (or next if already past).
+      'next_month' — 3rd Friday of next calendar month.
+
+    Simplification: uses Fridays only. Production should query the
+    option chain's listed expirations.
     """
     from datetime import timedelta
-    d = date.today() + timedelta(days=max(min_dte, 1))
+    today = date.today()
+
+    if mode == "0dte":
+        # If today is a weekday, use today; else nearest coming Friday
+        if today.weekday() < 5:
+            return today.strftime("%Y%m%d")
+        d = today
+        while d.weekday() != 4:
+            d += timedelta(days=1)
+        return d.strftime("%Y%m%d")
+
+    if mode == "weekly":
+        d = today + timedelta(days=1)
+        while d.weekday() != 4:
+            d += timedelta(days=1)
+        return d.strftime("%Y%m%d")
+
+    if mode == "monthly":
+        d = _third_friday(today.year, today.month)
+        if d <= today:
+            ny = today.year + (1 if today.month == 12 else 0)
+            nm = 1 if today.month == 12 else today.month + 1
+            d = _third_friday(ny, nm)
+        return d.strftime("%Y%m%d")
+
+    if mode == "next_month":
+        ny = today.year + (1 if today.month == 12 else 0)
+        nm = 1 if today.month == 12 else today.month + 1
+        return _third_friday(ny, nm).strftime("%Y%m%d")
+
+    # Default: target_dte window
+    d = today + timedelta(days=max(min_dte, 1))
     while d.weekday() != 4:   # Friday
         d += timedelta(days=1)
-    # Advance until close to target_dte, within window
-    dte = (d - date.today()).days
+    dte = (d - today).days
     while dte < target_dte - 3:
         d += timedelta(days=7)
-        dte = (d - date.today()).days
+        dte = (d - today).days
         if dte > max_dte:
             d -= timedelta(days=7)
             break
     return d.strftime("%Y%m%d")
+
+
+def _target_dte_expiry(target_dte: int, min_dte: int, max_dte: int) -> str:
+    """Backward-compatible wrapper."""
+    return _expiry_for_mode("target_dte", target_dte, min_dte, max_dte)
+
+
+def _is_before_entry_time_et(entry_time_et: str | None) -> bool:
+    """True if the current wall-clock America/New_York time is earlier
+    than HH:MM given by ``entry_time_et``. None/empty disables the
+    gate (returns False)."""
+    if not entry_time_et:
+        return False
+    try:
+        hh, mm = entry_time_et.split(":")
+        gate_h, gate_m = int(hh), int(mm)
+    except Exception:
+        return False
+    try:
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo("America/New_York"))
+    except Exception:
+        now = datetime.utcnow()  # fallback — approximate
+    return (now.hour, now.minute) < (gate_h, gate_m)
 
 
 class DNVariantStrategy(BaseStrategy):
@@ -135,6 +205,11 @@ class DNVariantStrategy(BaseStrategy):
         if v.event_blackout and _is_earnings_blackout(ticker, date.today()):
             return []
 
+        # Entry time gate (e.g., ZDN waits until 10:00 ET for the
+        # morning chop to settle before opening an ATM butterfly).
+        if _is_before_entry_time_et(v.entry_time_et):
+            return []
+
         # IVR filter (using realized-vol-quantile proxy)
         if v.ivr_min > 0:
             rvol_series = (closes.pct_change().rolling(20).std().dropna()
@@ -182,7 +257,8 @@ class DNVariantStrategy(BaseStrategy):
                 "current_price": current_price,
                 "sigma": sigma,
                 "target_dte": v.target_dte,
-                "expiry": _target_dte_expiry(v.target_dte, v.min_dte, v.max_dte),
+                "expiry": _expiry_for_mode(
+                    v.expiry_mode, v.target_dte, v.min_dte, v.max_dte),
             },
         )]
 
@@ -193,12 +269,19 @@ class DNVariantStrategy(BaseStrategy):
         details = signal.details or {}
         S = float(details.get("current_price") or signal.entry_price)
         sigma = float(details.get("sigma") or 0.20)
-        expiry = details.get("expiry") or _target_dte_expiry(
-            v.target_dte, v.min_dte, v.max_dte)
+        expiry = details.get("expiry") or _expiry_for_mode(
+            v.expiry_mode, v.target_dte, v.min_dte, v.max_dte)
         dte = v.target_dte
 
         # Strike selection
-        if v.strike_mode == "delta_targeted":
+        if v.structure == "iron_butterfly":
+            # Both short legs share the ATM strike (classic butterfly).
+            atm = _round_to_interval(S, v.strike_interval)
+            sc = atm
+            sp = atm
+            lc = atm + v.wing_width_dollars
+            lp = atm - v.wing_width_dollars
+        elif v.strike_mode == "delta_targeted":
             sc = _strike_by_delta(S, v.short_delta, dte, sigma, "C",
                                    v.strike_interval)
             lc = _strike_by_delta(S, v.long_delta, dte, sigma, "C",
@@ -276,3 +359,33 @@ class DNVariantStrategyV5bSweepWinner(DNVariantStrategy):
     """ENH-061 — sweep-optimized configuration from 2026-04-23
     603-combo scan. Ships alongside V5 canonical for live A/B."""
     VARIANT = V5B_SWEEP_WINNER
+
+
+# ── ZDN (zero-delta-neutral) gamma-scalping family 2026-04-24 ──
+#
+# All four ZDN variants share iron-butterfly structure + tight ±10-share
+# delta hedge band + 10:00 ET entry gate + 3:45 ET exit gate + 25% SL.
+# They differ only in expiry: 0DTE, weekly, monthly, next-month.
+
+@StrategyRegistry.register
+class DNVariantStrategyZDN0DTE(DNVariantStrategy):
+    """ZDN 0-DTE: same-day expiry iron butterfly; max theta, max gamma."""
+    VARIANT = ZDN_0DTE
+
+
+@StrategyRegistry.register
+class DNVariantStrategyZDNWeekly(DNVariantStrategy):
+    """ZDN weekly: next-Friday expiry iron butterfly."""
+    VARIANT = ZDN_WEEKLY
+
+
+@StrategyRegistry.register
+class DNVariantStrategyZDNMonthly(DNVariantStrategy):
+    """ZDN monthly: 3rd-Friday-this-month iron butterfly."""
+    VARIANT = ZDN_MONTHLY
+
+
+@StrategyRegistry.register
+class DNVariantStrategyZDNNextMonth(DNVariantStrategy):
+    """ZDN next-month: 3rd-Friday-next-month iron butterfly."""
+    VARIANT = ZDN_NEXT_MONTH

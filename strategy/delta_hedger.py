@@ -41,6 +41,20 @@ _DEFAULT_RATE = 0.04
 _SETTING_PREFIX = "DN_"
 
 
+def _lookup_variant(strategy_name: Optional[str]):
+    """Return the DNVariant for ``strategy_name``, or None when the
+    name is not a registered variant (e.g., legacy 'delta_neutral').
+    Never raises — the hedger must keep running even if the registry
+    is unavailable for some reason."""
+    if not strategy_name:
+        return None
+    try:
+        from strategy.delta_neutral_variants import VARIANT_BY_NAME
+        return VARIANT_BY_NAME.get(strategy_name)
+    except Exception:
+        return None
+
+
 def _dte_days(expiry_yyyymmdd: Optional[str],
               now: Optional[datetime] = None) -> float:
     """Days between now and option expiry. Clamped to >= 0."""
@@ -290,6 +304,15 @@ class DeltaHedger:
         legs = trade.get("legs") or []
         if not legs:
             return
+        # Per-variant config: skip trades whose variant has
+        # delta_hedge=False, and honor hedge_delta_band_shares override
+        # (ZDN uses 10 shares, canonical V5 uses the global ~20).
+        variant = _lookup_variant(trade.get("strategy_name"))
+        if variant is not None and variant.delta_hedge is False:
+            return
+        band_shares = self.band_shares
+        if variant is not None and variant.hedge_delta_band_shares > 0:
+            band_shares = variant.hedge_delta_band_shares
         # Quote the underlying once per trade
         try:
             underlying = float(self.client.get_realtime_equity_price(ticker))
@@ -300,10 +323,10 @@ class DeltaHedger:
         net_delta = compute_trade_net_delta(legs, underlying)
         current_hedge = int(trade.get("hedge_shares") or 0)
         action_plan = compute_rebalance_order(
-            net_delta, current_hedge, self.band_shares)
+            net_delta, current_hedge, band_shares)
         log.info(f"[DELTA-HEDGER] {ticker} tid={trade_id} "
                  f"net_delta={net_delta:+.1f} hedge={current_hedge:+d} "
-                 f"band=±{self.band_shares} "
+                 f"band=±{band_shares} "
                  f"action={action_plan}")
         if action_plan is None:
             return
@@ -311,7 +334,7 @@ class DeltaHedger:
         _sys_log("info",
                  f"{ticker} tid={trade_id}: planning {action} {shares}x "
                  f"(net_delta={net_delta:+.1f}, hedge={current_hedge:+d}, "
-                 f"band=±{self.band_shares})",
+                 f"band=±{band_shares})",
                  {"ticker": ticker, "trade_id": trade_id,
                   "net_delta": round(net_delta, 2),
                   "current_hedge": current_hedge,
@@ -365,18 +388,28 @@ def _fetch_open_dn_trades() -> list[dict]:
         if session is None:
             return []
         try:
+            # Match legacy delta_neutral plus every registered DN
+            # variant (v1_…v5b_, zdn_*). Any strategy whose name starts
+            # with 'v' (v1..v5b) or 'zdn_' is part of the DN family and
+            # is eligible for delta hedging. The per-variant
+            # `delta_hedge` flag is what actually decides whether we
+            # fire stock orders; we still fetch so the dashboard shows
+            # the computed net_delta.
             trade_rows = session.execute(text(
                 """
-                SELECT t.id, t.ticker, COALESCE(t.hedge_shares, 0)
+                SELECT t.id, t.ticker, COALESCE(t.hedge_shares, 0), s.name
                   FROM trades t
                   JOIN strategies s ON s.strategy_id = t.strategy_id
-                 WHERE t.status='open' AND s.name='delta_neutral'
+                 WHERE t.status='open'
+                   AND (s.name = 'delta_neutral'
+                        OR s.name LIKE 'v%'
+                        OR s.name LIKE 'zdn_%')
                 """
             )).fetchall()
             if not trade_rows:
                 return []
             out: list[dict] = []
-            for tid, ticker, hedge_shares in trade_rows:
+            for tid, ticker, hedge_shares, strategy_name in trade_rows:
                 legs = session.execute(text(
                     """
                     SELECT leg_index, leg_role, sec_type, symbol, underlying,
@@ -391,6 +424,7 @@ def _fetch_open_dn_trades() -> list[dict]:
                     "trade_id": tid,
                     "ticker": ticker,
                     "hedge_shares": int(hedge_shares or 0),
+                    "strategy_name": strategy_name,
                     "legs": [{
                         "leg_index": row[0], "leg_role": row[1],
                         "sec_type": row[2], "symbol": row[3],
