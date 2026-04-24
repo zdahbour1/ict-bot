@@ -5,13 +5,22 @@ import pytest
 
 
 class TestVariantRegistry:
-    def test_five_canonical_variants_registered(self):
+    def test_canonical_variants_registered(self):
+        """Original 5 canonical + V5b sweep-winner (ENH-061) = 6 total."""
         from strategy.delta_neutral_variants import VARIANTS, VARIANT_BY_NAME
-        assert len(VARIANTS) == 5
+        assert len(VARIANTS) == 6
         assert set(VARIANT_BY_NAME.keys()) == {
             "v1_baseline", "v2_hold_day", "v3_phaseB",
-            "v4_filtered", "v5_hedged",
+            "v4_filtered", "v5_hedged", "v5b_sweep_winner",
         }
+
+    def test_v5b_uses_sweep_winning_params(self):
+        from strategy.delta_neutral_variants import V5B_SWEEP_WINNER
+        assert V5B_SWEEP_WINNER.short_delta == 0.25
+        assert V5B_SWEEP_WINNER.long_delta == 0.03
+        assert V5B_SWEEP_WINNER.ivr_min == 50.0
+        assert V5B_SWEEP_WINNER.hard_exit_dte == 30
+        assert V5B_SWEEP_WINNER.delta_hedge is True
 
     def test_get_variant_unknown_raises(self):
         from strategy.delta_neutral_variants import get_variant

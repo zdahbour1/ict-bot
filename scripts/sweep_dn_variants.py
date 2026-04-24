@@ -63,7 +63,18 @@ V5_GRID = {
 def _expand(grid: dict) -> list[dict]:
     keys = list(grid.keys())
     combos = itertools.product(*[grid[k] for k in keys])
-    return [dict(zip(keys, vals)) for vals in combos]
+    out = []
+    for vals in combos:
+        d = dict(zip(keys, vals))
+        # Skip invalid iron-condor geometry: long_delta must be strictly
+        # less than short_delta (wings OTM of the short strikes).
+        # Without this, the grid spends hours on combos that yield 0
+        # trades because net credit <= 0.
+        if "short_delta" in d and "long_delta" in d:
+            if d["long_delta"] >= d["short_delta"]:
+                continue
+        out.append(d)
+    return out
 
 
 def main():

@@ -134,9 +134,31 @@ V5_HEDGED = DNVariant(
     gamma_vega_caps=True,
 )
 
+# ENH-061 / D31 — sweep-winning configuration from 2026-04-23 scan of
+# 603 V5 parameter combos. Optimum was the 25-delta short / 3-delta
+# long / IVR≥50 / 50% profit target / 30-DTE hard exit region; this
+# variant locks that in so V5_HEDGED (literature canonical) and V5B
+# (regime-optimized) can be compared head-to-head on live paper.
+V5B_SWEEP_WINNER = DNVariant(
+    name="v5b_sweep_winner",
+    label="V5b",
+    target_dte=45, min_dte=30, max_dte=60,
+    strike_mode="delta_targeted",
+    short_delta=0.25, long_delta=0.03,   # sweep-winning deltas
+    ivr_min=50.0,                         # only high-IV pockets
+    regime_filter=True,
+    event_blackout=True,
+    profit_target_pct=0.50,
+    hard_exit_dte=30,                    # sweep preferred 30 over 21
+    sizing_mode="ivr_bucketed",
+    delta_hedge=True,
+    gamma_vega_caps=True,
+)
+
 
 VARIANTS: list[DNVariant] = [
-    V1_BASELINE, V2_HOLD_DAY, V3_PHASEB, V4_FILTERED, V5_HEDGED,
+    V1_BASELINE, V2_HOLD_DAY, V3_PHASEB, V4_FILTERED,
+    V5_HEDGED, V5B_SWEEP_WINNER,
 ]
 
 VARIANT_BY_NAME: dict[str, DNVariant] = {v.name: v for v in VARIANTS}

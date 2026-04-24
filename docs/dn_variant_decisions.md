@@ -252,3 +252,136 @@ hit 37% win rate. The 1y daily says +88% win rate. **Trust the
 5m result** — V2 mechanics force EOD close, and on daily bars the
 EOD exit is the bar's own close which happens to be profitable
 more often in smoothed daily data. Reinforces D17 to kill V2.
+
+---
+
+## V5 Parameter Sweep results (previews — full report pending)
+
+Sweep running 603 valid combos × 6 tickers (SPY/QQQ/COIN/MSTR/AMD/NVDA)
+on 58-day 5m data. Early leaders visible at combo 580/603:
+
+| Combo | P&L | Trades | Notes |
+|-------|-----|--------|-------|
+| short=0.25 / long=0.03 / IVR≥30 / PT=75% / HARD=30 | **+$54,261** | 59 | 🏆 Current leader |
+| short=0.25 / long=0.05 / IVR≥50 / PT=50% / HARD=14 | +$53,410 | 27 | Fewer but bigger |
+| short=0.25 / long=0.05 / IVR≥30 / PT=25% / HARD=30 | +$50,694 | 59 | Fast-turnover variant |
+| short=0.16 / long=0.05 / IVR≥50 / PT=25% / HARD=21 | +$32,489 | 35 | Literature-conforming |
+| V5_HEDGED (canonical) | +$16,216 | 71 | Baseline |
+
+### D27 — Sweep suggests 25-delta beats canonical 16-delta on 60-day
+
+The literature standard (tastytrade / projectfinance) is 16-delta
+short legs. Sweep says 25-delta (more ATM) triples P&L on this
+60-day window. Plausible mechanism: in a low-vol drifting-up
+market (the 58-day window), wider condor body + narrow wings
+captures more theta. BUT — the 60-day window is anomalously calm
+(no major drawdown regime). 25-delta would crater in a high-vol
+environment. **Recommendation: ship 16-delta (V5 canonical) live,
+keep 25-delta as an option for known-quiet periods only.**
+
+### D28 — Top-20 tuning suggestions to ship as "V5b" variant
+
+If sweep results hold, propose adding **V5b** variant with:
+- `short_delta=0.20` (compromise between 0.16 canonical and 0.25 aggressive)
+- `long_delta=0.03` (sweep consistently preferred narrow long wing)
+- `ivr_min=30` (matches best combos)
+- `profit_target_pct=0.50` (unchanged)
+- `hard_exit_dte=30` (sweep preferred 30 over 21 on this window)
+
+Ship **V5b as a 6th variant** alongside V1-V5 for further validation.
+Track as **ENH-061**.
+
+### D29 — 6 tickers is too narrow; rerun sweep on full 18-ticker universe
+
+This sweep used 6 tickers for speed (SPY/QQQ/COIN/MSTR/AMD/NVDA).
+Before promoting sweep winners to live, rerun the top-20 combos on
+the full 18-ticker universe to check they hold up on less-volatile
+names (AAPL/MSFT/INTC/etc.).
+
+---
+
+## Final sweep results (603 combos × 6 tickers, 58-day 5m)
+
+**Every single top-20 combo has the same shape.** That's the
+strongest signal — the optimum is not a single pinpoint but a
+well-defined parameter region.
+
+### The winning region
+
+| Parameter | Winning value | Canonical literature |
+|-----------|--------------|---------------------|
+| short_delta | **0.25** | 0.16 |
+| long_delta | 0.03-0.05 | 0.05 |
+| ivr_min | **≥ 50** | 30 |
+| profit_target_pct | 0.25-0.50 | 0.50 |
+| hard_exit_dte | 21-30 | 21 |
+| target_dte | 30 or 45 | 45 |
+
+### Top 5 absolute P&L
+| # | short/long Δ | IVR | PT | HARD | DTE | Trades | Win% | P&L | Max DD |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 0.25 / 0.03 | 50 | 50% | 30 | 45 | 28 | **92.9%** | **+$71,640** | -$894 |
+| 2 | 0.25 / 0.05 | 50 | 25% | 30 | 45 | 30 | 93.3% | +$69,173 | -$697 |
+| 3 | 0.25 / 0.05 | 50 | 25% | 30 | 45 | 30 | 93.3% | +$68,833 | -$697 |
+| 4 | 0.25 / 0.05 | 50 | 50% | 30 | 45 | 27 | 92.6% | +$66,934 | -$697 |
+| 5 | 0.25 / 0.03 | 50 | 25% | 21 | 30 | 34 | 94.1% | +$65,619 | -$1,001 |
+
+### D30 — 92%+ win rates are SUSPICIOUSLY clean
+
+Every top-20 combo has 85-94% win rate. This is plausible for
+short-premium strategies in a drift-higher, low-vol 60-day window
+(which Feb-Apr 2026 appears to have been), BUT it's also a red
+flag for:
+
+- **Small-sample bias**: 20-30 trades per ticker across 6 tickers
+  is statistically thin; one nasty tail event could flip the sign.
+- **Regime-dependence**: IVR ≥ 50 gate means these only traded in
+  high-IV pockets which, in a calm window, means right AFTER
+  short-lived vol spikes when mean reversion was in play.
+- **Model optimism**: My sim ignores slippage and commissions.
+  0.25 short legs have more premium but also more volume /
+  higher bid-ask → real-world slippage eats more per trade.
+- **25-delta catastrophe risk**: In a true vol-expansion regime
+  (April 2018, March 2020), 25-delta short condors would lose
+  MASSIVELY. Could wipe out 6+ months of gains in a week.
+
+### D31 — Ship V5b "sweep-winner" variant live alongside V5 canonical
+
+Adopt the sweep winner as a NEW variant **V5b** so we can watch V5
+(canonical literature) vs V5b (optimized for this regime)
+side-by-side on paper. Settings for V5b:
+- short_delta = 0.25
+- long_delta = 0.03
+- ivr_min = 50
+- profit_target_pct = 0.50
+- hard_exit_dte = 30
+- target_dte = 45
+- Everything else unchanged from V5_HEDGED
+
+**V5b will be registered as strategy_id 361 (v5b_sweep_winner).**
+Track as ENH-061; ship TOMORROW morning.
+
+### D32 — Rerun sweep on full 18-ticker universe as validation
+
+The winning region held across 6 high-vol tickers. Need to re-
+validate on the less-volatile 12 (AAPL, MSFT, INTC, DELL, etc.).
+If 25-delta breaks down on calmer names, V5b should be limited
+to high-vol tier (MSTR, COIN, AMD, TSLA, NVDA). Queue as
+follow-up.
+
+### D33 — Ordering for live paper tomorrow
+
+Ranked by what we learn per hour of market time:
+
+1. **V1 + V5 (canonical)** — baseline vs filter/hedge upgrade.
+   Most interpretable comparison. Most volume.
+2. **V5b (sweep-winner)** — aggressive 25-delta configuration.
+   Tests whether sweep optimum holds out-of-sample.
+3. **V2 + V3** — negative-control validation. Should lose money
+   (sweep + 60-day both say so). If they don't, that's a sim bug.
+4. **V4** — between V3 and V5 by design. Sanity check.
+
+All 5 (+ V5b) run concurrently across the 12 DN tickers. That's 6
+strategies × 12 tickers = 72 parallel scanners tomorrow. The
+multi-strategy infrastructure handles this fine (we verified
+earlier with 4 strategies × 18 tickers).

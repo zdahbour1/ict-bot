@@ -29,7 +29,7 @@ import pandas as pd
 from strategy.base_strategy import BaseStrategy, LegSpec, Signal, StrategyRegistry
 from strategy.delta_neutral_variants import (
     DNVariant, V1_BASELINE, V2_HOLD_DAY, V3_PHASEB,
-    V4_FILTERED, V5_HEDGED,
+    V4_FILTERED, V5_HEDGED, V5B_SWEEP_WINNER,
 )
 from strategy.delta_neutral_strategy import (
     _next_expiry_yyyymmdd, _format_occ, _round_to_interval,
@@ -269,3 +269,10 @@ class DNVariantStrategyV4Filtered(DNVariantStrategy):
 @StrategyRegistry.register
 class DNVariantStrategyV5Hedged(DNVariantStrategy):
     VARIANT = V5_HEDGED
+
+
+@StrategyRegistry.register
+class DNVariantStrategyV5bSweepWinner(DNVariantStrategy):
+    """ENH-061 — sweep-optimized configuration from 2026-04-23
+    603-combo scan. Ships alongside V5 canonical for live A/B."""
+    VARIANT = V5B_SWEEP_WINNER
