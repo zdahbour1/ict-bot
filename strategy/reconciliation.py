@@ -220,6 +220,13 @@ def _reconcile(client, exit_manager, ib_positions):
         log.info(f"[RECONCILE] PASS 2: {ticker} {sym} (conId={con_id}) "
                  f"— on IB but NOT in DB → adopting")
 
+        # ── Try to recover the original orderRef from IB so adopted
+        # positions keep their strategy attribution (ict-SPY-260424-01
+        # etc.). If IB held it across our disconnect, this is the
+        # cleanest trail. If not, tag it as "adopted-TICKER-YYMMDD-NN"
+        # so the user can see at a glance it's an orphan-adopt, not
+        # a fresh ICT signal.
+        adopted_ref = _resolve_adopted_order_ref(pos, ticker)
         trade = {
             "ticker": ticker,
             "symbol": sym,
@@ -233,6 +240,10 @@ def _reconcile(client, exit_manager, ib_positions):
             "_adopted": True,
             "peak_pnl_pct": 0.0,
             "dynamic_sl_pct": -config.STOP_LOSS,
+            # Always set a client_trade_id so the UI's Order Ref column
+            # is never blank; format makes the adopt origin obvious.
+            "client_trade_id": adopted_ref,
+            "signal_type": "ORPHAN_ADOPTED",
         }
 
         # Add to exit manager (writes to DB via add_trade)
@@ -638,6 +649,42 @@ def _restore_brackets_for(session, client, trade_id: int, ticker: str, symbol: s
                "tp_price": tp_price, "sl_price": sl_price,
                "oca_group": result.get("oca_group")},
     )
+
+
+def _resolve_adopted_order_ref(pos: dict, ticker: str) -> str:
+    """Decide what to write into ``client_trade_id`` for an adopted orphan.
+
+    Priority order:
+    1. ``pos['orderRef']`` — if IB still carries the original ref
+       from the placing client, use it verbatim (strategy stays
+       attributed).
+    2. Generate a synthetic ``adopted-TICKER-YYMMDD-NN`` so the Trades
+       tab Order Ref column is never blank and the user can tell at a
+       glance this came from orphan-adopt, not a fresh signal.
+    """
+    candidate = (pos.get("orderRef") or "").strip()
+    if candidate:
+        return candidate[:40]
+    # Synthetic fallback — increments per-day via a quick DB lookup
+    try:
+        from db.connection import get_session
+        from datetime import date
+        session = get_session()
+        if session is None:
+            return f"adopted-{ticker}-{date.today().strftime('%y%m%d')}-01"[:40]
+        try:
+            stem = f"adopted-{ticker}-{date.today().strftime('%y%m%d')}-"
+            row = session.execute(text(
+                "SELECT COUNT(*) FROM trades "
+                "WHERE client_trade_id LIKE :p"
+            ), {"p": stem + "%"}).fetchone()
+            n = int(row[0] if row else 0) + 1
+            return f"{stem}{n:02d}"[:40]
+        finally:
+            session.close()
+    except Exception:
+        from datetime import date
+        return f"adopted-{ticker}-{date.today().strftime('%y%m%d')}-01"[:40]
 
 
 def _pass5_cancel_unreferenced_brackets(client) -> int:
