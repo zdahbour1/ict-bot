@@ -261,13 +261,45 @@ def run_variant_backtest(
             # Reprice legs; decide exit
             elapsed_days = max((ts - open_trade["_entry_ts"]).total_seconds() / 86400.0, 0.01)
             remaining_dte = max(open_trade["_entry_dte"] - elapsed_days, 0.01)
+
+            # ENH-066 — delta-hedge rebalance step (Class B only).
+            # Live behavior: every 30s the bot computes net option
+            # delta + stock hedge and rebalances if outside the band.
+            # Sim approximation: rebalance on every bar (5 min) which
+            # is more conservative (more trades, more cost). Hedge
+            # cash flows are tracked on open_trade.hedge_pnl for the
+            # final P&L roll-up.
+            if variant.delta_hedge:
+                band = (variant.hedge_delta_band_shares
+                         if variant.hedge_delta_band_shares > 0 else 20)
+                qty_change, cash_flow = _rebalance_hedge(
+                    open_trade, current_price,
+                    remaining_dte, sigma_default, band)
+                if qty_change != 0:
+                    open_trade["hedge_shares"] = (
+                        int(open_trade.get("hedge_shares") or 0)
+                        + qty_change)
+                    open_trade["hedge_pnl"] = (
+                        float(open_trade.get("hedge_pnl") or 0.0)
+                        + cash_flow)
+                    open_trade["hedge_rebalance_count"] = (
+                        int(open_trade.get("hedge_rebalance_count") or 0)
+                        + 1)
+
             # Combined option P&L based on current prices
             net_now = _net_credit(open_trade["legs"], current_price,
                                    remaining_dte, sigma_default)
             entry_net = open_trade["_entry_net_credit"]
             # For a credit spread we want net_now to shrink (we close cheaper)
             pnl_fraction = (entry_net - net_now) / abs(entry_net) if entry_net != 0 else 0
-            pnl_usd = (entry_net - net_now) * 100 * open_trade["contracts"]
+            opt_pnl_usd = (entry_net - net_now) * 100 * open_trade["contracts"]
+            # Hedge P&L marked-to-market: running cash flows + current
+            # value of held shares.
+            hedge_mtm = (
+                float(open_trade.get("hedge_pnl") or 0.0)
+                + int(open_trade.get("hedge_shares") or 0) * current_price
+            ) if variant.delta_hedge else 0.0
+            pnl_usd = opt_pnl_usd + hedge_mtm
             exit_reason = None
 
             # 1) Profit target
@@ -287,15 +319,31 @@ def run_variant_backtest(
                 exit_reason = "STOP_LOSS"
 
             if exit_reason:
+                # Realize hedge P&L by flattening at current price
+                # (mirrors the live close path where stock is sold/
+                # bought to zero out hedge_shares before status flip).
+                final_hedge_pnl = (
+                    _hedge_pnl_at_close(open_trade, current_price)
+                    if variant.delta_hedge else 0.0
+                )
+                final_pnl_usd = opt_pnl_usd + final_hedge_pnl
                 open_trade.update({
                     "exit_time": ts.to_pydatetime(),
                     "exit_reason": exit_reason,
-                    "exit_result": "WIN" if pnl_usd > 0 else "LOSS" if pnl_usd < 0 else "SCRATCH",
-                    "pnl_usd": pnl_usd,
+                    "exit_result": ("WIN" if final_pnl_usd > 0
+                                     else "LOSS" if final_pnl_usd < 0
+                                     else "SCRATCH"),
+                    "pnl_usd": final_pnl_usd,
+                    "opt_pnl_usd": opt_pnl_usd,
+                    "hedge_pnl_usd": final_hedge_pnl,
                     "pnl_pct": pnl_fraction,
                     "hold_days": elapsed_days,
+                    "final_hedge_shares": int(open_trade.get("hedge_shares") or 0),
+                    "hedge_rebalance_count": int(
+                        open_trade.get("hedge_rebalance_count") or 0),
                 })
-                result.trades.append({k: v for k, v in open_trade.items() if not k.startswith("_")})
+                result.trades.append({k: v for k, v in open_trade.items()
+                                       if not k.startswith("_")})
                 last_exit_idx = i
                 open_trade = None
                 continue
@@ -363,6 +411,14 @@ def run_variant_backtest(
             "_entry_ts": ts,
             "_entry_dte": dte,
             "_entry_net_credit": entry_net,
+            # ENH-066 hedge state — only used when variant.delta_hedge.
+            # hedge_shares: signed int (long stock = +, short = −).
+            # hedge_pnl: running cash flow from rebalance trades only;
+            #            does NOT include MTM of currently-held shares.
+            #            Final pnl_usd folds in MTM via _hedge_pnl_at_close.
+            "hedge_shares": 0,
+            "hedge_pnl": 0.0,
+            "hedge_rebalance_count": 0,
         }
         last_entry_day = bar_day
 
@@ -375,16 +431,29 @@ def run_variant_backtest(
         net_now = _net_credit(open_trade["legs"], current_price, remaining_dte, sigma_default)
         entry_net = open_trade["_entry_net_credit"]
         pnl_fraction = (entry_net - net_now) / abs(entry_net) if entry_net != 0 else 0
-        pnl_usd = (entry_net - net_now) * 100 * open_trade["contracts"]
+        opt_pnl_usd = (entry_net - net_now) * 100 * open_trade["contracts"]
+        final_hedge_pnl = (
+            _hedge_pnl_at_close(open_trade, current_price)
+            if variant.delta_hedge else 0.0
+        )
+        final_pnl_usd = opt_pnl_usd + final_hedge_pnl
         open_trade.update({
             "exit_time": ts.to_pydatetime(),
             "exit_reason": "END_OF_RANGE",
-            "exit_result": "WIN" if pnl_usd > 0 else "LOSS" if pnl_usd < 0 else "SCRATCH",
-            "pnl_usd": pnl_usd,
+            "exit_result": ("WIN" if final_pnl_usd > 0
+                             else "LOSS" if final_pnl_usd < 0
+                             else "SCRATCH"),
+            "pnl_usd": final_pnl_usd,
+            "opt_pnl_usd": opt_pnl_usd,
+            "hedge_pnl_usd": final_hedge_pnl,
             "pnl_pct": pnl_fraction,
             "hold_days": elapsed_days,
+            "final_hedge_shares": int(open_trade.get("hedge_shares") or 0),
+            "hedge_rebalance_count": int(
+                open_trade.get("hedge_rebalance_count") or 0),
         })
-        result.trades.append({k: v for k, v in open_trade.items() if not k.startswith("_")})
+        result.trades.append({k: v for k, v in open_trade.items()
+                               if not k.startswith("_")})
     return result
 
 
@@ -403,6 +472,89 @@ def _net_credit(legs: list[dict], underlying: float, dte_days: float,
         else:
             net -= px
     return net
+
+
+# ── Delta-hedge simulation (Phase 3 backtest support, ENH-066 2026-04-24) ──
+#
+# Mirrors what live ``strategy/delta_hedger.py`` does: every N bars
+# (proxy for "every 30 seconds" intra-bar), compute the aggregate
+# share-equivalent delta of the open option legs, and if it has
+# drifted beyond ``hedge_band_shares`` of the current hedge, fire a
+# stock buy/sell to flatten back to zero. The simulation tracks a
+# signed ``hedge_shares`` integer and a running ``hedge_pnl`` for the
+# stock trades. On exit, the hedge is flattened at the current price
+# and its P&L is rolled into the trade's net P&L.
+#
+# Both the live hedger and this sim must use the SAME math so the
+# backtest's win-rate / Sharpe predictions actually generalize.
+
+def _net_option_delta_shares(legs: list[dict], underlying: float,
+                              dte_days: float, sigma: float,
+                              contracts: int) -> float:
+    """Aggregate option delta expressed as share-equivalents.
+
+    For each leg: delta = bs_delta * contracts * 100 * sign,
+    sign = +1 for LONG, -1 for SHORT. Sum across legs.
+
+    Positive return = position is net LONG the underlying → SELL stock
+    to flatten. Negative = net SHORT → BUY stock.
+    """
+    T = max(dte_days, 0.01) / 365.0
+    total = 0.0
+    for leg in legs:
+        right = leg["right"]
+        strike = float(leg["strike"])
+        sign = +1 if leg["direction"] == "LONG" else -1
+        g = bs_greeks(underlying, strike, T, 0.04, sigma, right)
+        total += sign * g.delta * contracts * 100
+    return total
+
+
+def _rebalance_hedge(open_trade: dict, underlying: float,
+                      dte_days: float, sigma: float,
+                      band_shares: int) -> tuple[int, float]:
+    """Compute (qty_change, cash_flow) needed to rebalance the hedge.
+
+    Reads current ``hedge_shares`` from open_trade, returns:
+      qty_change: signed shares to add (+BUY, -SELL)
+      cash_flow:  signed dollars to add to running hedge_pnl
+                  (positive = cash IN to us; negative = cash OUT)
+
+    Returns (0, 0.0) when within band. Caller updates open_trade's
+    ``hedge_shares`` += qty_change and ``hedge_pnl`` += cash_flow,
+    and increments ``hedge_rebalance_count``.
+    """
+    contracts = int(open_trade.get("contracts") or 1)
+    legs = open_trade["legs"]
+    current_hedge = int(open_trade.get("hedge_shares") or 0)
+    net_opt_delta = _net_option_delta_shares(
+        legs, underlying, dte_days, sigma, contracts)
+    # residual: option delta + existing stock hedge.
+    # Positive residual = position is net LONG → need to SHORT shares
+    #                     to flatten (negative qty_change).
+    # Negative residual = net SHORT → need to BUY shares
+    #                     (positive qty_change).
+    residual = net_opt_delta + current_hedge
+    if abs(residual) <= band_shares:
+        return (0, 0.0)
+    qty_change = -int(round(residual))         # signed shares to add
+    cash_flow = -qty_change * underlying        # +received / -paid
+    return (qty_change, cash_flow)
+
+
+def _hedge_pnl_at_close(open_trade: dict, exit_price: float) -> float:
+    """Realize the hedge by flattening at exit price.
+
+    P&L of the stock hedge = mark_to_market - cost_basis. When the
+    sim tracks ``hedge_pnl`` cash-in/cash-out as we rebalance, the
+    final realization is just hedge_shares × exit_price added to the
+    running cash-flow tally (positive = received from the flatten).
+    """
+    hedge_shares = int(open_trade.get("hedge_shares") or 0)
+    running_pnl = float(open_trade.get("hedge_pnl") or 0.0)
+    # Flattening: opposite sign of hedge_shares times exit_price
+    flatten_cash = hedge_shares * exit_price   # positive means we receive
+    return running_pnl + flatten_cash
 
 
 def _is_last_bar_of_day(bars: pd.DataFrame, i: int) -> bool:

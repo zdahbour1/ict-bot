@@ -22,7 +22,10 @@ class TestVariantRegistry:
         assert V5B_SWEEP_WINNER.long_delta == 0.03
         assert V5B_SWEEP_WINNER.ivr_min == 50.0
         assert V5B_SWEEP_WINNER.hard_exit_dte == 30
-        assert V5B_SWEEP_WINNER.delta_hedge is True
+        # ENH-066 (2026-04-24): hedge-validation backtest reclassified
+        # V5b as Class A (no hedge) — hedging cost $1,965 over 26 trades.
+        # See docs/hedge_validation_2026-04-24.md.
+        assert V5B_SWEEP_WINNER.delta_hedge is False
 
     def test_get_variant_unknown_raises(self):
         from strategy.delta_neutral_variants import get_variant

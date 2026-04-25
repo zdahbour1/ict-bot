@@ -162,6 +162,13 @@ V5_HEDGED = DNVariant(
 # long / IVR≥50 / 50% profit target / 30-DTE hard exit region; this
 # variant locks that in so V5_HEDGED (literature canonical) and V5B
 # (regime-optimized) can be compared head-to-head on live paper.
+#
+# ENH-066 (2026-04-24): hedge-validation backtest showed delta_hedge
+# REDUCES V5b P&L (-$1,965 hedge cost over 26 trades) because the
+# IVR≥50 filter already enters only at rich premium, where the
+# 25Δ/3Δ structure has inherent gamma protection. Reclassified as
+# Class A (defined-risk, no hedge) — uses Phase 2 envelope brackets,
+# not Phase 3 bot-managed exits.
 V5B_SWEEP_WINNER = DNVariant(
     name="v5b_sweep_winner",
     label="V5b",
@@ -174,7 +181,7 @@ V5B_SWEEP_WINNER = DNVariant(
     profit_target_pct=0.50,
     hard_exit_dte=30,                    # sweep preferred 30 over 21
     sizing_mode="ivr_bucketed",
-    delta_hedge=True,
+    delta_hedge=False,                   # ENH-066: hedging reduces P&L here
     gamma_vega_caps=True,
 )
 
